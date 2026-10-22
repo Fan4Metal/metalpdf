@@ -125,10 +125,12 @@ impl Layout {
         Layout { mode, scale, turns, pages, size: [doc_width, height] }
     }
 
-    /// The scroll offset (document y at the top of the view) for `anchor`.
+    /// The scroll offset (document y at the top of the view) for `anchor`:
+    /// offset 0 puts the gap above the page at the top of the view, so a
+    /// page jumped to keeps its margin.
     pub fn scroll_of(&self, anchor: Anchor) -> f32 {
         let Some(page) = self.pages.get(anchor.page) else { return 0.0 };
-        let y = page[1] + anchor.offset * page[3];
+        let y = page[1] - GAP + anchor.offset * page[3];
         y.clamp(0.0, (self.size[1] - 1.0).max(0.0))
     }
 
@@ -141,14 +143,14 @@ impl Layout {
         if self.mode == ViewMode::Single {
             let i = self.pages.iter().position(|p| p[3] > 0.0).unwrap_or(0);
             let p = self.pages[i];
-            return Anchor { page: i, offset: if p[3] > 0.0 { (scroll - p[1]) / p[3] } else { 0.0 } };
+            return Anchor { page: i, offset: if p[3] > 0.0 { (scroll - p[1] + GAP) / p[3] } else { 0.0 } };
         }
         let scroll = scroll.max(0.0);
         // The first page whose bottom is below the view's top; the gap above
-        // a page belongs to that page (a negative offset).
+        // a page belongs to that page.
         let i = self.pages.partition_point(|p| p[1] + p[3] <= scroll).min(self.pages.len() - 1);
         let p = self.pages[i];
-        let offset = if p[3] > 0.0 { (scroll - p[1]) / p[3] } else { 0.0 };
+        let offset = if p[3] > 0.0 { (scroll - p[1] + GAP) / p[3] } else { 0.0 };
         let _ = viewport_height;
         Anchor { page: i, offset }
     }
@@ -215,6 +217,20 @@ pub fn zoom_of_scale(scale: f32) -> f32 {
 /// by.
 pub fn pixel_width(size: [f32; 2], scale: f32, ppp: f32) -> u32 {
     (size[0] * scale * ppp).round().clamp(1.0, 1.0e6) as u32
+}
+
+/// The pixel width a page of `size` (PDF points, before the viewer's
+/// `turns`) is rendered at for `zoom` in a view of `viewport` points on a
+/// display of `ppp` pixels per point. The engine's first render and the
+/// UI's first frame both come here, so they agree on the key.
+pub fn render_width(size: [f32; 2], zoom: ZoomSetting, turns: u8, viewport: [f32; 2], ppp: f32) -> u32 {
+    let turned = turned(size, turns);
+    let scale = match zoom {
+        ZoomSetting::Scale(z) => z.clamp(MIN_ZOOM, MAX_ZOOM) * POINT_SCALE,
+        ZoomSetting::FitWidth => fit_width_scale(turned, viewport),
+        ZoomSetting::FitPage => fit_page_scale(turned, viewport),
+    };
+    pixel_width(turned, scale, ppp)
 }
 
 #[cfg(test)]
@@ -289,14 +305,15 @@ mod tests {
         assert_eq!(layout.visible(h * 0.5, 800.0), 0..2);
         assert_eq!(layout.current(h * 0.5, 800.0), 0);
         assert_eq!(layout.current(h * 0.9, 800.0), 1);
-        // Within the gap above page 3.
+        // Within the gap above page 3: that page, less than a gap down.
         let a = layout.anchor_at(layout.pages[3][1] - GAP / 2.0, 800.0);
         assert_eq!(a.page, 3);
-        assert!(a.offset < 0.0);
-        // The page's own top.
+        assert!(a.offset > 0.0 && a.offset * layout.pages[3][3] < GAP);
+        // The page jumped to keeps its gap above.
         let top = layout.scroll_of(Layout::anchor_to_page(7));
-        assert!((top - layout.pages[7][1]).abs() < 0.01);
+        assert!((top - (layout.pages[7][1] - GAP)).abs() < 0.01);
         assert_eq!(layout.anchor_at(top, 800.0).page, 7);
+        assert_eq!(layout.scroll_of(Anchor::default()), 0.0);
     }
 
     #[test]

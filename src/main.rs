@@ -9,35 +9,64 @@
 mod i18n;
 
 mod app;
+mod assoc;
 mod bench;
+mod cache;
 mod caption;
+mod dialog;
+mod document;
+mod engine;
 mod icon;
 mod layout;
 mod pdfium;
+mod pixels;
+mod placement;
 mod settings;
+mod style;
+mod textures;
 mod ui;
 mod update;
+mod view;
 mod win;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 /// The display name, as people read it: the window title, About, the
 /// panic message, the User-Agent of the update check. The identifier
 /// (`metalpdf`) is the Cargo package, the exe and the repository.
 pub const APP_NAME: &str = "MetalPDF";
-/// eframe app id; also names the settings folder in `%APPDATA%` (unless the
-/// copy is portable, see `settings::location`).
+/// eframe app id.
 pub const APP_ID: &str = "MetalPDF";
 /// Version from Cargo.toml, shown in About; a development version
 /// ("0.1.0-dev") carries the commit it was built from (`build.rs`).
 pub const VERSION: &str = env!("METALPDF_VERSION");
+/// The window's size in points on the first run.
+pub const DEFAULT_SIZE: [f32; 2] = [1100.0, 800.0];
+pub const MIN_SIZE: [f32; 2] = [480.0, 320.0];
+
+/// The window was saved maximized: `App::new` maximizes it while it is
+/// still hidden (made maximized, winit shows it white before its first
+/// frame).
+pub static MAXIMIZE_WHEN_SHOWN: AtomicBool = AtomicBool::new(false);
+
+static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Time since `main` began, for the trace marks.
+pub fn since_start() -> std::time::Duration {
+    START.get().map_or(std::time::Duration::ZERO, |s| s.elapsed())
+}
 
 fn main() -> eframe::Result {
-    env_logger::init();
+    let _ = START.set(Instant::now());
+    init_logging();
     install_panic_hook();
 
     // The command line modes. `args_os`: `args` panics on an argument that
     // is not valid Unicode.
+    let mut files: Vec<PathBuf> = Vec::new();
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -46,8 +75,8 @@ fn main() -> eframe::Result {
                 // A `.png` name gets the 256-pixel layer (the README's icon).
                 win::attach_parent_console();
                 let out = args.next().unwrap_or_else(|| "app.ico".into());
-                let result = if std::path::Path::new(&out).extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
-                    bench::write_rgba_png(std::path::Path::new(&out), embedded_icon(256), 256, 256)
+                let result = if Path::new(&out).extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+                    bench::write_rgba_png(Path::new(&out), embedded_icon(256), 256, 256)
                 } else {
                     std::fs::write(&out, icon::ico(&icon::ICO_SIZES)).map_err(|e| e.to_string())
                 };
@@ -65,7 +94,12 @@ fn main() -> eframe::Result {
             Some("-h" | "--help") => {
                 win::attach_parent_console();
                 println!("{APP_NAME} {VERSION}");
-                println!("metalpdf [--version] [--help] [--export-icon FILE] [--bench FILE.pdf] [FILE.pdf ...]");
+                println!("metalpdf [FILE.pdf ...]");
+                println!("  --register | --unregister   offer MetalPDF for .pdf files in Windows (per user) / withdraw it");
+                println!("  --new-instance              a window of its own instead of a tab in the running one");
+                println!("  --bench FILE.pdf            the engine's timings for one file, no window");
+                println!("  --export-icon FILE.ico|png  the app icon");
+                println!("  --version, --help");
                 return Ok(());
             }
             Some("--bench") => {
@@ -75,25 +109,121 @@ fn main() -> eframe::Result {
                     eprintln!("--bench needs a PDF file");
                     std::process::exit(2);
                 };
-                std::process::exit(bench::run(std::path::Path::new(&file)));
+                std::process::exit(bench::run(Path::new(&file)));
             }
-            _ => {}
+            Some("--register" | "--unregister") => {
+                let register = arg.to_str() == Some("--register");
+                let result = match std::env::current_exe() {
+                    Ok(exe) if register => assoc::register(&exe),
+                    Ok(_) => assoc::unregister(),
+                    Err(e) => Err(e.to_string()),
+                };
+                if let Err(e) = result {
+                    win::error_box(APP_NAME, &e);
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            Some("--new-instance") => {}
+            Some(flag) if flag.starts_with("--") => log::warn!("unknown option {flag}"),
+            _ => files.push(normalize(Path::new(&arg))),
         }
     }
+    files.dedup_by(|a, b| settings::same_path(a, b));
 
+    let settings = settings::Settings::load();
+    // The language before anything is shown (About may change it later).
+    i18n::set_lang(settings.language.resolve());
     let stored = settings::location();
+
+    // The engine starts now, opening and rendering the first file while
+    // the window is made (~150 ms): the first frame finds the page ready.
+    let first_id: engine::DocId = 1;
+    let initial = files.first().map(|path| {
+        let position = settings.position(path);
+        let first = engine::FirstRender {
+            viewport: predicted_viewport(&settings),
+            pixels_per_point: settings.window.map_or_else(system_scale, |w| w.scale_factor),
+            zoom: position.map_or(settings.zoom, |p| p.zoom),
+            turns: position.map_or(0, |p| p.rotation % 4),
+            page: position.map_or(0, |p| p.page),
+        };
+        (first_id, path.clone(), first)
+    });
+    let engine = engine::Engine::start(initial);
+    log::debug!("engine started at {:.0} ms", since_start().as_secs_f64() * 1e3);
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(APP_NAME)
+        .with_inner_size(DEFAULT_SIZE)
+        .with_min_inner_size(MIN_SIZE)
+        .with_drag_and_drop(true)
+        .with_icon(window_icon());
+    if let Some(w) = settings.window {
+        viewport = viewport
+            .with_position([w.x as f32, w.y as f32])
+            .with_inner_size([w.width.max(MIN_SIZE[0] as i32) as f32, w.height.max(MIN_SIZE[1] as i32) as f32]);
+        if w.maximized {
+            MAXIMIZE_WHEN_SHOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(APP_NAME)
-            .with_inner_size([1000.0, 700.0])
-            .with_min_inner_size([480.0, 320.0])
-            .with_icon(window_icon()),
+        viewport,
         renderer: eframe::Renderer::Glow,
         // Centre only on the first run; later runs restore the saved window.
-        centered: !stored.has_saved(),
+        centered: !stored.has_saved() || settings.window.is_none(),
         ..Default::default()
     };
-    eframe::run_native(APP_ID, options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    let startup = app::Startup { files, settings, engine, first_id };
+    eframe::run_native(APP_ID, options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, startup)))))
+}
+
+/// The page area's probable size in points, from the saved window: the
+/// window less the toolbar, the status bar and the scroll bar.
+fn predicted_viewport(settings: &settings::Settings) -> [f32; 2] {
+    let (w, h) = settings.window.map_or((DEFAULT_SIZE[0], DEFAULT_SIZE[1]), |g| (g.width as f32, g.height as f32));
+    // The scroll bar floats over the pages, so it takes no width.
+    let sidebar = if settings.sidebar_visible { settings.sidebar_width } else { 0.0 };
+    [(w - sidebar).max(100.0), (h - 34.0 - 30.0).max(100.0)]
+}
+
+/// The primary display's scale factor, for a first run. The process is
+/// made DPI-aware first (winit does the same later, harmlessly): an
+/// unaware process is told 96 dpi whatever the display.
+fn system_scale() -> f32 {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+        fn GetDpiForSystem() -> u32;
+    }
+    const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
+    let dpi = unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        GetDpiForSystem()
+    };
+    if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+}
+
+/// An absolute path as given; Explorer passes a drive root as `C:"`
+/// (the closing quote escaped by the backslash), mended here.
+pub fn normalize(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let path = match text.strip_suffix('"') {
+        Some(root) => PathBuf::from(format!("{root}\\")),
+        None => path.to_path_buf(),
+    };
+    std::path::absolute(&path).unwrap_or(path)
+}
+
+/// `env_logger` at `warn`, or this crate at `debug` with
+/// `METALPDF_TRACE=1` (start-up and render timings).
+fn init_logging() {
+    let mut builder = env_logger::Builder::from_env("METALPDF_LOG");
+    builder.filter_level(log::LevelFilter::Warn);
+    if std::env::var_os("METALPDF_TRACE").is_some_and(|v| v != "0") {
+        builder.filter_module("metalpdf", log::LevelFilter::Debug);
+    }
+    builder.format_timestamp_millis().init();
 }
 
 /// The icon of the window, from the embedded 64-pixel rendering.
@@ -115,8 +245,7 @@ pub fn embedded_icon(size: u32) -> &'static [u8] {
 /// The release build aborts on a panic and has no console, so the window
 /// would vanish without a word: say what happened in a message box. The
 /// default hook still prints it (seen in a debug build). A stack overflow
-/// is not a panic and still ends the process silently. disk_flashlight also
-/// appends the report to `crash.log` next to the settings file.
+/// is not a panic and still ends the process silently.
 fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -127,4 +256,15 @@ fn install_panic_hook() {
         );
         win::error_box(APP_NAME, &text);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_drive_roots_are_mended() {
+        assert_eq!(normalize(Path::new("C:\"")), PathBuf::from("C:\\"));
+        assert!(normalize(Path::new("a.pdf")).is_absolute());
+    }
 }

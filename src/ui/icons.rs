@@ -121,6 +121,13 @@ pub enum Icon {
     /// Books on a shelf, filled, the last one leaning on its neighbour:
     /// the media library (metalamp: its folders).
     Library,
+    /// Pages one under another: the continuous view (MetalPDF).
+    Continuous,
+    /// One page with a folded corner, filled lines: one page at a time
+    /// (MetalPDF).
+    SinglePage,
+    /// A panel at the left of a window: the sidebar toggle (MetalPDF).
+    Sidebar,
 }
 
 impl Icon {
@@ -182,6 +189,9 @@ impl Icon {
         Icon::Refresh,
         Icon::Image,
         Icon::Library,
+        Icon::Continuous,
+        Icon::SinglePage,
+        Icon::Sidebar,
     ];
 }
 
@@ -361,6 +371,27 @@ pub fn paint(painter: &Painter, icon: Icon, c: Pos2, size: f32, color: Color32, 
         }
         Icon::Folder => {
             painter.add(closed(&[(-6.5, -5.0), (-2.0, -5.0), (-0.5, -3.0), (6.5, -3.0), (6.5, 5.0), (-6.5, 5.0)]));
+        }
+        Icon::Continuous => {
+            // Two pages one under another, the lower one cut by the edge.
+            painter.rect_stroke(rect(-4.5, -7.0, 9.0, 7.5), 1.0 * k, line, StrokeKind::Middle);
+            painter.add(polyline(&[(-4.5, 7.0), (-4.5, 2.5), (4.5, 2.5), (4.5, 7.0)]));
+            painter.line_segment([p(-2.5, -4.5), p(2.5, -4.5)], pen(1.0));
+            painter.line_segment([p(-2.5, -2.0), p(2.5, -2.0)], pen(1.0));
+        }
+        Icon::SinglePage => {
+            // A page with a folded corner and two lines of text.
+            painter.add(closed(&[(-4.5, -6.0), (1.0, -6.0), (4.5, -2.5), (4.5, 6.0), (-4.5, 6.0)]));
+            painter.add(polyline(&[(1.0, -6.0), (1.0, -2.5), (4.5, -2.5)]));
+            painter.line_segment([p(-2.5, 0.5), p(2.5, 0.5)], pen(1.0));
+            painter.line_segment([p(-2.5, 3.0), p(2.5, 3.0)], pen(1.0));
+        }
+        Icon::Sidebar => {
+            // A window with a panel on its left.
+            painter.rect_stroke(rect(-6.5, -5.0, 13.0, 10.0), 1.5 * k, line, StrokeKind::Middle);
+            painter.line_segment([p(-2.0, -5.0), p(-2.0, 5.0)], line);
+            painter.line_segment([p(-5.0, -2.0), p(-3.5, -2.0)], pen(1.0));
+            painter.line_segment([p(-5.0, 0.0), p(-3.5, 0.0)], pen(1.0));
         }
         Icon::File => {
             // A page with its top right corner folded.

@@ -4,8 +4,10 @@
 //! dialog; the start screen (`start`).
 
 pub mod about;
+pub mod home;
 pub mod icons;
-pub mod start;
+pub mod status;
+pub mod view;
 
 use egui::{Response, TextureHandle, TextureOptions, ThemePreference, Ui};
 use icons::Icon;
