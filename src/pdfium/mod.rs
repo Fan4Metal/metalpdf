@@ -959,7 +959,15 @@ impl Page {
                 let tagged = name.len() > 7 && name.as_bytes()[6] == b'+';
                 (name, embedded && tagged)
             };
-            out.push(TextObject { index: index as usize, bounds: [l, b, r, t], text, font: name, font_size: size, subset });
+            // The size as drawn: the object's matrix scales the font (a
+            // 1 pt font under a 24× matrix is how some generators write).
+            let mut matrix = sys::FS_MATRIX::default();
+            let drawn = if unsafe { (api.FPDFPageObj_GetMatrix)(object, &mut matrix) } != 0 {
+                size * (matrix.a * matrix.a + matrix.b * matrix.b).sqrt().max(0.01)
+            } else {
+                size
+            };
+            out.push(TextObject { index: index as usize, bounds: [l, b, r, t], text, font: name, font_size: drawn, subset });
         }
         out
     }

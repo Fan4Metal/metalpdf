@@ -443,12 +443,14 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 {
                     let screen = page_rect_to_screen(e.rect, turns, size, rect);
                     let scale = rect.height() / size[1].max(1.0);
+                    // The field's font follows the run's size as drawn; its
+                    // height follows the font, the same for every run of
+                    // that size, centred on the run.
                     let font = egui::FontId::proportional((e.font_size * scale).clamp(8.0, 64.0));
-                    let field = Rect::from_min_size(
-                        screen.min - vec2(4.0, 3.0),
-                        vec2((screen.width() + 40.0).max(120.0), screen.height().max(font.size + 8.0) + 6.0),
-                    );
-                    let widget = egui::TextEdit::singleline(&mut e.text).font(font).margin(vec2(4.0, 3.0));
+                    let height = font.size * 1.35 + 6.0;
+                    let width = (screen.width() + 2.0 * font.size + 8.0).max(120.0);
+                    let field = Rect::from_min_size(pos2(screen.min.x - 4.0, screen.center().y - height / 2.0), vec2(width, height));
+                    let widget = egui::TextEdit::singleline(&mut e.text).font(font).margin(vec2(4.0, 3.0)).vertical_align(egui::Align::Center);
                     let edit = ui.put(field, widget);
                     if std::mem::take(&mut e.fresh) {
                         edit.request_focus();

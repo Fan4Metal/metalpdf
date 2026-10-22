@@ -1134,7 +1134,10 @@ impl App {
         if consume(Modifiers::NONE, Key::Escape)
             && let Some(tab) = self.win().active_tab_mut()
         {
-            if tab.find.open {
+            // The key is consumed here, so the inline editor is let go of here too.
+            if tab.editor.is_some() {
+                tab.editor = None;
+            } else if tab.find.open {
                 tab.find.close();
             } else if tab.image.is_some() {
                 tab.image = None;
@@ -1187,7 +1190,7 @@ impl App {
                 self.save_as(ctx, window, tab);
             }
         }
-        if consume(Modifiers::COMMAND, Key::Z) && !typing {
+        if !typing && consume(Modifiers::COMMAND, Key::Z) {
             let engine = &self.engine;
             if let Some(tab) = self.windows[self.current].active_tab_mut()
                 && tab.doc.edits > 0
@@ -1198,13 +1201,13 @@ impl App {
         }
         // The tool: V selects text, H is the hand.
         for (key, tool) in [(Key::V, crate::settings::Tool::Select), (Key::H, crate::settings::Tool::Hand)] {
-            if consume(Modifiers::NONE, key) && !typing && self.settings.tool != tool {
+            if !typing && consume(Modifiers::NONE, key) && self.settings.tool != tool {
                 self.settings.tool = tool;
                 self.settings_dirty = true;
             }
         }
-        if consume(Modifiers::NONE, Key::E)
-            && !typing
+        if !typing
+            && consume(Modifiers::NONE, Key::E)
             && let Some(tab) = self.win().active_tab_mut()
         {
             tab.editing = !tab.editing;
@@ -1212,7 +1215,9 @@ impl App {
             tab.image = None;
             tab.selection = None;
         }
-        if consume(Modifiers::NONE, Key::Delete) && !typing {
+        // `consume` eats the key: the typing check comes first, else the
+        // text field never sees it.
+        if !typing && consume(Modifiers::NONE, Key::Delete) {
             let engine = &self.engine;
             if let Some(tab) = self.windows[self.current].active_tab_mut()
                 && let Some(sel) = tab.image.take()
