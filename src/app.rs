@@ -20,7 +20,7 @@ use egui::{
 use crate::cache::Textures;
 use crate::dialog::{Ask, Dialogs};
 use crate::document::{DocState, Status};
-use crate::engine::{DocId, Engine, Event, Kind, RenderKey, Request};
+use crate::engine::{DocId, Edit, Engine, Event, Kind, RenderKey, Request};
 use crate::pdfium::Target;
 use crate::pixels::Pixels;
 use crate::settings::{FilePosition, Settings, ThemeSetting, ViewMode, WindowGeometry, ZoomSetting, same_path};
@@ -76,6 +76,8 @@ pub struct Tab {
     /// The text editing mode: text objects are outlined, a click edits.
     pub editing: bool,
     pub editor: Option<InlineEditor>,
+    /// The image selected in the editing mode.
+    pub image: Option<ImageSel>,
     /// A short message for the status bar (an edit refused, a save).
     pub notice: Option<(String, Instant)>,
 }
@@ -90,6 +92,23 @@ pub struct InlineEditor {
     pub font_size: f32,
     /// Just opened: takes the focus.
     pub fresh: bool,
+}
+
+/// An image selected in the editing mode: moved and resized by dragging.
+pub struct ImageSel {
+    pub page: usize,
+    pub object: usize,
+    /// Its box on the unrotated page, in points, as dragged so far.
+    pub rect: [f32; 4],
+    pub drag: Option<ImageDrag>,
+}
+
+pub struct ImageDrag {
+    /// The corner being dragged (0 top left, clockwise, on screen), or
+    /// `None` when the whole picture is moved.
+    pub corner: Option<u8>,
+    pub start: Pos2,
+    pub start_rect: [f32; 4],
 }
 
 /// Something to confirm before it happens.
@@ -121,6 +140,7 @@ impl Tab {
             forward: Vec::new(),
             editing: false,
             editor: None,
+            image: None,
             notice: None,
         }
     }
@@ -617,6 +637,19 @@ impl App {
         );
     }
 
+    /// Ask for the picture to put into image `object` of `page` of tab
+    /// `tab`.
+    fn replace_image_dialog(&mut self, ctx: &egui::Context, tab: u64, page: usize, object: usize) {
+        let hwnd = self.windows[self.current].hwnd;
+        self.dialogs.start(
+            ctx,
+            hwnd,
+            Ask::ReplaceImage { tab, page, object },
+            || rfd::FileDialog::new().add_filter("JPEG and PNG", &["jpg", "jpeg", "png"]),
+            crate::dialog::pick_file,
+        );
+    }
+
     /// The edited document of tab `tab` written to `path`.
     fn save_to(&mut self, tab: u64, path: PathBuf) {
         for window in &mut self.windows {
@@ -639,6 +672,7 @@ impl App {
                 self.engine.request(Request::Open { id: new_id, path: t.path.clone(), password: None, first: None });
                 t.doc = DocState::new(new_id);
                 t.editor = None;
+                t.image = None;
                 t.selection = None;
                 t.find.close();
                 return;
@@ -766,7 +800,7 @@ impl App {
                         | Event::TextLayout { id, .. }
                         | Event::Links { id, .. }
                         | Event::SearchHits { id, .. }
-                        | Event::TextObjects { id, .. }
+                        | Event::Objects { id, .. }
                         | Event::Edited { id, .. }
                         | Event::EditFailed { id, .. }
                         | Event::Saved { id, .. } => *id,
@@ -796,11 +830,16 @@ impl App {
                         continue;
                     }
                     if let Event::Edited { page, .. } = &other {
-                        // The page's renders show the old content.
+                        // The page's renders show the old content; the objects'
+                        // indices may have changed, so nothing stays selected.
                         let page = *page as u32;
                         self.textures.full.remove_page(doc, page);
                         self.textures.preview.remove_page(doc, page);
                         self.uploads.retain(|(k, _)| !(k.doc == doc && k.page == page));
+                        if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
+                            tab.image = None;
+                            tab.editor = None;
+                        }
                     }
                     let engine = &self.engine;
                     if let Event::SearchHits { search, page, hits, done, .. } = &other {
@@ -1017,6 +1056,8 @@ impl App {
         {
             if tab.find.open {
                 tab.find.close();
+            } else if tab.image.is_some() {
+                tab.image = None;
             } else {
                 tab.selection = None;
             }
@@ -1081,7 +1122,16 @@ impl App {
         {
             tab.editing = !tab.editing;
             tab.editor = None;
+            tab.image = None;
             tab.selection = None;
+        }
+        if consume(Modifiers::NONE, Key::Delete) && !typing {
+            let engine = &self.engine;
+            if let Some(tab) = self.windows[self.current].active_tab_mut()
+                && let Some(sel) = tab.image.take()
+            {
+                engine.request(Request::Edit { id: tab.doc.id, edit: Edit::Remove { page: sel.page, object: sel.object } });
+            }
         }
         let count = self.win().tabs.len();
         if count > 1 {
@@ -1199,6 +1249,7 @@ impl App {
                     StatusAction::ToggleEdit => {
                         tab.editing = !tab.editing;
                         tab.editor = None;
+                        tab.image = None;
                         tab.selection = None;
                     }
                 }
@@ -1710,6 +1761,7 @@ impl App {
         let cur = self.current;
         let frame = self.frame;
         let engine = &self.engine;
+        let mut replace_image = None;
         let Some(tab) = self.windows[cur].active_tab_mut() else {
             let action = crate::ui::home::show(ui, &self.settings.recent, self.engine_error.as_deref(), palette, &mut self.start_icon);
             match action {
@@ -1741,8 +1793,9 @@ impl App {
                 }
                 if let Some((page, object)) = out.edit_click
                     && let (Some(objects), Some(text)) = (tab.doc.objects.get(&page), tab.doc.text.get(&page))
-                    && let Some(o) = objects.iter().find(|o| o.index == object)
+                    && let Some(o) = objects.text.iter().find(|o| o.index == object)
                 {
+                    tab.image = None;
                     tab.editor = Some(InlineEditor {
                         page,
                         object,
@@ -1754,12 +1807,32 @@ impl App {
                 }
                 if let Some((page, object, text)) = out.edit_commit {
                     tab.editor = None;
-                    let unchanged = tab.doc.objects.get(&page).and_then(|os| os.iter().find(|o| o.index == object)).is_some_and(|o| o.text == text);
+                    let unchanged = tab.doc.objects.get(&page).and_then(|os| os.text.iter().find(|o| o.index == object)).is_some_and(|o| o.text == text);
                     if !unchanged && !text.trim().is_empty() {
-                        engine.request(Request::EditText { id: tab.doc.id, page, object, text });
+                        engine.request(Request::Edit { id: tab.doc.id, edit: Edit::Text { page, object, text } });
                     }
                 } else if out.edit_cancel {
                     tab.editor = None;
+                }
+                if let Some((page, object, rect)) = out.image_click {
+                    tab.editor = None;
+                    tab.image = Some(ImageSel { page, object, rect, drag: None });
+                }
+                if let Some((page, object, rect)) = out.image_place
+                    && let Some(text) = tab.doc.text.get(&page)
+                {
+                    let bounds = text.rect_to_page_space(rect);
+                    engine.request(Request::Edit { id: tab.doc.id, edit: Edit::Place { page, object, bounds } });
+                }
+                if out.image_delete
+                    && let Some(sel) = tab.image.take()
+                {
+                    engine.request(Request::Edit { id: tab.doc.id, edit: Edit::Remove { page: sel.page, object: sel.object } });
+                }
+                if out.image_replace
+                    && let Some(sel) = tab.image.as_ref()
+                {
+                    replace_image = Some((tab.id, sel.page, sel.object));
                 }
                 if let Some(first) = out.visible.clone().next() {
                     tab.doc.need_sizes_near(engine, first);
@@ -1770,6 +1843,9 @@ impl App {
                 self.wanted.extend(out.wanted);
                 if let Some(target) = out.link {
                     self.follow(target);
+                }
+                if let Some((tab, page, object)) = replace_image {
+                    self.replace_image_dialog(ui.ctx(), tab, page, object);
                 }
             }
             Status::Loading => {
@@ -2099,6 +2175,15 @@ impl eframe::App for App {
                     if let Some(path) = answer.paths.first() {
                         let path = if path.extension().is_none() { path.with_extension("pdf") } else { path.clone() };
                         self.save_to(tab, path);
+                    }
+                }
+                Ask::ReplaceImage { tab, page, object } => {
+                    if let Some(path) = answer.paths.first() {
+                        for window in &self.windows {
+                            if let Some(t) = window.tabs.iter().find(|t| t.id == tab) {
+                                self.engine.request(Request::Edit { id: t.doc.id, edit: Edit::ReplaceImage { page, object, path: path.clone() } });
+                            }
+                        }
                     }
                 }
             }

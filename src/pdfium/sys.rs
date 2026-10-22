@@ -383,6 +383,11 @@ api! {
     FPDFPageObj_Destroy: fn(FPDF_PAGEOBJECT);
     FPDFPageObj_GetType: fn(FPDF_PAGEOBJECT) -> c_int;
     FPDFPageObj_GetBounds: fn(FPDF_PAGEOBJECT, *mut c_float, *mut c_float, *mut c_float, *mut c_float) -> FPDF_BOOL;
+    FPDFPageObj_Transform: fn(FPDF_PAGEOBJECT, c_double, c_double, c_double, c_double, c_double, c_double);
+    FPDFImageObj_LoadJpegFileInline: fn(*mut FPDF_PAGE, c_int, FPDF_PAGEOBJECT, *mut FPDF_FILEACCESS) -> FPDF_BOOL;
+    FPDFImageObj_SetBitmap: fn(*mut FPDF_PAGE, c_int, FPDF_PAGEOBJECT, FPDF_BITMAP) -> FPDF_BOOL;
+    FPDFImageObj_SetMatrix: fn(FPDF_PAGEOBJECT, c_double, c_double, c_double, c_double, c_double, c_double) -> FPDF_BOOL;
+    FPDFImageObj_GetImagePixelSize: fn(FPDF_PAGEOBJECT, *mut c_uint, *mut c_uint) -> FPDF_BOOL;
     FPDFPageObj_GetMatrix: fn(FPDF_PAGEOBJECT, *mut FS_MATRIX) -> FPDF_BOOL;
     FPDFPageObj_SetMatrix: fn(FPDF_PAGEOBJECT, *const FS_MATRIX) -> FPDF_BOOL;
     FPDFPageObj_GetFillColor: fn(FPDF_PAGEOBJECT, *mut c_uint, *mut c_uint, *mut c_uint, *mut c_uint) -> FPDF_BOOL;

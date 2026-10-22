@@ -21,6 +21,8 @@ pub enum Ask {
     Open { window: u64 },
     /// Where to save the edited document of a tab.
     SaveAs { tab: u64 },
+    /// The picture to put into image `object` of `page` of a tab.
+    ReplaceImage { tab: u64, page: usize, object: usize },
 }
 
 impl Ask {
@@ -29,6 +31,7 @@ impl Ask {
         match self {
             Ask::Open { .. } => "open",
             Ask::SaveAs { .. } => "save as",
+            Ask::ReplaceImage { .. } => "replace image",
         }
     }
 }
@@ -102,6 +105,10 @@ impl Dialogs {
 /// The files chosen in an Open dialog.
 pub fn pick_files(dialog: rfd::FileDialog) -> Vec<PathBuf> {
     dialog.pick_files().unwrap_or_default()
+}
+
+pub fn pick_file(dialog: rfd::FileDialog) -> Vec<PathBuf> {
+    dialog.pick_file().into_iter().collect()
 }
 
 pub fn save_file(dialog: rfd::FileDialog) -> Vec<PathBuf> {

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::engine::{DocId, DocInfo, Engine, Event, Request, SIZE_BATCH};
-use crate::pdfium::{Link, OpenError, OutlineItem, TextLayout, TextObject};
+use crate::pdfium::{Link, OpenError, OutlineItem, PageObjects, TextLayout};
 
 /// A page's text with the transform that puts it on the page as shown.
 #[derive(Debug)]
@@ -36,6 +36,23 @@ impl PageText {
     pub fn to_page_points(&self, x: f32, y: f32) -> [f32; 2] {
         let m = self.to_view;
         [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
+    }
+
+    /// A rectangle `[x, y, w, h]` on the unrotated page back to page space
+    /// (left, bottom, right, top): the inverse of `rect_to_page`.
+    pub fn rect_to_page_space(&self, r: [f32; 4]) -> [f32; 4] {
+        let m = self.to_view;
+        let det = m[0] * m[3] - m[1] * m[2];
+        if det.abs() < 1e-9 {
+            return [r[0], r[1], r[0] + r[2], r[1] + r[3]];
+        }
+        let back = |x: f32, y: f32| {
+            let (dx, dy) = (x - m[4], y - m[5]);
+            [(m[3] * dx - m[2] * dy) / det, (-m[1] * dx + m[0] * dy) / det]
+        };
+        let a = back(r[0], r[1]);
+        let b = back(r[0] + r[2], r[1] + r[3]);
+        [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]
     }
 
     /// A page-space rectangle (left, bottom, right, top) as a rectangle on
@@ -78,8 +95,8 @@ pub struct DocState {
     text_asked: HashSet<usize>,
     pub links: HashMap<usize, Arc<Vec<Link>>>,
     links_asked: HashSet<usize>,
-    /// The text objects of the pages asked for (the editing).
-    pub objects: HashMap<usize, Arc<Vec<TextObject>>>,
+    /// The text and image objects of the pages asked for (the editing).
+    pub objects: HashMap<usize, Arc<PageObjects>>,
     objects_asked: HashSet<usize>,
     /// How many edits the document carries; saved ones are kept.
     pub edits: usize,
@@ -177,7 +194,7 @@ impl DocState {
                 self.links.insert(*page, Arc::clone(links));
                 true
             }
-            Event::TextObjects { id, page, objects } if *id == self.id => {
+            Event::Objects { id, page, objects } if *id == self.id => {
                 self.objects.insert(*page, Arc::clone(objects));
                 true
             }
@@ -235,7 +252,7 @@ impl DocState {
     /// Ask for the text objects of `page` once.
     pub fn need_objects(&mut self, engine: &Engine, page: usize) {
         if self.ready() && page < self.page_count && !self.objects.contains_key(&page) && self.objects_asked.insert(page) {
-            engine.request(Request::TextObjects { id: self.id, page });
+            engine.request(Request::Objects { id: self.id, page });
         }
     }
 
@@ -290,9 +307,11 @@ mod tests {
         // An unrotated A4 page: y flipped.
         let text = PageText::new(Arc::new(TextLayout::default()), [1.0, 0.0, 0.0, -1.0, 0.0, 842.0]);
         assert_eq!(text.rect_to_page([72.0, 770.0, 172.0, 794.0]), [72.0, 48.0, 100.0, 24.0]);
+        assert_eq!(text.rect_to_page_space([72.0, 48.0, 100.0, 24.0]), [72.0, 770.0, 172.0, 794.0]);
         // Turned 90° clockwise (page x runs down the view).
         let turned = PageText::new(Arc::new(TextLayout::default()), [0.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         assert_eq!(turned.rect_to_page([10.0, 20.0, 30.0, 50.0]), [20.0, 10.0, 30.0, 20.0]);
+        assert_eq!(turned.rect_to_page_space([20.0, 10.0, 30.0, 20.0]), [10.0, 20.0, 30.0, 50.0]);
     }
 
     #[test]

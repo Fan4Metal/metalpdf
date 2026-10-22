@@ -9,7 +9,7 @@
 
 use egui::{Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
-use crate::app::{InlineEditor, Tab};
+use crate::app::{ImageDrag, ImageSel, InlineEditor, Tab};
 use crate::cache::Textures;
 use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey};
 use crate::layout;
@@ -39,6 +39,14 @@ pub struct ViewOutput {
     /// The inline editor was confirmed with this text.
     pub edit_commit: Option<(usize, usize, String)>,
     pub edit_cancel: bool,
+    /// In the editing mode, an image clicked: page, object and its box on
+    /// the unrotated page.
+    pub image_click: Option<(usize, usize, [f32; 4])>,
+    /// The selected image was dragged to a new box (unrotated page points).
+    pub image_place: Option<(usize, usize, [f32; 4])>,
+    /// The selected image's Replace… or Delete button.
+    pub image_replace: bool,
+    pub image_delete: bool,
 }
 
 /// Draw the pages of `tab` into `ui`.
@@ -65,6 +73,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let find = &tab.find;
     let editing = tab.editing;
     let editor: &mut Option<InlineEditor> = &mut tab.editor;
+    let image: &mut Option<ImageSel> = &mut tab.image;
 
     let scroll = egui::ScrollArea::both()
         .id_salt(("pages", tab.id))
@@ -142,7 +151,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 if editing
                     && let (Some(objects), Some(text)) = (tab.doc.objects.get(&i), text)
                 {
-                    for object in objects.iter() {
+                    for object in objects.text.iter() {
                         let screen = page_rect_to_screen(text.rect_to_page(object.bounds), turns, size, rect).expand(1.0);
                         let under = pointer.is_some_and(|pt| screen.contains(pt));
                         let being_edited = editor.as_ref().is_some_and(|e| e.page == i && e.object == object.index);
@@ -156,6 +165,115 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                             if response.clicked() {
                                 out.edit_click = Some((i, object.index));
                             }
+                        }
+                    }
+                }
+                // The images, outlined; the selected one with handles to move
+                // and resize it, and its buttons.
+                if editing
+                    && let (Some(objects), Some(text)) = (tab.doc.objects.get(&i), text)
+                {
+                    for img in objects.images.iter() {
+                        let selected = image.as_ref().is_some_and(|s| s.page == i && s.object == img.index);
+                        if selected {
+                            continue;
+                        }
+                        let screen = page_rect_to_screen(text.rect_to_page(img.bounds), turns, size, rect);
+                        let under = pointer.is_some_and(|pt| screen.contains(pt));
+                        let color = if under { palette.link } else { palette.link.gamma_multiply(0.45) };
+                        painter.rect_stroke(screen, 1.0, Stroke::new(1.0, color), StrokeKind::Outside);
+                        if under && hovered_link.is_none() {
+                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                            if response.clicked() {
+                                out.image_click = Some((i, img.index, text.rect_to_page(img.bounds)));
+                            }
+                        }
+                    }
+                    if let Some(sel) = image.as_mut()
+                        && sel.page == i
+                    {
+                        let screen = page_rect_to_screen(sel.rect, turns, size, rect);
+                        painter.rect_stroke(screen, 0.0, Stroke::new(2.0, palette.accent), StrokeKind::Outside);
+                        let handle = 8.0;
+                        let corners = [screen.left_top(), screen.right_top(), screen.right_bottom(), screen.left_bottom()];
+                        for c in corners {
+                            painter.rect_filled(Rect::from_center_size(c, vec2(handle, handle)), 1.0, palette.accent);
+                        }
+                        // A press on a corner resizes, inside moves; on release
+                        // the new box goes to the engine.
+                        let press = response.interact_pointer_pos();
+                        if response.drag_started_by(PointerButton::Primary)
+                            && let Some(pt) = press
+                        {
+                            let corner = corners.iter().position(|c| (c.to_vec2() - pt.to_vec2()).length() <= handle);
+                            if corner.is_some() || screen.contains(pt) {
+                                sel.drag = Some(ImageDrag { corner: corner.map(|c| c as u8), start: pt, start_rect: sel.rect });
+                            }
+                        }
+                        if let Some(drag) = sel.drag.as_ref()
+                            && let Some(pt) = press
+                        {
+                            // The pointer's travel in unrotated page points: the
+                            // page's own axes, whatever the turns.
+                            let start = screen_to_page_point(drag.start, turns, size, rect);
+                            let now = screen_to_page_point(pt, turns, size, rect);
+                            let (dx, dy) = (now[0] - start[0], now[1] - start[1]);
+                            let r0 = drag.start_rect;
+                            sel.rect = match drag.corner {
+                                None => [r0[0] + dx, r0[1] + dy, r0[2], r0[3]],
+                                Some(c) => {
+                                    // The corner follows the pointer, the opposite one
+                                    // stays; the proportions are kept.
+                                    let (x0, y0, x1, y1) = (r0[0], r0[1], r0[0] + r0[2], r0[1] + r0[3]);
+                                    let c = corner_on_page(c, turns);
+                                    let (fixed_x, fixed_y) = match c {
+                                        0 => (x1, y1),
+                                        1 => (x0, y1),
+                                        2 => (x0, y0),
+                                        _ => (x1, y0),
+                                    };
+                                    let (moving_x, moving_y) = match c {
+                                        0 => (x0 + dx, y0 + dy),
+                                        1 => (x1 + dx, y0 + dy),
+                                        2 => (x1 + dx, y1 + dy),
+                                        _ => (x0 + dx, y1 + dy),
+                                    };
+                                    let aspect = r0[2] / r0[3].max(1e-3);
+                                    let w = (moving_x - fixed_x).abs().max(4.0);
+                                    let h = (w / aspect).max(4.0);
+                                    let left = if moving_x < fixed_x { fixed_x - w } else { fixed_x };
+                                    let top = if moving_y < fixed_y { fixed_y - h } else { fixed_y };
+                                    [left, top, w, h]
+                                }
+                            };
+                            ui.ctx().set_cursor_icon(if drag.corner.is_some() { CursorIcon::ResizeNwSe } else { CursorIcon::Grabbing });
+                            ui.ctx().request_repaint();
+                        }
+                        if response.drag_stopped()
+                            && let Some(drag) = sel.drag.take()
+                            && sel.rect != drag.start_rect
+                        {
+                            out.image_place = Some((sel.page, sel.object, sel.rect));
+                        }
+                        if sel.drag.is_none()
+                            && let Some(pt) = pointer
+                        {
+                            if corners.iter().any(|c| (c.to_vec2() - pt.to_vec2()).length() <= handle) {
+                                ui.ctx().set_cursor_icon(CursorIcon::ResizeNwSe);
+                            } else if screen.contains(pt) {
+                                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                            }
+                        }
+                        // The buttons under the picture (above it at the page's foot).
+                        let below = screen.max.y + 30.0 < rect.max.y;
+                        let y = if below { screen.max.y + 6.0 } else { screen.min.y - 30.0 };
+                        let bar = Rect::from_min_size(pos2(screen.min.x, y), vec2(200.0, 24.0));
+                        let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                        if bar_ui.button(tr!("Replace…", "Заменить…")).clicked() {
+                            out.image_replace = true;
+                        }
+                        if bar_ui.button(tr!("Delete", "Удалить")).on_hover_text("Del").clicked() {
+                            out.image_delete = true;
                         }
                     }
                 }
@@ -235,10 +353,14 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                     selection = None;
                 }
             }
-            if response.clicked() && hovered_link.is_none() && out.edit_click.is_none() {
+            if response.clicked() && hovered_link.is_none() && out.edit_click.is_none() && out.image_click.is_none() {
                 selection = None;
                 if editor.is_some() {
                     out.edit_cancel = true;
+                }
+                // A click off the selected image lets go of it (not a drag's end).
+                if image.as_ref().is_some_and(|s| s.drag.is_none()) {
+                    *image = None;
                 }
             }
         });
@@ -283,6 +405,12 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     candidates.dedup_by_key(|(key, _, _)| *key);
     out.wanted = candidates.into_iter().map(|(k, t, _)| (k, t)).collect();
     out
+}
+
+/// Which corner of the unrotated page's box a screen corner (0 top left,
+/// clockwise) is, after `turns` quarter turns.
+fn corner_on_page(screen_corner: u8, turns: u8) -> u8 {
+    (screen_corner + 4 - turns % 4) % 4
 }
 
 /// The whole texture.

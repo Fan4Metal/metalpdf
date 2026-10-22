@@ -30,7 +30,7 @@ MetalPDF is a PDF viewer built around one idea: a document should be on screen t
 - **Sidebar** with page thumbnails and the document's outline, both following the page being read.
 - **Find** across the document, with the hits highlighted on the pages; **text selection** by dragging, copied with Ctrl+C.
 - **Links** inside the document and to the web, with a history for going back.
-- **Text editing** (experimental): the text of a line changed in place and the document saved (see [Editing text](#editing-text)).
+- **Editing** (experimental): the text of a line changed in place, pictures moved, resized, replaced or removed, and the document saved (see [Editing text and pictures](#editing-text-and-pictures)).
 - **Forms** are drawn with their field contents; **encrypted** documents ask for their password.
 - **Light, dark or system theme.**
 - **English or Russian interface**: it follows the language of Windows and can be changed in the About window (`F1`).
@@ -75,11 +75,15 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 
 Text is selected by dragging over it, across pages too, and copied with `Ctrl+C`; `Ctrl+A` selects the current page's text, `Esc` clears the selection. The pointer is an I-beam over text and a hand over a link; a link inside the document goes to its target, a web link opens in the browser. `Alt+Left` (or the mouse's back button) returns from a jump made through a link, a bookmark, a thumbnail, the page field or a hit; `Alt+Right` goes again.
 
-### Editing text
+### Editing text and pictures
 
 The editing mode (`E`, or the pencil in the status bar) outlines the text objects of the pages, the runs of text a PDF is made of: usually a line or a part of one. A click on a run opens a field over it; `Enter` replaces the run's text, `Esc` leaves it as it was. `Ctrl+Z` takes the last change back. The pages keep their layout: a longer text runs past where the old one ended, nothing is reflowed.
 
-A run keeps its font when that font can show the new text; a font embedded as a subset of its glyphs cannot, and the run is set in Arial instead, at the same place, size and colour. The changes live in a copy of the document until `Ctrl+S` saves it (a Save As dialog, so the original is replaced only when chosen); closing a tab or quitting with unsaved changes asks first. Signed, tagged (accessible) and encrypted documents are not edited, and text inside form XObjects, which some generators put every page in, is not reachable. This part of the program is experimental; a copy of a valued document is advised.
+A run keeps its font when that font can show the new text; a font embedded as a subset of its glyphs cannot, and the run is set in Arial instead, at the same place, size and colour.
+
+Pictures are outlined too. A click selects one: it is moved by dragging and resized by its corner handles (the proportions kept), **Replace…** puts a JPEG or PNG file in its place, fitted into the old box with its own proportions, and **Delete** (or the `Del` key) removes it.
+
+The changes live in a copy of the document until `Ctrl+S` saves it (a Save As dialog, so the original is replaced only when chosen); closing a tab or quitting with unsaved changes asks first. Signed, tagged (accessible) and encrypted documents are not edited, and text and pictures inside form XObjects, which some generators put every page in, are not reachable. This part of the program is experimental; a copy of a valued document is advised.
 
 ## Keyboard shortcuts
 
@@ -100,7 +104,7 @@ A run keeps its font when that font can show the new text; a font embedded as a 
 | `Ctrl+F`, `F3`, `Shift+F3`, `Esc` | Find, next hit, previous hit, close |
 | `Ctrl+C`, `Ctrl+A`, `Esc` | Copy the selection, select the page, clear |
 | `Alt+←`, `Alt+→` | Back, forward through the jumps |
-| `E`, `Ctrl+Z`, `Ctrl+S` | Editing mode, undo an edit, save as |
+| `E`, `Ctrl+Z`, `Ctrl+S`, `Del` | Editing mode, undo an edit, save as, remove the selected picture |
 | `F11` | Full screen |
 | `F1` | About (version, language, update check, licenses) |
 

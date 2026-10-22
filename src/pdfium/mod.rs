@@ -721,7 +721,161 @@ pub enum Replaced {
     FallbackFont,
 }
 
+/// An image object of a page, as the editing sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageObject {
+    /// Its index among the page's objects.
+    pub index: usize,
+    /// left, bottom, right, top in page space.
+    pub bounds: [f32; 4],
+}
+
+/// The page's top-level objects the editing works on.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageObjects {
+    pub text: Vec<TextObject>,
+    pub images: Vec<ImageObject>,
+}
+
+/// Reads of a file held in memory, as PDFium asks for them (a JPEG loaded
+/// into an image object).
+unsafe extern "C" fn get_block_memory(param: *mut c_void, position: c_ulong, buf: *mut c_uchar, size: c_ulong) -> c_int {
+    // SAFETY: `param` is the slice `replace_image` passes, alive for the call.
+    let data = unsafe { &*(param as *const Vec<u8>) };
+    let (start, len) = (position as usize, size as usize);
+    if start.checked_add(len).is_none_or(|end| end > data.len()) {
+        return 0;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(start), buf, len) };
+    1
+}
+
 impl Page {
+    /// The page's text and image objects, top level only.
+    pub fn objects(&self) -> PageObjects {
+        PageObjects { text: self.text_objects(), images: self.image_objects() }
+    }
+
+    /// The page's image objects, top level only.
+    pub fn image_objects(&self) -> Vec<ImageObject> {
+        let api = self.api();
+        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle) }.max(0);
+        let mut out = Vec::new();
+        for index in 0..count {
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index) };
+            if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_IMAGE {
+                continue;
+            }
+            let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+            if unsafe { (api.FPDFPageObj_GetBounds)(object, &mut l, &mut b, &mut r, &mut t) } == 0 {
+                continue;
+            }
+            out.push(ImageObject { index: index as usize, bounds: [l.min(r), b.min(t), l.max(r), b.max(t)] });
+        }
+        out
+    }
+
+    fn object_of_type(&self, index: usize, kind: c_int, what: &str) -> Result<sys::FPDF_PAGEOBJECT, String> {
+        let object = unsafe { (self.api().FPDFPage_GetObject)(self.handle, index as c_int) };
+        if object.is_null() || unsafe { (self.api().FPDFPageObj_GetType)(object) } != kind {
+            return Err(format!("not {what}"));
+        }
+        Ok(object)
+    }
+
+    /// After a change of the page's objects: the content regenerated, the
+    /// text page (which described the old content) closed.
+    fn content_changed(&self) -> Result<(), String> {
+        if unsafe { (self.api().FPDFPage_GenerateContent)(self.handle) } == 0 {
+            return Err("the page's content could not be regenerated".into());
+        }
+        if let Some(text) = self.text.take() {
+            unsafe { (self.api().FPDFText_ClosePage)(text) };
+        }
+        Ok(())
+    }
+
+    /// Remove object `index` (an image) from the page.
+    pub fn remove_object(&self, index: usize) -> Result<(), String> {
+        let api = self.api();
+        let object = self.object_of_type(index, sys::FPDF_PAGEOBJ_IMAGE, "an image")?;
+        if unsafe { (api.FPDFPage_RemoveObject)(self.handle, object) } == 0 {
+            return Err("the object could not be removed".into());
+        }
+        unsafe { (api.FPDFPageObj_Destroy)(object) };
+        self.content_changed()
+    }
+
+    /// Put the picture in `path` (JPEG or PNG) into image object `index`,
+    /// fitted into the old picture's box with its own proportions, centred.
+    pub fn replace_image(&self, index: usize, path: &Path) -> Result<(), String> {
+        let api = self.api();
+        let object = self.object_of_type(index, sys::FPDF_PAGEOBJ_IMAGE, "an image")?;
+        let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+        unsafe { (api.FPDFPageObj_GetBounds)(object, &mut l, &mut b, &mut r, &mut t) };
+        let old = [l.min(r), b.min(t), l.max(r), b.max(t)];
+        let data = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let is_jpeg = data.starts_with(&[0xff, 0xd8]);
+        let is_png = data.starts_with(b"\x89PNG");
+        let mut pages = [self.handle];
+        let (w, h) = if is_jpeg {
+            let mut access = sys::FPDF_FILEACCESS {
+                m_FileLen: c_ulong::try_from(data.len()).map_err(|_| "the picture is too large")?,
+                m_GetBlock: Some(get_block_memory),
+                m_Param: &data as *const Vec<u8> as *mut c_void,
+            };
+            if unsafe { (api.FPDFImageObj_LoadJpegFileInline)(pages.as_mut_ptr(), 1, object, &mut access) } == 0 {
+                return Err("PDFium could not read the JPEG".into());
+            }
+            let (mut w, mut h) = (0u32, 0u32);
+            unsafe { (api.FPDFImageObj_GetImagePixelSize)(object, &mut w, &mut h) };
+            (w, h)
+        } else if is_png {
+            let (w, h, bgra, alpha) = decode_png(&data)?;
+            // PDFium copies the picture out of the bitmap, which is freed here.
+            let bitmap = Bitmap::from_bgra(api, w, h, bgra, alpha).ok_or("the picture is too large")?;
+            if unsafe { (api.FPDFImageObj_SetBitmap)(pages.as_mut_ptr(), 1, object, bitmap.handle) } == 0 {
+                return Err("PDFium could not take the picture".into());
+            }
+            (w, h)
+        } else {
+            return Err("only JPEG and PNG pictures can be put in".into());
+        };
+        // The new picture's proportions within the old box.
+        let (bw, bh) = (old[2] - old[0], old[3] - old[1]);
+        let (mut nw, mut nh) = (bw, bh);
+        if w > 0 && h > 0 && bw > 0.0 && bh > 0.0 {
+            let aspect = w as f32 / h as f32;
+            if bw / bh > aspect {
+                nw = bh * aspect;
+            } else {
+                nh = bw / aspect;
+            }
+        }
+        let (x, y) = (old[0] + (bw - nw) / 2.0, old[1] + (bh - nh) / 2.0);
+        unsafe { (api.FPDFImageObj_SetMatrix)(object, f64::from(nw), 0.0, 0.0, f64::from(nh), f64::from(x), f64::from(y)) };
+        self.content_changed()
+    }
+
+    /// Move and resize object `index` so that its box becomes `bounds`
+    /// (left, bottom, right, top in page space).
+    pub fn place_object(&self, index: usize, bounds: [f32; 4]) -> Result<(), String> {
+        let api = self.api();
+        let object = self.object_of_type(index, sys::FPDF_PAGEOBJ_IMAGE, "an image")?;
+        let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+        unsafe { (api.FPDFPageObj_GetBounds)(object, &mut l, &mut b, &mut r, &mut t) };
+        let (w0, h0) = ((r - l).abs().max(1e-3), (t - b).abs().max(1e-3));
+        let (w1, h1) = ((bounds[2] - bounds[0]).max(0.1), (bounds[3] - bounds[1]).max(0.1));
+        let (l0, b0) = (l.min(r), b.min(t));
+        unsafe {
+            // To the origin, scaled, to the new place.
+            (api.FPDFPageObj_Transform)(object, 1.0, 0.0, 0.0, 1.0, -f64::from(l0), -f64::from(b0));
+            (api.FPDFPageObj_Transform)(object, f64::from(w1 / w0), 0.0, 0.0, f64::from(h1 / h0), 0.0, 0.0);
+            (api.FPDFPageObj_Transform)(object, 1.0, 0.0, 0.0, 1.0, f64::from(bounds[0]), f64::from(bounds[1]));
+        }
+        self.content_changed()
+    }
+
     /// The page's text objects, top level only (text inside form
     /// XObjects is not reachable for editing).
     pub fn text_objects(&self) -> Vec<TextObject> {
@@ -932,6 +1086,23 @@ impl Bitmap {
         }
     }
 
+    /// A bitmap over `bgra` pixels (`width * height * 4` bytes), with an
+    /// alpha channel when `alpha`: a picture to put into an image object.
+    pub fn from_bgra(api: &'static Api, width: u32, height: u32, bgra: Vec<u8>, alpha: bool) -> Option<Bitmap> {
+        if width == 0 || height == 0 || bgra.len() != width as usize * height as usize * 4 || i32::try_from(bgra.len()).is_err() {
+            return None;
+        }
+        let mut pixels = bgra.into_boxed_slice();
+        let format = if alpha { sys::FPDFBitmap_BGRA } else { sys::FPDFBitmap_BGRx };
+        let handle = unsafe {
+            (api.FPDFBitmap_CreateEx)(width as c_int, height as c_int, format, pixels.as_mut_ptr().cast(), (width * 4) as c_int)
+        };
+        if handle.is_null() {
+            return None;
+        }
+        Some(Bitmap { api, handle, pixels, width, height })
+    }
+
     /// The pixels, BGRx row by row, `width * 4` bytes a row.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
@@ -951,6 +1122,44 @@ impl Drop for Bitmap {
             unsafe { (self.api.FPDFBitmap_Destroy)(self.handle) };
         }
     }
+}
+
+/// A PNG decoded to BGRA 8-bit: width, height, pixels, whether it has
+/// transparency.
+fn decode_png(data: &[u8]) -> Result<(u32, u32, Vec<u8>, bool), String> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().map_err(|e| format!("not a PNG that can be read: {e}"))?;
+    let mut buf = vec![0u8; reader.output_buffer_size().ok_or("the PNG is too large")?];
+    let info = reader.next_frame(&mut buf).map_err(|e| format!("the PNG could not be decoded: {e}"))?;
+    let (w, h) = (info.width, info.height);
+    let n = w as usize * h as usize;
+    let mut bgra = Vec::with_capacity(n * 4);
+    let alpha = matches!(info.color_type, png::ColorType::Rgba | png::ColorType::GrayscaleAlpha);
+    match info.color_type {
+        png::ColorType::Rgba => {
+            for p in buf[..n * 4].as_chunks::<4>().0 {
+                bgra.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+            }
+        }
+        png::ColorType::Rgb => {
+            for p in buf[..n * 3].as_chunks::<3>().0 {
+                bgra.extend_from_slice(&[p[2], p[1], p[0], 255]);
+            }
+        }
+        png::ColorType::Grayscale => {
+            for &g in &buf[..n] {
+                bgra.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        png::ColorType::GrayscaleAlpha => {
+            for p in buf[..n * 2].as_chunks::<2>().0 {
+                bgra.extend_from_slice(&[p[0], p[0], p[0], p[1]]);
+            }
+        }
+        png::ColorType::Indexed => return Err("an indexed PNG was not expanded".into()),
+    }
+    Ok((w, h, bgra, alpha))
 }
 
 /// A UTF-16LE string PDFium writes into a buffer the caller sizes: asked
@@ -979,13 +1188,15 @@ pub mod tests {
             "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".into(),
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>".into(),
             stream("BT /F1 24 Tf 72 770 Td (Hello MetalPDF) Tj ET BT /F1 12 Tf 72 740 Td (Second line of text) Tj ET"),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Rotate 90 /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> /Annots [11 0 R] >>".into(),
-            stream("BT /F1 18 Tf 100 700 Td (Page two) Tj ET"),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Rotate 90 /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> /XObject << /Im1 12 0 R >> >> /Annots [11 0 R] >>".into(),
+            stream("BT /F1 18 Tf 100 700 Td (Page two) Tj ET q 100 0 0 50 300 400 cm /Im1 Do Q"),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
             "<< /Type /Outlines /First 9 0 R /Last 10 0 R /Count 2 >>".into(),
             "<< /Title (First) /Parent 8 0 R /Next 10 0 R /Dest [3 0 R /XYZ 0 842 0] >>".into(),
             "<< /Title (Second) /Parent 8 0 R /Prev 9 0 R /Dest [5 0 R /Fit] >>".into(),
             "<< /Type /Annot /Subtype /Link /Rect [100 690 200 720] /Border [0 0 0] /Dest [3 0 R /XYZ 0 700 0] >>".into(),
+            // A 2 × 2 picture, its samples ASCII letters (the builder works in text).
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\nABCDEFGHIJKL\nendstream".into(),
         ];
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offsets = Vec::new();
@@ -1196,6 +1407,52 @@ pub mod tests {
         drop(again);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(saved).unwrap();
+    }
+
+    /// The picture on the sample's second page moved and resized, replaced
+    /// by a PNG written here (fitted with its proportions), removed, and
+    /// the document saved without it.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn images_are_placed_replaced_and_removed() {
+        let api = api();
+        let path = sample_file("images");
+        let doc = Document::open(api, &path, None).unwrap();
+        let page = doc.load_page(1).unwrap();
+        let objects = page.objects();
+        assert_eq!(objects.images.len(), 1, "{objects:?}");
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.6);
+        assert!(near(objects.images[0].bounds, [300.0, 400.0, 400.0, 450.0]), "{:?}", objects.images[0].bounds);
+        let index = objects.images[0].index;
+        page.place_object(index, [310.0, 410.0, 360.0, 435.0]).unwrap();
+        let moved = page.image_objects();
+        assert!(near(moved[0].bounds, [310.0, 410.0, 360.0, 435.0]), "{:?}", moved[0].bounds);
+        // A 3 × 2 PNG: fitted into the 50 × 25 box as 37.5 × 25, centred.
+        let png_path = std::env::temp_dir().join(format!("metalpdf_pic_{}.png", std::process::id()));
+        crate::bench::write_rgba_png(&png_path, &[200, 30, 30, 255].repeat(6), 3, 2).unwrap();
+        page.replace_image(index, &png_path).unwrap();
+        let replaced = page.image_objects();
+        assert!(near(replaced[0].bounds, [316.25, 410.0, 353.75, 435.0]), "{:?}", replaced[0].bounds);
+        // The picture renders where it was put: a reddish pixel in the box.
+        let mut bitmap = Bitmap::new(api, 842, 595).unwrap();
+        page.render(&mut bitmap, Placement { start_x: 0, start_y: 0, size_x: 842, size_y: 595, rotate: 0 }, sys::FPDF_ANNOT);
+        // /Rotate 90: page point (x, y) is drawn at device (842 - y... ) — just
+        // look for red anywhere.
+        let reddish = bitmap.pixels().chunks(4).filter(|p| p[2] > 150 && p[1] < 80 && p[0] < 80).count();
+        assert!(reddish > 100, "{reddish} red pixels");
+        page.remove_object(index).unwrap();
+        assert!(page.image_objects().is_empty());
+        assert!(page.remove_object(index).is_err(), "nothing there any more");
+        let saved = std::env::temp_dir().join(format!("metalpdf_noimage_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(page);
+        drop(doc);
+        let again = Document::open(api, &saved, None).unwrap();
+        assert!(again.load_page(1).unwrap().image_objects().is_empty());
+        drop(again);
+        for f in [path, png_path, saved] {
+            std::fs::remove_file(f).unwrap();
+        }
     }
 
     /// On a real document (`METALPDF_SAMPLE`): the first page with text
