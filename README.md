@@ -85,7 +85,7 @@ Pictures are outlined too. A click selects one: it is moved by dragging and resi
 
 Pages are handled from the context menu of a thumbnail in the sidebar: a blank page (the size of its neighbour) or every page of another PDF file inserted before or after it, the page replaced by the pages of another PDF, or the page deleted (the last one stays). These need no editing mode.
 
-The changes live in a copy of the document until `Ctrl+S` saves it (a Save As dialog, so the original is replaced only when chosen); closing a tab or quitting with unsaved changes asks first. Signed, tagged (accessible) and encrypted documents are not edited, and text and pictures inside form XObjects, which some generators put every page in, are not reachable. This part of the program is experimental; a copy of a valued document is advised.
+The changes live in a copy of the document until `Ctrl+S` saves it (a Save As dialog, so the original is replaced only when chosen); closing a tab or quitting with unsaved changes asks first. Signed and encrypted documents are not edited. In a tagged (accessible) document only the page operations are available, as rewriting a page's content would drop the marks its tags point to; its tag structure is not updated for the pages put in or removed. Text and pictures inside form XObjects, which some generators put every page in, are not reachable. An edit refused is explained in the status bar. This part of the program is experimental; a copy of a valued document is advised.
 
 ## Keyboard shortcuts
 

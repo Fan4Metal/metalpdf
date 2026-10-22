@@ -822,7 +822,7 @@ impl App {
                     };
                     if let Event::EditFailed { reason, .. } = &other {
                         if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
-                            tab.notify(tr!(format!("The text could not be edited: {reason}"), format!("Текст не удалось изменить: {reason}")));
+                            tab.notify(tr!(format!("The document could not be edited: {reason}"), format!("Документ не удалось изменить: {reason}")));
                         }
                         continue;
                     }

@@ -279,8 +279,22 @@ impl Edit {
 
 /// A document's edits: a second copy of the file they are applied to,
 /// the viewed one staying as it is; undo rebuilds it from the log.
+/// Whether the document's `obstacles` (`Document::edit_obstacles`) rule
+/// `edit` out. A signed or encrypted document takes no edit; a tagged
+/// one takes page operations (the page tree changes, the content streams
+/// stay; its structure tree is left as it is), but no change to a page's
+/// content, which `FPDFPage_GenerateContent` would write without the
+/// marked content the tags point into.
+fn refuse(obstacles: &[&'static str], edit: &Edit) -> Result<(), String> {
+    let blocking: Vec<&str> = obstacles.iter().copied().filter(|o| !(edit.restructures() && *o == "tagged")).collect();
+    if blocking.is_empty() { Ok(()) } else { Err(format!("the document is {}", blocking.join(" and "))) }
+}
+
 struct EditState {
     doc: Document,
+    /// What the document is that stands in the way of edits
+    /// (`Document::edit_obstacles`), checked against each edit.
+    obstacles: Vec<&'static str>,
     log: Vec<Edit>,
     /// The pages rendered from the edited copy.
     edited: HashSet<usize>,
@@ -506,14 +520,14 @@ impl Worker {
         {
             return Err("the text is empty".into());
         }
-        if !self.edits.contains_key(&id) {
+        if let Some(state) = self.edits.get(&id) {
+            refuse(&state.obstacles, &edit)?;
+        } else {
             let path = self.paths.get(&id).cloned().ok_or("no such document")?;
             let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
             let obstacles = doc.edit_obstacles();
-            if !obstacles.is_empty() {
-                return Err(format!("the document is {}", obstacles.join(" and ")));
-            }
-            self.edits.insert(id, EditState { doc, log: Vec::new(), edited: HashSet::new(), all_pages: false });
+            refuse(&obstacles, &edit)?;
+            self.edits.insert(id, EditState { doc, obstacles, log: Vec::new(), edited: HashSet::new(), all_pages: false });
         }
         if self.fallback_font.is_none() {
             let fonts = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
@@ -594,7 +608,8 @@ impl Worker {
             return Ok(0);
         }
         let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
-        self.edits.insert(id, EditState { doc, log: Vec::new(), edited: HashSet::new(), all_pages: false });
+        let obstacles = doc.edit_obstacles();
+        self.edits.insert(id, EditState { doc, obstacles, log: Vec::new(), edited: HashSet::new(), all_pages: false });
         let count = log.len();
         for entry in log {
             self.edit(id, entry)?;
@@ -779,6 +794,18 @@ pub fn first_width(size: [f32; 2], first: FirstRender) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tagged_documents_take_page_operations_only() {
+        let delete = Edit::DeletePage { page: 0 };
+        let text = Edit::Text { page: 0, object: 0, text: "x".into() };
+        assert!(refuse(&[], &text).is_ok());
+        assert!(refuse(&["tagged"], &delete).is_ok());
+        assert_eq!(refuse(&["tagged"], &text).unwrap_err(), "the document is tagged");
+        assert_eq!(refuse(&["signed", "tagged"], &delete).unwrap_err(), "the document is signed");
+        assert_eq!(refuse(&["signed", "tagged"], &text).unwrap_err(), "the document is signed and tagged");
+        assert!(refuse(&["encrypted"], &delete).is_err());
+    }
 
     #[test]
     fn the_first_render_takes_the_predicted_view() {

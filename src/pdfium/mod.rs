@@ -1578,6 +1578,37 @@ pub mod tests {
         assert!(tried > 0, "no page with text objects among the first 20");
     }
 
+    /// On a real document (`METALPDF_SAMPLE`): its first page deleted and
+    /// a blank one put in at the end, saved, read back; prints what the
+    /// document is (`edit_obstacles`) and the timings.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_real_document_takes_page_operations() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let api = api();
+        let doc = Document::open(api, Path::new(&sample), None).unwrap();
+        println!("obstacles: {:?}", doc.edit_obstacles());
+        let count = doc.page_count();
+        assert!(count > 1, "a document of one page");
+        let second = doc.page_size(1).unwrap();
+        let started = std::time::Instant::now();
+        doc.delete_page(0).unwrap();
+        doc.insert_blank_page(count - 1, [400.0, 300.0]).unwrap();
+        println!("delete and insert: {:?}", started.elapsed());
+        assert_eq!(doc.page_count(), count);
+        assert_eq!(doc.page_size(0).unwrap(), second);
+        let out = std::env::temp_dir().join("metalpdf_real_pages.pdf");
+        let started = std::time::Instant::now();
+        doc.save_to(&out).unwrap();
+        println!("saved {} bytes in {:?}", std::fs::metadata(&out).unwrap().len(), started.elapsed());
+        let saved = Document::open(api, &out, None).unwrap();
+        assert_eq!(saved.page_count(), count);
+        assert_eq!(saved.page_size(0).unwrap(), second);
+        assert_eq!(saved.page_size(count - 1).unwrap(), [400.0, 300.0]);
+        drop(saved);
+        std::fs::remove_file(&out).ok();
+    }
+
     /// On a real document (`METALPDF_SAMPLE`): the first page rendered
     /// plainly, progressively without a pause and progressively pausing at
     /// every chance, all three alike; prints how dark each came out.
