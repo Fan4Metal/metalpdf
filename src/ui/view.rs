@@ -179,7 +179,11 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
             let origin = ui.min_rect().min;
             visible = layout.visible(viewport.min.y, viewport.height());
             let middle = viewport.min.y + viewport.height() / 2.0;
-            let response = ui.interact(ui.min_rect(), ui.id().with("pages-sense"), Sense::click_and_drag());
+            // With the hand the drags are the scroll area's: egui registers
+            // its drag-to-scroll before the content, so a drag sense here
+            // would take them (it did, and the hand moved nothing).
+            let sense = if hand { Sense::click() } else { Sense::click_and_drag() };
+            let response = ui.interact(ui.min_rect(), ui.id().with("pages-sense"), sense);
             out.hovered = response.hovered();
             // The right button let go: what it is over is noted for the menu.
             let menu_opened = response.secondary_clicked();
@@ -512,7 +516,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                     out.link = Some(target.clone());
                 }
             } else if hand {
-                ui.ctx().set_cursor_icon(if response.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
+                // The pointer stays an arrow.
             } else if over_text || selecting {
                 ui.ctx().set_cursor_icon(CursorIcon::Text);
             }

@@ -136,9 +136,9 @@ pub enum Icon {
     FitPage,
     /// "1:1" drawn in strokes: the actual size, 100 % (MetalPDF).
     ActualSize,
-    /// A hand from the back, fingers up: the hand tool, dragging scrolls
-    /// (MetalPDF).
-    Hand,
+    /// Four arrows from the centre: the hand tool, dragging moves the
+    /// pages (MetalPDF).
+    Move,
     /// An I-beam, the text cursor: the text selection tool (MetalPDF).
     SelectText,
 }
@@ -208,7 +208,7 @@ impl Icon {
         Icon::FitWidth,
         Icon::FitPage,
         Icon::ActualSize,
-        Icon::Hand,
+        Icon::Move,
         Icon::SelectText,
     ];
 }
@@ -424,14 +424,16 @@ pub fn paint(painter: &Painter, icon: Icon, c: Pos2, size: f32, color: Color32, 
             painter.circle_filled(p(0.0, -1.6), 0.95 * k, color);
             painter.circle_filled(p(0.0, 1.6), 0.95 * k, color);
         }
-        Icon::Hand => {
-            // A hand from the back: the palm, four fingers up, the thumb out
-            // to the left.
-            painter.rect_filled(rect(-3.5, -0.5, 7.0, 6.5), 2.0 * k, color);
-            for (x, top) in [(-2.6, -4.8), (-0.9, -6.5), (0.9, -6.2), (2.6, -4.6)] {
-                painter.line_segment([p(x, top), p(x, 1.0)], pen(1.5));
+        Icon::Move => {
+            // Four arrows from the centre.
+            painter.line_segment([p(-6.0, 0.0), p(6.0, 0.0)], line);
+            painter.line_segment([p(0.0, -6.0), p(0.0, 6.0)], line);
+            for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let (tx, ty) = (6.0 * dx, 6.0 * dy);
+                // The head's base on the shaft, its sides across it.
+                let (bx, by) = (tx - 2.2 * dx, ty - 2.2 * dy);
+                painter.add(polyline(&[(bx - 2.2 * dy, by - 2.2 * dx), (tx, ty), (bx + 2.2 * dy, by + 2.2 * dx)]));
             }
-            painter.line_segment([p(-3.0, 1.5), p(-6.2, -1.6)], pen(1.5));
         }
         Icon::SelectText => {
             // An I-beam, the text cursor.

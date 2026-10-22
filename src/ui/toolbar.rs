@@ -206,7 +206,7 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         if super::icon_button(ui, Icon::SelectText, info.tool == Tool::Select, tr!("Select text (V): drag over the text", "Выделение текста (V): протяните по тексту")).clicked() {
             actions.push(ToolbarAction::Tool(Tool::Select));
         }
-        if super::icon_button(ui, Icon::Hand, info.tool == Tool::Hand, tr!("Hand (H): drag the pages to scroll", "Рука (H): тяните страницы, чтобы прокручивать")).clicked() {
+        if super::icon_button(ui, Icon::Move, info.tool == Tool::Hand, tr!("Hand (H): drag the pages to scroll", "Рука (H): тяните страницы, чтобы прокручивать")).clicked() {
             actions.push(ToolbarAction::Tool(Tool::Hand));
         }
         ui.separator();
