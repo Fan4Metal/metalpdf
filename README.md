@@ -83,7 +83,7 @@ Text is selected by dragging over it, across pages too, and copied with `Ctrl+C`
 
 The editing mode (`E`, or the pencil on the toolbar) outlines the text objects of the pages, the runs of text a PDF is made of: usually a line or a part of one. A click on a run opens a field over it; `Enter` replaces the run's text, `Esc` leaves it as it was. `Ctrl+Z` takes the last change back. The pages keep their layout: a longer text runs past where the old one ended, nothing is reflowed.
 
-A run keeps its font when that font can show the new text; a font embedded as a subset of its glyphs cannot, and the run is set in a stand-in font instead, at the same place, size and colour: Arial, Times New Roman or Courier New after the look of the original, in its weight and slant, so that a bold run stays bold.
+A run keeps its font, and so its look, whenever that font can show the new text; a font embedded as a subset of its glyphs can for the characters it has (the digits of a date, say). Only when it lacks a glyph is the run set in a stand-in font, at the same place, size and colour: Arial, Times New Roman or Courier New after the look of the original, in its weight and slant, so that a bold run stays bold, and fitted to the width of the original run, so that an edit of the same length fills the same box.
 
 Pictures are outlined too. A click selects one: it is moved by dragging and resized by its corner handles (the proportions kept), **Replace…** puts a JPEG or PNG file in its place, fitted into the old box with its own proportions, and **Delete** (or the `Del` key) removes it.
 

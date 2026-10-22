@@ -762,6 +762,14 @@ pub struct TextObject {
 /// flags, when the document's own font cannot show new text.
 pub type FontLookup<'a> = &'a mut dyn FnMut(&str, i32) -> Option<std::sync::Arc<Vec<u8>>>;
 
+/// Whether a text read back from a page object says `wanted`: the text
+/// page reads a subset font's space as a no-break space, and runs of
+/// whitespace count as one.
+fn same_text(shown: &str, wanted: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    norm(shown) == norm(wanted)
+}
+
 /// How a text object's text was replaced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Replaced {
@@ -1000,9 +1008,38 @@ impl Page {
             flags = unsafe { (api.FPDFFont_GetFlags)(font) };
             embedded && n > 7 && buf[6] == b'+'
         };
-        let stand_in = if subset { fallback(&base_name, flags) } else { None };
-        let replaced = match (subset, stand_in) {
-            (true, Some(bytes)) => {
+        // The old text and its box: for the width fit, and to put back if
+        // the font proves unable to show the new text.
+        let old_text = self.object_text(object);
+        let (mut ol, mut ob, mut or, mut ot) = (0f32, 0f32, 0f32, 0f32);
+        unsafe { (api.FPDFPageObj_GetBounds)(object, &mut ol, &mut ob, &mut or, &mut ot) };
+        // In place first, when the font has a glyph for every character
+        // (a subset has the digits of a date): the run keeps its font and
+        // its look. What came out is read back, since a font that cannot
+        // encode a character (a subset's space) drops it: then the old
+        // text is put back and the stand-in takes over.
+        let has_glyph = |c: char| !font.is_null() && !unsafe { (api.FPDFFont_GetGlyphPath)(font, u32::from(c), 12.0) }.is_null();
+        if !subset || text.chars().all(has_glyph) {
+            // A subset font written by PDFium maps its space to U+00A0
+            // and drops U+0020: the no-break space is tried after.
+            let attempts = if text.contains(' ') { vec![text.to_owned(), text.replace(' ', "\u{a0}")] } else { vec![text.to_owned()] };
+            for attempt in &attempts {
+                let attempt_wide: Vec<u16> = attempt.encode_utf16().chain(std::iter::once(0)).collect();
+                if unsafe { (api.FPDFText_SetText)(object, attempt_wide.as_ptr()) } == 0 {
+                    return Err("the text could not be set".into());
+                }
+                if same_text(&self.object_text(object), text) {
+                    self.regenerate()?;
+                    return Ok(Replaced::SameFont);
+                }
+            }
+            let old_wide: Vec<u16> = old_text.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe { (api.FPDFText_SetText)(object, old_wide.as_ptr()) };
+        }
+        let bytes = fallback(&base_name, flags).ok_or("the font cannot show the text, and there is no stand-in font")?;
+        let old_len = old_text.trim().chars().count();
+        let replaced = {
+            {
                 // The same place, size, colour and mode in a font that has
                 // every glyph.
                 let mut size = 12f32;
@@ -1024,6 +1061,19 @@ impl Page {
                 unsafe {
                     (api.FPDFText_SetText)(new, wide.as_ptr());
                     (api.FPDFPageObj_SetMatrix)(new, &matrix);
+                    // Fitted to the old run's width a character: a run of
+                    // the same length fills the same box, whatever the
+                    // stand-in's own widths.
+                    let (mut nl, mut nb, mut nr, mut nt) = (0f32, 0f32, 0f32, 0f32);
+                    let new_len = text.trim().chars().count();
+                    if old_len > 0 && new_len > 0 && (api.FPDFPageObj_GetBounds)(new, &mut nl, &mut nb, &mut nr, &mut nt) != 0 {
+                        let target = (or - ol) * new_len as f32 / old_len as f32;
+                        let sx = (target / (nr - nl).max(0.01)).clamp(0.5, 1.5);
+                        if (sx - 1.0).abs() > 0.01 {
+                            let fitted = sys::FS_MATRIX { a: matrix.a * sx, b: matrix.b * sx, c: matrix.c, d: matrix.d, e: matrix.e, f: matrix.f };
+                            (api.FPDFPageObj_SetMatrix)(new, &fitted);
+                        }
+                    }
                     (api.FPDFPageObj_SetFillColor)(new, r, g, b, a);
                     (api.FPDFTextObj_SetTextRenderMode)(new, mode);
                     (api.FPDFPage_InsertObject)(self.handle, new);
@@ -1034,21 +1084,32 @@ impl Page {
                 }
                 Replaced::FallbackFont
             }
-            _ => {
-                if unsafe { (api.FPDFText_SetText)(object, wide.as_ptr()) } == 0 {
-                    return Err("the text could not be set".into());
-                }
-                Replaced::SameFont
-            }
         };
-        if unsafe { (api.FPDFPage_GenerateContent)(self.handle) } == 0 {
-            return Err("the page's content could not be regenerated".into());
-        }
-        // The text page describes the old content.
+        self.regenerate()?;
+        Ok(replaced)
+    }
+
+    /// The object's text as the text page reads it, the text page loaded
+    /// afresh (the page's objects may have changed).
+    fn object_text(&self, object: sys::FPDF_PAGEOBJECT) -> String {
+        let api = self.api();
         if let Some(text) = self.text.take() {
             unsafe { (api.FPDFText_ClosePage)(text) };
         }
-        Ok(replaced)
+        self.text_page().and_then(|tp| utf16_text(|buf, len| unsafe { (api.FPDFTextObj_GetText)(object, tp, buf.cast(), len) })).unwrap_or_default()
+    }
+
+    /// The page's content stream written anew from its objects; the text
+    /// page, which described the old content, is dropped.
+    fn regenerate(&self) -> Result<(), String> {
+        let api = self.api();
+        if unsafe { (api.FPDFPage_GenerateContent)(self.handle) } == 0 {
+            return Err("the page's content could not be regenerated".into());
+        }
+        if let Some(text) = self.text.take() {
+            unsafe { (api.FPDFText_ClosePage)(text) };
+        }
+        Ok(())
     }
 }
 
@@ -1247,6 +1308,14 @@ pub mod tests {
     /// A two-page PDF written by hand: Helvetica text on an A4 page, and a
     /// landscape page by /Rotate 90 with a link to the first one and a
     /// bookmark each.
+    #[test]
+    fn read_back_text_is_compared_loosely() {
+        assert!(same_text("Bold\u{a0}Bold", "Bold Bold"));
+        assert!(same_text(" 23.02.2026  11:32:33\r\n", "23.02.2026 11:32:33"));
+        assert!(!same_text("BoldBold", "Bold Bold"));
+        assert!(!same_text("Bold Bold", "Bold Bolder"));
+    }
+
     pub fn sample_pdf() -> Vec<u8> {
         let objects: Vec<String> = vec![
             "<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R >>".into(),
@@ -1592,6 +1661,14 @@ pub mod tests {
         let run = objects.iter().find(|o| plain(o) == "Bold run").expect("the bold run");
         println!("the bold run's font: {} (subset {})", run.font, run.subset);
         assert!(run.subset, "PDFium's save subsets a new font");
+        // Text the subset has every glyph of keeps the font and its look.
+        let old_width = run.bounds[2] - run.bounds[0];
+        assert_eq!(page.set_text(run.index, "Bold Bold", &mut |_, _| None).unwrap(), Replaced::SameFont);
+        let objects = page.text_objects();
+        let run = objects.iter().find(|o| plain(o) == "Bold Bold").expect("the run kept its font");
+        assert!(run.subset && run.font.contains("Bold"), "{run:?}");
+        // Text with glyphs it lacks comes in the stand-in, fitted to the
+        // old width a character.
         let mut fonts = crate::fonts::Fonts::default();
         let mut asked = Vec::new();
         let replaced = page
@@ -1601,6 +1678,12 @@ pub mod tests {
             })
             .unwrap();
         assert_eq!(replaced, Replaced::FallbackFont);
+        let objects = page.text_objects();
+        let new = objects.iter().find(|o| plain(o) == "Bolder still").expect("the replaced run");
+        let per_char_old = old_width / "Bold run".len() as f32;
+        let per_char_new = (new.bounds[2] - new.bounds[0]) / "Bolder still".len() as f32;
+        println!("width a character: {per_char_old:.2} before, {per_char_new:.2} in the stand-in");
+        assert!((per_char_new / per_char_old - 1.0).abs() < 0.08, "{per_char_old} vs {per_char_new}");
         assert_eq!(crate::fonts::file_of(crate::fonts::style_of(&asked[0].0, asked[0].1)), "arialbd.ttf", "{asked:?}");
         let objects = page.text_objects();
         let new = objects.iter().find(|o| plain(o) == "Bolder still").expect("the replaced run");

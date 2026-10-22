@@ -406,6 +406,9 @@ api! {
     FPDFFont_GetBaseFontName: fn(FPDF_FONT, *mut c_char, usize) -> usize;
     FPDFFont_GetIsEmbedded: fn(FPDF_FONT) -> c_int;
     FPDFFont_GetFlags: fn(FPDF_FONT) -> c_int;
+    // The glyph's path for a character (Unicode), or null when the font
+    // has no glyph for it; the path is the font's, never freed.
+    FPDFFont_GetGlyphPath: fn(FPDF_FONT, u32, c_float) -> *const c_void;
     // Pages: fpdf_edit.h, fpdf_ppo.h
     FPDFPage_Delete: fn(FPDF_DOCUMENT, c_int);
     FPDFPage_New: fn(FPDF_DOCUMENT, c_int, c_double, c_double) -> FPDF_PAGE;
