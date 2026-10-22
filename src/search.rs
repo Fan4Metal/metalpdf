@@ -7,6 +7,43 @@ use std::collections::BTreeMap;
 
 use crate::engine::SearchHit;
 
+/// The end of `text` after its last line break, its whitespace collapsed:
+/// what a hit's line says before the match (a space before the match
+/// kept, the line's start trimmed).
+pub fn line_before(text: &str) -> String {
+    let tail = text.rsplit(['\r', '\n']).next().unwrap_or("");
+    collapse(tail, false, true)
+}
+
+/// The start of `text` up to its first line break, its whitespace
+/// collapsed: what a hit's line says after the match (a space after the
+/// match kept, the line's end trimmed).
+pub fn line_after(text: &str) -> String {
+    let head = text.split(['\r', '\n']).next().unwrap_or("");
+    collapse(head, true, false)
+}
+
+/// Runs of whitespace as one space, dropped at the ends unless kept.
+fn collapse(s: &str, keep_leading: bool, keep_trailing: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            pending = true;
+            continue;
+        }
+        if pending && (!out.is_empty() || keep_leading) {
+            out.push(' ');
+        }
+        pending = false;
+        out.push(c);
+    }
+    if pending && keep_trailing && (!out.is_empty() || keep_leading) {
+        out.push(' ');
+    }
+    out
+}
+
 #[derive(Default)]
 pub struct FindState {
     pub open: bool,
@@ -169,7 +206,17 @@ mod tests {
     use super::*;
 
     fn hit(start: usize) -> SearchHit {
-        SearchHit { start, count: 3, rects: vec![[0.0, 0.0, 10.0, 10.0]] }
+        SearchHit { start, count: 3, rects: vec![[0.0, 0.0, 10.0, 10.0]], before: String::new(), matched: String::new(), after: String::new() }
+    }
+
+    #[test]
+    fn a_hits_line_is_cut_at_line_breaks_and_its_spaces_collapsed() {
+        assert_eq!(line_before("first line\r\n  the  quick "), "the quick ");
+        assert_eq!(line_before("no break here"), "no break here");
+        assert_eq!(line_before("\n"), "");
+        assert_eq!(line_after(" brown\tfox\r\nnext line"), " brown fox");
+        assert_eq!(line_after("\nnext"), "");
+        assert_eq!(line_after("tail   "), "tail");
     }
 
     #[test]

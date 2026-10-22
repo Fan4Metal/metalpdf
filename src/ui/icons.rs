@@ -136,6 +136,11 @@ pub enum Icon {
     FitPage,
     /// "1:1" drawn in strokes: the actual size, 100 % (MetalPDF).
     ActualSize,
+    /// A hand from the back, fingers up: the hand tool, dragging scrolls
+    /// (MetalPDF).
+    Hand,
+    /// An I-beam, the text cursor: the text selection tool (MetalPDF).
+    SelectText,
 }
 
 impl Icon {
@@ -203,6 +208,8 @@ impl Icon {
         Icon::FitWidth,
         Icon::FitPage,
         Icon::ActualSize,
+        Icon::Hand,
+        Icon::SelectText,
     ];
 }
 
@@ -416,6 +423,23 @@ pub fn paint(painter: &Painter, icon: Icon, c: Pos2, size: f32, color: Color32, 
             }
             painter.circle_filled(p(0.0, -1.6), 0.95 * k, color);
             painter.circle_filled(p(0.0, 1.6), 0.95 * k, color);
+        }
+        Icon::Hand => {
+            // A hand from the back: the palm, four fingers up, the thumb out
+            // to the left.
+            painter.rect_filled(rect(-3.5, -0.5, 7.0, 6.5), 2.0 * k, color);
+            for (x, top) in [(-2.6, -4.8), (-0.9, -6.5), (0.9, -6.2), (2.6, -4.6)] {
+                painter.line_segment([p(x, top), p(x, 1.0)], pen(1.5));
+            }
+            painter.line_segment([p(-3.0, 1.5), p(-6.2, -1.6)], pen(1.5));
+        }
+        Icon::SelectText => {
+            // An I-beam, the text cursor.
+            painter.line_segment([p(0.0, -5.5), p(0.0, 5.5)], line);
+            for y in [-6.0, 6.0] {
+                painter.line_segment([p(-2.6, y), p(-0.8, y)], line);
+                painter.line_segment([p(0.8, y), p(2.6, y)], line);
+            }
         }
         Icon::Sidebar => {
             // A window with a panel on its left.

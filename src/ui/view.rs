@@ -18,7 +18,7 @@ use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey, pixel_height, too_large};
 use crate::layout;
 use crate::pdfium::Target;
 use crate::selection::{self, Selection};
-use crate::settings::ViewMode;
+use crate::settings::{Tool, ViewMode};
 use crate::style::Palette;
 use crate::view::{ViewState, WHEEL_STEP};
 
@@ -69,9 +69,32 @@ const TILE_MARGIN: f32 = 0.3;
 /// not anew with every pixel the view moves while it is being made.
 const TILE_GRID: f32 = 256.0;
 
+/// What the right button was over when its menu opened: the menu's items
+/// follow that, not the pointer, which moves onto the menu.
+#[derive(Clone, Default)]
+pub struct MenuContext {
+    pub link: Option<Target>,
+    /// A text run in the editing mode: page and object.
+    pub text: Option<(usize, usize)>,
+    /// A picture in the editing mode: page, object, its box on the
+    /// unrotated page.
+    pub image: Option<(usize, usize, [f32; 4])>,
+    /// There is a selection to copy.
+    pub selection: bool,
+}
+
 /// What the page area tells the app.
 #[derive(Default)]
 pub struct ViewOutput {
+    /// The context menu: copy the selection, select the page, copy a
+    /// link's address, a picture replaced (`true`) or deleted, the
+    /// editing mode toggled.
+    pub copy: bool,
+    pub select_all: bool,
+    pub copy_text: Option<String>,
+    pub image_menu: Option<(usize, usize, [f32; 4], bool)>,
+    pub toggle_edit: bool,
+    pub set_tool: Option<Tool>,
     /// The renders wanted, most urgent first: `(key, tier)`.
     pub wanted: Vec<(RenderKey, u8)>,
     /// The pages in view.
@@ -101,7 +124,7 @@ pub struct ViewOutput {
 }
 
 /// Draw the pages of `tab` into `ui`.
-pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, palette: &Palette) -> ViewOutput {
+pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, palette: &Palette, tool: Tool) -> ViewOutput {
     let mut out = ViewOutput::default();
     let area = ui.available_rect_before_wrap();
     ui.painter().rect_filled(area, 0.0, palette.backdrop);
@@ -132,9 +155,12 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let mut selecting = tab.selecting;
     let find = &tab.find;
     let editing = tab.editing;
+    // The hand tool drags the pages; the editing mode's drags are its own.
+    let hand = tool == Tool::Hand && !editing;
     let editor: &mut Option<InlineEditor> = &mut tab.editor;
     let image: &mut Option<ImageSel> = &mut tab.image;
     let tiles: &mut HashMap<u32, RenderKey> = &mut tab.tiles;
+    let menu: &mut MenuContext = &mut tab.menu;
     let max_side = ui.input(|i| i.max_texture_side) as u64;
 
     let scroll = egui::ScrollArea::both()
@@ -142,7 +168,10 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
         .auto_shrink([false, false])
         // The mouse drags the selection, not the pages; in single-page
         // mode the wheel turns pages (above), so it is not the area's.
-        .scroll_source(if single { ScrollSource::SCROLL_BAR } else { ScrollSource::MOUSE_WHEEL | ScrollSource::SCROLL_BAR })
+        .scroll_source(
+            (if single { ScrollSource::SCROLL_BAR } else { ScrollSource::MOUSE_WHEEL | ScrollSource::SCROLL_BAR })
+                | (if hand { ScrollSource::DRAG } else { ScrollSource::NONE }),
+        )
         .vertical_scroll_offset(scroll_y)
         .horizontal_scroll_offset(scroll_x)
         .show_viewport(ui, |ui, viewport| {
@@ -152,6 +181,11 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
             let middle = viewport.min.y + viewport.height() / 2.0;
             let response = ui.interact(ui.min_rect(), ui.id().with("pages-sense"), Sense::click_and_drag());
             out.hovered = response.hovered();
+            // The right button let go: what it is over is noted for the menu.
+            let menu_opened = response.secondary_clicked();
+            if menu_opened {
+                *menu = MenuContext::default();
+            }
             let pointer = response.hover_pos().or_else(|| if selecting { response.interact_pointer_pos() } else { None });
             out.pointer = pointer.map(|p| [p.x - origin.x - scroll_x, p.y - origin.y - scroll_y]);
             let painter = ui.painter().clone();
@@ -285,6 +319,9 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                             if response.clicked() {
                                 out.edit_click = Some((i, object.index));
                             }
+                            if menu_opened {
+                                menu.text = Some((i, object.index));
+                            }
                         }
                     }
                 }
@@ -306,6 +343,9 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                             if response.clicked() {
                                 out.image_click = Some((i, img.index, text.rect_to_page(img.bounds)));
+                            }
+                            if menu_opened {
+                                menu.image = Some((i, img.index, text.rect_to_page(img.bounds)));
                             }
                         }
                     }
@@ -452,12 +492,84 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 if response.clicked() {
                     out.link = Some(target.clone());
                 }
+            } else if hand {
+                ui.ctx().set_cursor_icon(if response.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
             } else if over_text || selecting {
                 ui.ctx().set_cursor_icon(CursorIcon::Text);
             }
+            if menu_opened {
+                menu.link = hovered_link.as_ref().map(|(_, t)| t.clone());
+                menu.selection = selection.is_some_and(|s| !s.is_empty());
+            }
+            // The context menu, on what the right button was over.
+            crate::ui::menu::context_menu(&response, |ui| {
+                ui.set_min_width(220.0);
+                let item = |ui: &mut Ui, enabled: bool, text: &str, shortcut: &str| ui.add_enabled(enabled, egui::Button::new(text).shortcut_text(shortcut)).clicked();
+                if let Some((page, object)) = menu.text {
+                    if item(ui, true, tr!("Edit the text", "Изменить текст"), "") {
+                        out.edit_click = Some((page, object));
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                if let Some((page, object, rect)) = menu.image {
+                    if item(ui, true, tr!("Replace the picture…", "Заменить картинку…"), "") {
+                        out.image_menu = Some((page, object, rect, true));
+                        ui.close();
+                    }
+                    if item(ui, true, tr!("Delete the picture", "Удалить картинку"), "Del") {
+                        out.image_menu = Some((page, object, rect, false));
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                if let Some(target) = &menu.link {
+                    match target {
+                        Target::Uri(uri) => {
+                            if item(ui, true, tr!("Open the link", "Открыть ссылку"), "") {
+                                out.link = Some(target.clone());
+                                ui.close();
+                            }
+                            if item(ui, true, tr!("Copy the link's address", "Копировать адрес ссылки"), "") {
+                                out.copy_text = Some(uri.clone());
+                                ui.close();
+                            }
+                        }
+                        Target::Page { index, .. } => {
+                            if item(ui, true, &tr!(format!("Go to page {}", index + 1), format!("Перейти на страницу {}", index + 1)), "") {
+                                out.link = Some(target.clone());
+                                ui.close();
+                            }
+                        }
+                    }
+                    ui.separator();
+                }
+                if item(ui, menu.selection, tr!("Copy", "Копировать"), "Ctrl+C") {
+                    out.copy = true;
+                    ui.close();
+                }
+                if item(ui, true, tr!("Select all on the page", "Выделить всё на странице"), "Ctrl+A") {
+                    out.select_all = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.add(egui::Button::selectable(tool == Tool::Select, tr!("Select text", "Выделение текста")).shortcut_text("V")).clicked() {
+                    out.set_tool = Some(Tool::Select);
+                    ui.close();
+                }
+                if ui.add(egui::Button::selectable(tool == Tool::Hand, tr!("Hand", "Рука")).shortcut_text("H")).clicked() {
+                    out.set_tool = Some(Tool::Hand);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.add(egui::Button::selectable(editing, tr!("Edit text and pictures", "Правка текста и картинок")).shortcut_text("E")).clicked() {
+                    out.toggle_edit = true;
+                    ui.close();
+                }
+            });
             // The selection: begun with a press on text, grown while
             // dragging, cleared by a plain click.
-            if response.drag_started_by(PointerButton::Primary) && hovered_link.is_none() && !editing {
+            if response.drag_started_by(PointerButton::Primary) && hovered_link.is_none() && !editing && !hand {
                 selection = char_under_pointer.map(|c| Selection { anchor: c, focus: c });
                 selecting = selection.is_some();
             }

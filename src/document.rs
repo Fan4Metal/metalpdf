@@ -83,6 +83,9 @@ pub struct DocState {
     /// Page sizes in PDF points, `None` until the engine sent them.
     pub sizes: Vec<Option<[f32; 2]>>,
     pub labels: Vec<Option<String>>,
+    /// The file's page numbers less the printed ones (the file's page
+    /// `shift + 1` is page 1); 0 shows the labels or the file's numbers.
+    pub page_shift: i32,
     /// The first page's size: what unknown pages are laid out as.
     pub fallback: [f32; 2],
     pub title: Option<String>,
@@ -116,6 +119,7 @@ impl DocState {
             page_count: 0,
             sizes: Vec::new(),
             labels: Vec::new(),
+            page_shift: 0,
             fallback: DEFAULT_PAGE,
             title: None,
             sizes_next: 0,
@@ -299,6 +303,9 @@ impl DocState {
 
     /// The page's label if the document names it, else its number.
     pub fn label(&self, page: usize) -> String {
+        if self.page_shift != 0 {
+            return (page as i64 + 1 - i64::from(self.page_shift)).to_string();
+        }
         self.labels.get(page).cloned().flatten().unwrap_or_else(|| (page + 1).to_string())
     }
 

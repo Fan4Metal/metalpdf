@@ -75,6 +75,7 @@ impl ViewState {
             offset: self.anchor.offset,
             zoom: self.zoom,
             rotation: self.turns,
+            page_shift: 0,
         }
     }
 
@@ -393,7 +394,7 @@ mod tests {
     #[test]
     fn positions_round_trip() {
         let mut view = ViewState::new(ViewMode::Continuous, ZoomSetting::FitWidth);
-        view.restore(&FilePosition { path: "a.pdf".into(), page: 4, offset: 0.25, zoom: ZoomSetting::FitPage, rotation: 1 });
+        view.restore(&FilePosition { path: "a.pdf".into(), page: 4, offset: 0.25, zoom: ZoomSetting::FitPage, rotation: 1, page_shift: 0 });
         assert_eq!(view.anchor, Anchor { page: 4, offset: 0.25 });
         assert_eq!(view.turns, 1);
         let p = view.position(std::path::Path::new("a.pdf"));

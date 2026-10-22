@@ -8,7 +8,7 @@
 use egui::{Align, Key, Layout, RichText, Ui};
 
 use super::icons::Icon;
-use crate::settings::{ViewMode, ZoomSetting};
+use crate::settings::{Tool, ViewMode, ZoomSetting};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolbarAction {
@@ -19,7 +19,13 @@ pub enum ToolbarAction {
     Zoom(ZoomSetting),
     Rotate { clockwise: bool },
     Mode(ViewMode),
+    Tool(Tool),
     ToggleEdit,
+    /// The page numbering: read off the pages, set by the number of the
+    /// page shown, or the file's own.
+    DetectNumbering,
+    ThisPageIs { page: usize, number: i64 },
+    FileNumbering,
 }
 
 /// What the bar shows of the document.
@@ -32,6 +38,9 @@ pub struct ToolbarInfo {
     pub zoom_factor: f32,
     pub zoom: ZoomSetting,
     pub mode: ViewMode,
+    pub tool: Tool,
+    /// The page numbering's shift (`DocState::page_shift`).
+    pub page_shift: i32,
     /// The text editing mode is on.
     pub editing: bool,
     /// Text on the right: what is going on.
@@ -45,6 +54,8 @@ pub struct ToolbarInfo {
 pub struct PageField {
     pub text: String,
     pub focus: bool,
+    /// The number typed in the numbering menu ("This page is number…").
+    pub number_entry: String,
     /// The label the text was set from: retyped when the page changes.
     shown: String,
 }
@@ -87,6 +98,38 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         if typing && ui.input(|i| i.key_pressed(Key::Escape)) {
             field.text = info.label.clone();
             response.surrender_focus();
+        }
+        if let Some((current, _)) = info.page {
+            let response = if info.page_shift != 0 {
+                response.on_hover_text(tr!(format!("Page {} of the file", current + 1), format!("Страница {} файла", current + 1)))
+            } else {
+                response
+            };
+            // The numbering: the right button on the field.
+            super::menu::context_menu(&response, |ui| {
+                ui.set_min_width(280.0);
+                ui.label(RichText::new(tr!("Page numbering", "Нумерация страниц")).strong());
+                if ui.button(tr!("Read the numbers printed on the pages", "Найти номера, напечатанные на страницах")).clicked() {
+                    actions.push(ToolbarAction::DetectNumbering);
+                    ui.close();
+                }
+                ui.horizontal(|ui| {
+                    ui.label(tr!("This page is number", "Эта страница — номер"));
+                    let entry = ui.add(egui::TextEdit::singleline(&mut field.number_entry).desired_width(48.0));
+                    if entry.lost_focus()
+                        && ui.input(|i| i.key_pressed(Key::Enter))
+                        && let Ok(number) = field.number_entry.trim().parse::<i64>()
+                    {
+                        actions.push(ToolbarAction::ThisPageIs { page: current, number });
+                        field.number_entry.clear();
+                        ui.close();
+                    }
+                });
+                if ui.add_enabled(info.page_shift != 0, egui::Button::new(tr!("The file's own numbering", "Нумерация как в файле"))).clicked() {
+                    actions.push(ToolbarAction::FileNumbering);
+                    ui.close();
+                }
+            });
         }
         if let Some((_, count)) = info.page {
             ui.label(tr!(format!("of {count}"), format!("из {count}")));
@@ -157,6 +200,14 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         }
         if super::icon_button(ui, Icon::SinglePage, !continuous, tr!("One page at a time", "По одной странице")).clicked() {
             actions.push(ToolbarAction::Mode(ViewMode::Single));
+        }
+        ui.separator();
+        // The tool: what the left button does over the pages.
+        if super::icon_button(ui, Icon::SelectText, info.tool == Tool::Select, tr!("Select text (V): drag over the text", "Выделение текста (V): протяните по тексту")).clicked() {
+            actions.push(ToolbarAction::Tool(Tool::Select));
+        }
+        if super::icon_button(ui, Icon::Hand, info.tool == Tool::Hand, tr!("Hand (H): drag the pages to scroll", "Рука (H): тяните страницы, чтобы прокручивать")).clicked() {
+            actions.push(ToolbarAction::Tool(Tool::Hand));
         }
         ui.separator();
         let edit_tip = tr!("Edit text and pictures (E): click a run of text or a picture to change it", "Правка текста и картинок (E): щёлкните строку текста или картинку, чтобы изменить её");

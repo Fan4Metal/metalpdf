@@ -95,6 +95,8 @@ pub struct FirstRender {
 pub enum Request {
     Open { id: DocId, path: PathBuf, password: Option<String>, first: Option<FirstRender> },
     Close(DocId),
+    /// Look for the numbers printed on the pages (`Event::Numbering`).
+    DetectNumbering(DocId),
     /// The sizes (and labels) of pages `start..start + SIZE_BATCH`.
     Sizes { id: DocId, start: usize },
     Outline(DocId),
@@ -127,6 +129,9 @@ pub enum Event {
     Links { id: DocId, page: usize, links: Arc<Vec<Link>> },
     /// The hits on one page; `done` after the last page searched.
     SearchHits { id: DocId, search: u32, page: usize, hits: Vec<SearchHit>, done: bool },
+    /// The page shift the numbers printed on the pages agree on, `None`
+    /// when they do not (`Request::DetectNumbering`).
+    Numbering { id: DocId, shift: Option<i32> },
     Objects { id: DocId, page: usize, objects: Arc<PageObjects> },
     /// `page` changed (an edit, or one taken back); `edits` is how many
     /// remain.
@@ -145,7 +150,15 @@ pub struct SearchHit {
     pub count: usize,
     /// left, bottom, right, top in page space, one per line.
     pub rects: Vec<[f32; 4]>,
+    /// The line the hit is on, for the sidebar's list: the text before
+    /// the match on its line, the match, the text after it.
+    pub before: String,
+    pub matched: String,
+    pub after: String,
 }
+
+/// How many characters round a hit the sidebar's line may show.
+pub const HIT_CONTEXT: usize = 40;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DocInfo {
@@ -351,7 +364,8 @@ struct Worker {
     edits: HashMap<DocId, EditState>,
     /// A TrueType font every character can be set in (Arial), read when
     /// an edit first needs it.
-    fallback_font: Option<Vec<u8>>,
+    /// The stand-in fonts for replaced text (`fonts::Fonts`).
+    fonts: crate::fonts::Fonts,
 }
 
 /// Open pages kept per engine: the decoded images of a scanned page are
@@ -381,7 +395,7 @@ impl Worker {
             search: None,
             paths: HashMap::new(),
             edits: HashMap::new(),
-            fallback_font: None,
+            fonts: Default::default(),
         };
         worker.serve();
     }
@@ -517,6 +531,28 @@ impl Worker {
                     self.search = None;
                 }
             }
+            Request::DetectNumbering(id) => {
+                // The start and the end of two dozen pages spread over the
+                // document, where page numbers are printed.
+                let count = self.view_doc(id).map_or(0, Document::page_count);
+                let samples = NUMBERING_SAMPLES.min(count);
+                let mut texts = Vec::with_capacity(samples);
+                for s in 0..samples {
+                    let index = if samples == count { s } else { s * count / samples + count / (2 * samples) };
+                    if let Some(p) = self.page(id, index) {
+                        let n = p.char_count();
+                        let text = if n > 2 * NUMBERING_CHARS {
+                            format!("{}\n{}", p.text(0, NUMBERING_CHARS), p.text(n - NUMBERING_CHARS, NUMBERING_CHARS))
+                        } else {
+                            p.text(0, n)
+                        };
+                        texts.push((index, text));
+                    }
+                }
+                let shift = numbering_shift(&texts);
+                log::debug!("page numbering of document {id}: shift {shift:?} from {} pages", texts.len());
+                self.send(Event::Numbering { id, shift });
+            }
             Request::Objects { id, page } => {
                 let Some(p) = self.page(id, page) else { return };
                 let objects = Arc::new(p.objects());
@@ -577,10 +613,6 @@ impl Worker {
             refuse(&obstacles, &edit)?;
             self.edits.insert(id, EditState { doc, obstacles, log: Vec::new(), edited: HashSet::new(), all_pages: false });
         }
-        if self.fallback_font.is_none() {
-            let fonts = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-            self.fallback_font = std::fs::read(fonts.join("Fonts").join("arial.ttf")).ok();
-        }
         if edit.restructures() {
             // Every open page of the document is stale (its index may
             // name another page now); every page comes from the copy.
@@ -615,17 +647,20 @@ impl Worker {
         self.pages.remove(&(id, page));
         self.page_order.retain(|k| *k != (id, page));
         self.edits.get_mut(&id).expect("inserted above").edited.insert(page);
-        let fallback = self.fallback_font.clone();
-        let p = self.page(id, page).ok_or("the page could not be loaded")?;
-        match &edit {
-            Edit::Text { object, text, .. } => {
-                p.set_text(*object, text, fallback.as_deref())?;
-            }
-            Edit::Remove { object, .. } => p.remove_object(*object)?,
-            Edit::ReplaceImage { object, path, .. } => p.replace_image(*object, path)?,
-            Edit::Place { object, bounds, .. } => p.place_object(*object, *bounds)?,
-            _ => unreachable!("a page edit"),
-        }
+        // The stand-in fonts, lent to the page while it edits.
+        let mut fonts = std::mem::take(&mut self.fonts);
+        let applied = match self.page(id, page) {
+            None => Err("the page could not be loaded".to_owned()),
+            Some(p) => match &edit {
+                Edit::Text { object, text, .. } => p.set_text(*object, text, &mut |name, flags| fonts.get(name, flags)).map(|_| ()),
+                Edit::Remove { object, .. } => p.remove_object(*object),
+                Edit::ReplaceImage { object, path, .. } => p.replace_image(*object, path),
+                Edit::Place { object, bounds, .. } => p.place_object(*object, *bounds),
+                _ => unreachable!("a page edit"),
+            },
+        };
+        self.fonts = fonts;
+        applied?;
         let state = self.edits.get_mut(&id).expect("inserted above");
         state.log.push(edit);
         Ok(state.log.len())
@@ -686,7 +721,17 @@ impl Worker {
             Some(p) => p
                 .find(&query, match_case, whole_words)
                 .into_iter()
-                .map(|(start, n)| SearchHit { start, count: n, rects: p.text_rects(start, n) })
+                .map(|(start, n)| {
+                    let from = start.saturating_sub(HIT_CONTEXT);
+                    SearchHit {
+                        start,
+                        count: n,
+                        rects: p.text_rects(start, n),
+                        before: crate::search::line_before(&p.text(from, start - from)),
+                        matched: p.text(start, n),
+                        after: crate::search::line_after(&p.text(start + n, HIT_CONTEXT)),
+                    }
+                })
                 .collect(),
             None => Vec::new(),
         };
@@ -842,6 +887,38 @@ enum Work {
     SearchPage,
 }
 
+/// How many pages the numbering is read from, and how many characters at
+/// each end of a page.
+const NUMBERING_SAMPLES: usize = 24;
+const NUMBERING_CHARS: usize = 200;
+
+/// The shift between the file's page numbers and the ones printed on the
+/// pages, from the numbers found at the start and the end of sampled
+/// pages' text (`samples`: the page's index and that text): the shift
+/// most pages agree on, when at least three and half of them do. 0 when
+/// the printed numbers are the file's.
+pub fn numbering_shift(samples: &[(usize, String)]) -> Option<i32> {
+    let mut votes: HashMap<i32, usize> = HashMap::new();
+    for (index, text) in samples {
+        let head: String = text.chars().take(NUMBERING_CHARS).collect();
+        let tail: String = text.chars().rev().take(NUMBERING_CHARS).collect::<Vec<_>>().into_iter().rev().collect();
+        let mut seen = HashSet::new();
+        for part in [head, tail] {
+            for token in part.split(|c: char| !c.is_ascii_digit()) {
+                if token.is_empty() || token.len() > 5 || (token.len() > 1 && token.starts_with('0')) {
+                    continue;
+                }
+                let Ok(n) = token.parse::<i32>() else { continue };
+                if seen.insert(n) {
+                    *votes.entry(*index as i32 + 1 - n).or_default() += 1;
+                }
+            }
+        }
+    }
+    let (shift, count) = votes.into_iter().max_by_key(|(s, c)| (*c, -s.abs()))?;
+    (count >= 3 && count * 2 >= samples.len()).then_some(shift)
+}
+
 /// The pixel width of a page of `size` for the first render: the same sum
 /// the UI does once it knows the view (`layout::render_width`).
 pub fn first_width(size: [f32; 2], first: FirstRender) -> u32 {
@@ -851,6 +928,23 @@ pub fn first_width(size: [f32; 2], first: FirstRender) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_printed_numbering_is_read_off_the_pages() {
+        // A book whose page 1 is the file's 17th page: the number is in
+        // the header or the footer, with a year and a figure number about.
+        let samples: Vec<(usize, String)> = (16..40)
+            .map(|i| (i, format!("Chapter 3 • Cells {}\nSome text about figure 3.{} from 2026.\nMore text\n{}", i + 1 - 16, i % 4, i + 1 - 16)))
+            .collect();
+        assert_eq!(numbering_shift(&samples), Some(16));
+        // The file's own numbering.
+        let own: Vec<(usize, String)> = (0..10).map(|i| (i, format!("page {}\n…", i + 1))).collect();
+        assert_eq!(numbering_shift(&own), Some(0));
+        // Nothing that agrees.
+        let noise: Vec<(usize, String)> = (0..10).map(|i| (i, format!("figure {} of 2026", i * 7))).collect();
+        assert_eq!(numbering_shift(&noise), None);
+        assert_eq!(numbering_shift(&[]), None);
+    }
 
     #[test]
     fn large_pages_are_tiled() {

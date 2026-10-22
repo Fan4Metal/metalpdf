@@ -71,6 +71,17 @@ pub enum ZoomSetting {
     Scale(f32),
 }
 
+/// What the left mouse button does over the pages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tool {
+    /// Dragging selects text.
+    #[default]
+    Select,
+    /// Dragging scrolls the pages.
+    Hand,
+}
+
 /// Which list the sidebar shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -78,6 +89,8 @@ pub enum SidebarTab {
     #[default]
     Thumbnails,
     Outline,
+    /// The search's hits, with the line each is on.
+    Search,
 }
 
 /// The main window's place, in physical pixels of the screen, and the
@@ -110,6 +123,10 @@ pub struct FilePosition {
     /// Quarter turns clockwise.
     #[serde(default)]
     pub rotation: u8,
+    /// The file's page numbers less the ones printed on the pages: the
+    /// file's page `shift + 1` is page 1. 0: the file's own numbering.
+    #[serde(default)]
+    pub page_shift: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -133,6 +150,8 @@ pub struct Settings {
     pub session_active: usize,
     pub window: Option<WindowGeometry>,
     pub view_mode: ViewMode,
+    /// What the mouse does over the pages: select text or drag them.
+    pub tool: Tool,
     /// The zoom a document opens with when it has no saved position.
     pub zoom: ZoomSetting,
     pub sidebar_visible: bool,
@@ -157,6 +176,7 @@ impl Default for Settings {
             session_active: 0,
             window: None,
             view_mode: ViewMode::Continuous,
+            tool: Tool::Select,
             zoom: ZoomSetting::FitWidth,
             sidebar_visible: false,
             sidebar_width: 220.0,
@@ -327,6 +347,7 @@ mod tests {
             offset: 0.25,
             zoom: ZoomSetting::Scale(1.5),
             rotation: 0,
+            page_shift: 0,
         };
         for i in 0..MAX_POSITIONS + 5 {
             settings.set_position(at(i));

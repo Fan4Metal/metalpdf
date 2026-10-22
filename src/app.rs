@@ -71,6 +71,8 @@ pub struct Tab {
     /// The tile each page is shown from or waits for, at a zoom where the
     /// whole page would be too large a texture (`ui/view.rs`).
     pub tiles: HashMap<u32, RenderKey>,
+    /// What the page area's context menu was opened over.
+    pub menu: crate::ui::view::MenuContext,
     /// Where the reader was before each jump (a link, a bookmark, a
     /// thumbnail, the page field, a hit), for Alt+Left; and the jumps
     /// gone back from, for Alt+Right.
@@ -140,6 +142,7 @@ impl Tab {
             selection: None,
             selecting: false,
             tiles: HashMap::new(),
+            menu: Default::default(),
             back: Vec::new(),
             forward: Vec::new(),
             editing: false,
@@ -199,7 +202,9 @@ impl Tab {
     }
 
     fn position(&self) -> FilePosition {
-        self.view.position(&self.path)
+        let mut position = self.view.position(&self.path);
+        position.page_shift = self.doc.page_shift;
+        position
     }
 }
 
@@ -392,6 +397,8 @@ pub struct App {
     confirm: Option<Confirm>,
     /// The reader chose to quit with unsaved edits: the close goes on.
     quitting: bool,
+    /// The sidebar as it was before a search showed its hits in it.
+    sidebar_before_search: Option<(bool, crate::settings::SidebarTab)>,
 }
 
 /// Closed tabs Ctrl+Shift+T can open again.
@@ -431,6 +438,9 @@ impl App {
             // the family).
             o.input_options.line_scroll_speed = 100.0;
         });
+        // Scroll bars that stay wide: egui's floating ones thin out when
+        // idle and are hard to catch with the mouse.
+        cc.egui_ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
         engine.set_context(cc.egui_ctx.clone());
         // The window is still hidden (eframe shows it after the first
         // frame), so a caption set now is shown from the start; set after
@@ -505,6 +515,7 @@ impl App {
             window_changed_at: None,
             last_geometry: None,
             confirm: None,
+            sidebar_before_search: None,
             quitting: false,
         };
         // The tabs: the active one is being opened by the engine already
@@ -516,7 +527,9 @@ impl App {
             }
             let view = app.view_for(path);
             let tab_id = app.take_tab_id();
-            app.windows[0].tabs.push(Tab::new(tab_id, path.clone(), DocState::new(doc_id), view));
+            let mut doc = DocState::new(doc_id);
+            doc.page_shift = app.shift_for(path);
+            app.windows[0].tabs.push(Tab::new(tab_id, path.clone(), doc, view));
             if !restored {
                 app.settings.add_recent(path);
                 app.settings_dirty = true;
@@ -561,6 +574,11 @@ impl App {
         view
     }
 
+    /// The page numbering shift a document at `path` was left with.
+    fn shift_for(&self, path: &Path) -> i32 {
+        self.settings.position(path).map_or(0, |p| p.page_shift)
+    }
+
     /// Opens `paths` in window `window` (the current one by default).
     fn open_paths(&mut self, paths: Vec<PathBuf>, window: Option<usize>) {
         let target = window.unwrap_or(self.current).min(self.windows.len() - 1);
@@ -588,7 +606,9 @@ impl App {
         let tab_id = self.take_tab_id();
         self.engine.request(Request::Open { id: doc_id, path: path.clone(), password: None, first: None });
         let view = self.view_for(&path);
-        self.windows[target].add_tab(Tab::new(tab_id, path.clone(), DocState::new(doc_id), view));
+        let mut doc = DocState::new(doc_id);
+        doc.page_shift = self.shift_for(&path);
+        self.windows[target].add_tab(Tab::new(tab_id, path.clone(), doc, view));
         self.settings.add_recent(&path);
         self.settings_dirty = true;
     }
@@ -824,6 +844,7 @@ impl App {
                         | Event::Edited { id, .. }
                         | Event::EditFailed { id, .. }
                         | Event::Restructured { id, .. }
+                        | Event::Numbering { id, .. }
                         | Event::Saved { id, .. } => *id,
                         _ => continue,
                     };
@@ -847,6 +868,23 @@ impl App {
                         }
                         if reopen {
                             self.reopen_tab(doc);
+                        }
+                        continue;
+                    }
+                    if let Event::Numbering { shift, .. } = &other {
+                        if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
+                            match shift {
+                                Some(0) => {
+                                    tab.doc.page_shift = 0;
+                                    tab.notify(tr!("The pages are numbered as in the file", "Страницы пронумерованы как в файле").to_owned());
+                                }
+                                Some(s) => {
+                                    tab.doc.page_shift = *s;
+                                    tab.notify(tr!(format!("Page numbering read: page 1 is the file's page {}", s + 1), format!("Нумерация найдена: страница 1 — это страница {} файла", s + 1)));
+                                }
+                                None => tab.notify(tr!("No page numbers found on the pages", "Номера страниц на страницах не найдены").to_owned()),
+                            }
+                            self.settings_dirty = true;
                         }
                         continue;
                     }
@@ -1158,6 +1196,13 @@ impl App {
                 engine.request(Request::UndoEdit(tab.doc.id));
             }
         }
+        // The tool: V selects text, H is the hand.
+        for (key, tool) in [(Key::V, crate::settings::Tool::Select), (Key::H, crate::settings::Tool::Hand)] {
+            if consume(Modifiers::NONE, key) && !typing && self.settings.tool != tool {
+                self.settings.tool = tool;
+                self.settings_dirty = true;
+            }
+        }
         if consume(Modifiers::NONE, Key::E)
             && !typing
             && let Some(tab) = self.win().active_tab_mut()
@@ -1272,6 +1317,8 @@ impl App {
         let engine = &self.engine;
         let mut mode_change = None;
         let mut zoom_change = None;
+        let mut tool_change = None;
+        let mut shift_change = false;
         if let Some(tab) = self.windows[self.current].active_tab_mut() {
             let count = tab.doc.page_count;
             let sizes = tab.doc.sizes.clone();
@@ -1294,6 +1341,19 @@ impl App {
                         tab.view.set_mode(mode);
                         mode_change = Some(mode);
                     }
+                    ToolbarAction::Tool(tool) => tool_change = Some(tool),
+                    ToolbarAction::DetectNumbering => {
+                        engine.request(Request::DetectNumbering(tab.doc.id));
+                        tab.notify(tr!("Reading the page numbers…", "Ищу номера страниц…").to_owned());
+                    }
+                    ToolbarAction::ThisPageIs { page, number } => {
+                        tab.doc.page_shift = (page as i64 + 1 - number).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                        shift_change = true;
+                    }
+                    ToolbarAction::FileNumbering => {
+                        tab.doc.page_shift = 0;
+                        shift_change = true;
+                    }
                     ToolbarAction::ToggleEdit => {
                         tab.editing = !tab.editing;
                         tab.editor = None;
@@ -1309,6 +1369,16 @@ impl App {
         }
         if let Some(zoom) = zoom_change {
             self.remember_zoom(zoom);
+        }
+        if let Some(tool) = tool_change
+            && self.settings.tool != tool
+        {
+            self.settings.tool = tool;
+            self.settings_dirty = true;
+        }
+        if shift_change {
+            // Kept with the document's position.
+            self.settings_dirty = true;
         }
     }
 
@@ -1357,6 +1427,7 @@ impl App {
     fn find_bar(&mut self, ui: &mut Ui, palette: &Palette) {
         let cur = self.current;
         let wid = self.windows[cur].id;
+        let mut search_started = false;
         let (case, words) = (self.settings.find_case, self.settings.find_words);
         let engine = &self.engine;
         let mut toggle_case = false;
@@ -1405,6 +1476,7 @@ impl App {
         // page the reader is on.
         let (case, words) = (case != toggle_case, words != toggle_words);
         if let Some(search) = tab.find.needs_search(case, words) {
+            search_started = true;
             engine.request(Request::StopSearch(tab.doc.id));
             engine.request(Request::Search {
                 id: tab.doc.id,
@@ -1425,6 +1497,24 @@ impl App {
         }
         if toggle_words {
             self.settings.find_words = !self.settings.find_words;
+            self.settings_dirty = true;
+        }
+        // A search shows its hits in the sidebar; the sidebar goes back to
+        // what it was when the search closes.
+        if search_started {
+            if self.sidebar_before_search.is_none() {
+                self.sidebar_before_search = Some((self.settings.sidebar_visible, self.settings.sidebar_tab));
+            }
+            self.settings.sidebar_visible = true;
+            self.settings.sidebar_tab = crate::settings::SidebarTab::Search;
+            self.settings_dirty = true;
+        }
+        if close
+            && let Some((visible, which)) = self.sidebar_before_search.take()
+            && self.settings.sidebar_tab == crate::settings::SidebarTab::Search
+        {
+            self.settings.sidebar_visible = visible;
+            self.settings.sidebar_tab = which;
             self.settings_dirty = true;
         }
     }
@@ -1502,6 +1592,12 @@ impl App {
                     }
                 }
                 SidebarAction::Follow(target) => self.follow(target),
+                SidebarAction::GoToHit(page, i) => {
+                    if let Some(tab) = self.windows[cur].active_tab_mut() {
+                        tab.find.current = Some((page, i));
+                        tab.find.jump = true;
+                    }
+                }
                 SidebarAction::Tab(which) => {
                     self.settings.sidebar_tab = which;
                     self.settings_dirty = true;
@@ -1853,6 +1949,8 @@ impl App {
         let engine = &self.engine;
         let mut replace_image = None;
         let Some(tab) = self.windows[cur].active_tab_mut() else {
+            // The start page on the panel colour (white in the light theme), as MetalMD's.
+            ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, ui.visuals().panel_fill);
             let action = crate::ui::home::show(ui, &self.settings.recent, self.engine_error.as_deref(), palette, &mut self.start_icon);
             match action {
                 Some(HomeAction::Open(path)) => self.open_paths(vec![path], Some(cur)),
@@ -1866,7 +1964,7 @@ impl App {
         };
         match tab.doc.status.clone() {
             Status::Ready => {
-                let out = crate::ui::view::show(ui, tab, &mut self.textures, frame, palette);
+                let out = crate::ui::view::show(ui, tab, &mut self.textures, frame, palette, self.settings.tool);
                 // Ctrl+wheel over the pages: a zoom step a notch round the pointer.
                 if out.zoom_notches != 0.0 {
                     let sizes = tab.doc.sizes.clone();
@@ -1922,6 +2020,46 @@ impl App {
                     && let Some(sel) = tab.image.as_ref()
                 {
                     replace_image = Some((tab.id, sel.page, sel.object));
+                }
+                // The context menu's choices.
+                if out.copy {
+                    let text = tab.selected_text();
+                    if !text.is_empty() {
+                        ui.ctx().copy_text(text);
+                    }
+                }
+                if out.select_all {
+                    let page = tab.view.current;
+                    if let Some(text) = tab.doc.text.get(&page)
+                        && !text.layout.chars.is_empty()
+                    {
+                        tab.selection = Some(Selection { anchor: (page, 0), focus: (page, text.layout.chars.len() - 1) });
+                    }
+                }
+                if let Some(text) = out.copy_text {
+                    ui.ctx().copy_text(text);
+                }
+                if let Some((page, object, rect, replace)) = out.image_menu {
+                    tab.editor = None;
+                    if replace {
+                        tab.image = Some(ImageSel { page, object, rect, drag: None });
+                        replace_image = Some((tab.id, page, object));
+                    } else {
+                        tab.image = None;
+                        engine.request(Request::Edit { id: tab.doc.id, edit: Edit::Remove { page, object } });
+                    }
+                }
+                if out.toggle_edit {
+                    tab.editing = !tab.editing;
+                    tab.editor = None;
+                    tab.image = None;
+                    tab.selection = None;
+                }
+                if let Some(tool) = out.set_tool
+                    && self.settings.tool != tool
+                {
+                    self.settings.tool = tool;
+                    self.settings_dirty = true;
                 }
                 if let Some(first) = out.visible.clone().next() {
                     tab.doc.need_sizes_near(engine, first);
@@ -1995,9 +2133,12 @@ impl App {
                 };
                 let labels = tab.doc.labels.clone();
                 let count = tab.doc.page_count;
+                let shift = tab.doc.page_shift;
                 let info = ToolbarInfo {
                     page: Some((tab.view.current, count)),
                     label: tab.doc.label(tab.view.current),
+                    tool: self.settings.tool,
+                    page_shift: shift,
                     zoom_factor: crate::layout::zoom_of_scale(layout.scale),
                     zoom: tab.view.zoom,
                     mode: tab.view.mode,
@@ -2010,8 +2151,16 @@ impl App {
                     if let Some(i) = labels.iter().position(|l| l.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(text))) {
                         return Some(i);
                     }
-                    let n: usize = text.parse().ok()?;
-                    (1..=count).contains(&n).then(|| n - 1)
+                    let n: i64 = text.parse().ok()?;
+                    // Under a page shift the number is the printed one;
+                    // outside the printed range, the file's.
+                    if shift != 0 {
+                        let index = n - 1 + i64::from(shift);
+                        if (0..count as i64).contains(&index) {
+                            return Some(index as usize);
+                        }
+                    }
+                    (1..=count as i64).contains(&n).then(|| (n - 1) as usize)
                 };
                 (info, Box::new(resolve))
             }
@@ -2019,6 +2168,8 @@ impl App {
                 ToolbarInfo {
                     page: None,
                     label: String::new(),
+                    tool: self.settings.tool,
+                    page_shift: 0,
                     zoom_factor: 1.0,
                     zoom: self.settings.zoom,
                     mode: self.settings.view_mode,

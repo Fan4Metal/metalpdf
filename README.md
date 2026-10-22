@@ -69,7 +69,11 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 
 ### Find
 
-`Ctrl+F` opens the find bar. The search starts from the page being read and goes round the document, page by page; the hits are highlighted on the pages, the current one brighter, and the bar says which hit of how many (with a plus while the search goes on). `Enter` and `F3` go to the next hit, `Shift+F3` to the previous; `Aa` and <u>ab</u> match the case and whole words only; `Esc` closes the bar.
+`Ctrl+F` opens the find bar. The search starts from the page being read and goes round the document, page by page; the hits are highlighted on the pages, the current one brighter, and the bar says which hit of how many (with a plus while the search goes on). `Enter` and `F3` go to the next hit, `Shift+F3` to the previous; `Aa` and <u>ab</u> match the case and whole words only; `Esc` closes the bar. The sidebar's Search tab lists the hits by page, each on the line it is on with the match coloured; a click goes to it. A search opens the sidebar on that tab; closing the search puts the sidebar back as it was.
+
+The right button over the pages opens a menu: copy the selection, select the page, open a link or copy its address, the tools, and in the editing mode the text run or the picture under the pointer. Two tools are on the toolbar: with the text tool (`V`) dragging selects text, with the hand (`H`) dragging scrolls the pages.
+
+When a document's printed page numbers differ from the file's (a book whose page 1 is the file's 17th page, say), the right button on the page field offers to read the printed numbers off the pages (two dozen pages are sampled and the shift they agree on is taken), to state the number of the page shown, or to go back to the file's numbering. The page field, the thumbnails and the search list then show the printed numbers, a number typed in the field is the printed one, and the setting is kept with the document's position. A document with page labels of its own (such as roman numerals for a preface) shows those as it is.
 
 ### Text selection and links
 
@@ -79,7 +83,7 @@ Text is selected by dragging over it, across pages too, and copied with `Ctrl+C`
 
 The editing mode (`E`, or the pencil on the toolbar) outlines the text objects of the pages, the runs of text a PDF is made of: usually a line or a part of one. A click on a run opens a field over it; `Enter` replaces the run's text, `Esc` leaves it as it was. `Ctrl+Z` takes the last change back. The pages keep their layout: a longer text runs past where the old one ended, nothing is reflowed.
 
-A run keeps its font when that font can show the new text; a font embedded as a subset of its glyphs cannot, and the run is set in Arial instead, at the same place, size and colour.
+A run keeps its font when that font can show the new text; a font embedded as a subset of its glyphs cannot, and the run is set in a stand-in font instead, at the same place, size and colour: Arial, Times New Roman or Courier New after the look of the original, in its weight and slant, so that a bold run stays bold.
 
 Pictures are outlined too. A click selects one: it is moved by dragging and resized by its corner handles (the proportions kept), **Replace…** puts a JPEG or PNG file in its place, fitted into the old box with its own proportions, and **Delete** (or the `Del` key) removes it.
 
@@ -103,6 +107,7 @@ The changes live in a copy of the document until `Ctrl+S` saves it (a Save As di
 | `Ctrl+0`, `Ctrl+1`, `Ctrl+2` | Fit width, 100 %, fit page |
 | `Ctrl++`, `Ctrl+−`, `Ctrl+wheel` | Zoom in, zoom out (round the pointer with the wheel) |
 | `R`, `Shift+R` | Turn the pages right, left |
+| `V`, `H` | The text tool (dragging selects), the hand (dragging scrolls) |
 | `F4` | Sidebar |
 | `Ctrl+F`, `F3`, `Shift+F3`, `Esc` | Find, next hit, previous hit, close |
 | `Ctrl+C`, `Ctrl+A`, `Esc` | Copy the selection, select the page, clear |

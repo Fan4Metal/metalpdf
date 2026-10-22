@@ -16,6 +16,7 @@ mod caption;
 mod dialog;
 mod document;
 mod engine;
+mod fonts;
 mod icon;
 mod layout;
 mod pdfium;

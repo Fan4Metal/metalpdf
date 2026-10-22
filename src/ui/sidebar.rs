@@ -16,6 +16,8 @@ pub enum SidebarAction {
     GoToPage(usize),
     Follow(Target),
     Tab(SidebarTab),
+    /// A hit in the search list: page and index among the page's hits.
+    GoToHit(usize, usize),
     /// A blank page before (`at` = the page) or after (`at` = the page + 1).
     InsertBlank { at: usize },
     /// The pages of a PDF chosen in a dialog, put in at `at`.
@@ -49,12 +51,16 @@ pub fn show(
         if ui.selectable_label(which == SidebarTab::Outline, tr!("Outline", "Оглавление")).clicked() {
             actions.push(SidebarAction::Tab(SidebarTab::Outline));
         }
+        if ui.selectable_label(which == SidebarTab::Search, tr!("Search", "Поиск")).clicked() {
+            actions.push(SidebarAction::Tab(SidebarTab::Search));
+        }
     });
     ui.add_space(4.0);
     ui.separator();
     match which {
         SidebarTab::Thumbnails => thumbnails(ui, tab, textures, frame, palette, wanted, &mut actions),
         SidebarTab::Outline => outline(ui, tab, palette, &mut actions),
+        SidebarTab::Search => search(ui, tab, palette, &mut actions),
     }
     actions
 }
@@ -202,6 +208,85 @@ fn outline(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarA
             path.pop();
         }
     });
+}
+
+/// The most rows the search list lays out.
+const SEARCH_ROWS: usize = 5000;
+
+/// The search's hits by page, each on the line it is on with the match
+/// in the accent colour, the current one selected; a click goes to it.
+fn search(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarAction>) {
+    let find = &tab.find;
+    ui.add_space(8.0);
+    if !find.open || find.query.is_empty() {
+        ui.label(RichText::new(tr!("Ctrl+F finds text; the hits are listed here.", "Ctrl+F ищет текст; находки будут здесь.")).color(palette.muted));
+        return;
+    }
+    ui.label(RichText::new(find.status()).color(palette.muted));
+    ui.add_space(4.0);
+    // The rows: a page's header, then its hits.
+    enum Row {
+        Page(usize),
+        Hit(usize, usize),
+    }
+    let mut rows = Vec::new();
+    'pages: for (&page, hits) in &find.hits {
+        rows.push(Row::Page(page));
+        for i in 0..hits.len() {
+            if rows.len() >= SEARCH_ROWS {
+                break 'pages;
+            }
+            rows.push(Row::Hit(page, i));
+        }
+    }
+    let current = find.current;
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+    let spacing = ui.spacing().item_spacing.y;
+    // Follow the current hit when it changes.
+    let last_id = ui.id().with("search-last");
+    let changed = ui.data(|d| d.get_temp::<Option<(usize, usize)>>(last_id)) != Some(current);
+    if changed {
+        ui.data_mut(|d| d.insert_temp(last_id, current));
+    }
+    let mut area = ScrollArea::vertical().id_salt(("search", tab.id)).auto_shrink([false, false]);
+    if changed
+        && let Some(c) = current
+        && let Some(row) = rows.iter().position(|r| matches!(r, Row::Hit(p, i) if (*p, *i) == c))
+    {
+        let offset = row as f32 * (row_height + spacing) - ui.available_height() / 2.0;
+        area = area.vertical_scroll_offset(offset.max(0.0));
+    }
+    let text_color = ui.visuals().text_color();
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    area.show_rows(ui, row_height, rows.len(), |ui, range| {
+        let width = ui.available_width();
+        for row in &rows[range] {
+            match *row {
+                Row::Page(page) => {
+                    let label = tab.doc.label(page);
+                    ui.label(RichText::new(tr!(format!("Page {label}"), format!("Стр. {label}"))).color(palette.muted).size(12.0));
+                }
+                Row::Hit(page, i) => {
+                    let hit = &find.hits[&page][i];
+                    let mut job = egui::text::LayoutJob::default();
+                    job.wrap.max_width = width - 12.0;
+                    job.wrap.max_rows = 1;
+                    job.wrap.break_anywhere = true;
+                    let plain = egui::text::TextFormat { font_id: font.clone(), color: text_color, ..Default::default() };
+                    let strong = egui::text::TextFormat { font_id: font.clone(), color: palette.accent, ..Default::default() };
+                    job.append(&hit.before, 0.0, plain.clone());
+                    job.append(&hit.matched, 0.0, strong);
+                    job.append(&hit.after, 0.0, plain);
+                    if ui.selectable_label(current == Some((page, i)), job).clicked() {
+                        actions.push(SidebarAction::GoToHit(page, i));
+                    }
+                }
+            }
+        }
+    });
+    if rows.len() >= SEARCH_ROWS {
+        ui.label(RichText::new(tr!("…and more", "…и ещё")).color(palette.muted).size(12.0));
+    }
 }
 
 /// One bookmark with its children under a fold.

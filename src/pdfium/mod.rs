@@ -601,8 +601,17 @@ impl Page {
         TextLayout { chars }
     }
 
-    /// The text of characters `start..start + count`.
-    #[cfg(test)]
+    /// How many characters the page's text has.
+    pub fn char_count(&self) -> usize {
+        let api = self.api();
+        match self.text_page() {
+            Some(text) => unsafe { (api.FPDFText_CountChars)(text) }.max(0) as usize,
+            None => 0,
+        }
+    }
+
+    /// The text of characters `start..start + count` (fewer at the
+    /// page's end).
     pub fn text(&self, start: usize, count: usize) -> String {
         let api = self.api();
         let Some(text) = self.text_page() else {
@@ -748,6 +757,10 @@ pub struct TextObject {
     /// glyph in it, so the text is replaced with a font of its own.
     pub subset: bool,
 }
+
+/// Gives the stand-in font's bytes for a base font's name and descriptor
+/// flags, when the document's own font cannot show new text.
+pub type FontLookup<'a> = &'a mut dyn FnMut(&str, i32) -> Option<std::sync::Arc<Vec<u8>>>;
 
 /// How a text object's text was replaced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -953,10 +966,12 @@ impl Page {
 
     /// Replace the text of object `index` with `text`: in place when the
     /// object's font can show any text (not an embedded subset), else by
-    /// a new object with `fallback` (a TrueType font's bytes) at the same
-    /// place, size and colour. The page's content is regenerated; the
+    /// a new object at the same place, size and colour in a stand-in
+    /// font, which `fallback` gives (a TrueType font's bytes) for the
+    /// base font's name and descriptor flags, so that the style (bold,
+    /// italic, serif) is kept. The page's content is regenerated; the
     /// text page is reloaded.
-    pub fn set_text(&self, index: usize, text: &str, fallback: Option<&[u8]>) -> Result<Replaced, String> {
+    pub fn set_text(&self, index: usize, text: &str, fallback: FontLookup<'_>) -> Result<Replaced, String> {
         let api = self.api();
         let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index as c_int) };
         if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
@@ -967,13 +982,18 @@ impl Page {
         }
         let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let font = unsafe { (api.FPDFTextObj_GetFont)(object) };
+        let mut base_name = String::new();
+        let mut flags = 0;
         let subset = !font.is_null() && {
             let mut buf = vec![0u8; 256];
             let n = unsafe { (api.FPDFFont_GetBaseFontName)(font, buf.as_mut_ptr().cast(), buf.len()) };
             let embedded = unsafe { (api.FPDFFont_GetIsEmbedded)(font) } == 1;
+            base_name = String::from_utf8_lossy(&buf[..n.saturating_sub(1).min(buf.len())]).into_owned();
+            flags = unsafe { (api.FPDFFont_GetFlags)(font) };
             embedded && n > 7 && buf[6] == b'+'
         };
-        let replaced = match (subset, fallback) {
+        let stand_in = if subset { fallback(&base_name, flags) } else { None };
+        let replaced = match (subset, stand_in) {
             (true, Some(bytes)) => {
                 // The same place, size, colour and mode in a font that has
                 // every glyph.
@@ -1426,7 +1446,7 @@ pub mod tests {
         assert_eq!(objects[0].font_size, 24.0);
         assert!(!objects[0].subset);
         assert!(objects[0].bounds[0] >= 71.0 && objects[0].bounds[1] < 770.0 && objects[0].bounds[3] > 770.0, "{:?}", objects[0].bounds);
-        assert_eq!(page.set_text(objects[0].index, "Edited text", None).unwrap(), Replaced::SameFont);
+        assert_eq!(page.set_text(objects[0].index, "Edited text", &mut |_, _| None).unwrap(), Replaced::SameFont);
         assert_eq!(page.text_objects()[0].text, "Edited text");
         assert_eq!(page.find("Edited", true, false).len(), 1);
         assert!(page.find("Hello", true, false).is_empty());
@@ -1528,6 +1548,62 @@ pub mod tests {
         }
     }
 
+    /// A run in a font embedded as a subset (Arial Bold, put in by the
+    /// test and subset by PDFium's save) cannot show new text: the
+    /// replacement comes in a stand-in font that keeps the style, bold
+    /// here.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn replaced_text_keeps_bold_through_the_stand_in_font() {
+        let api = api();
+        let src = sample_file("bold-src");
+        let doc = Document::open(api, &src, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let bold = std::fs::read(r"C:\Windows\Fonts\arialbd.ttf").unwrap();
+        unsafe {
+            let font = (api.FPDFText_LoadFont)(doc.inner.handle, bold.as_ptr(), bold.len() as u32, sys::FPDF_FONT_TRUETYPE, 1);
+            assert!(!font.is_null());
+            let obj = (api.FPDFPageObj_CreateTextObj)(doc.inner.handle, font, 14.0);
+            let wide: Vec<u16> = "Bold run".encode_utf16().chain(std::iter::once(0)).collect();
+            (api.FPDFText_SetText)(obj, wide.as_ptr());
+            let m = sys::FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 72.0, f: 500.0 };
+            (api.FPDFPageObj_SetMatrix)(obj, &m);
+            (api.FPDFPage_InsertObject)(page.handle, obj);
+            assert_ne!((api.FPDFPage_GenerateContent)(page.handle), 0);
+            (api.FPDFFont_Close)(font);
+        }
+        let subset_file = std::env::temp_dir().join(format!("metalpdf_bold_subset_{}.pdf", std::process::id()));
+        doc.save_to(&subset_file).unwrap();
+        drop(page);
+        drop(doc);
+        let doc = Document::open(api, &subset_file, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let objects = page.text_objects();
+        // PDFium reads the subset font's space back as a no-break space.
+        let plain = |o: &TextObject| o.text.replace('\u{a0}', " ").trim().to_owned();
+        let run = objects.iter().find(|o| plain(o) == "Bold run").expect("the bold run");
+        println!("the bold run's font: {} (subset {})", run.font, run.subset);
+        assert!(run.subset, "PDFium's save subsets a new font");
+        let mut fonts = crate::fonts::Fonts::default();
+        let mut asked = Vec::new();
+        let replaced = page
+            .set_text(run.index, "Bolder still", &mut |name, flags| {
+                asked.push((name.to_owned(), flags));
+                fonts.get(name, flags)
+            })
+            .unwrap();
+        assert_eq!(replaced, Replaced::FallbackFont);
+        assert_eq!(crate::fonts::file_of(crate::fonts::style_of(&asked[0].0, asked[0].1)), "arialbd.ttf", "{asked:?}");
+        let objects = page.text_objects();
+        let new = objects.iter().find(|o| plain(o) == "Bolder still").expect("the replaced run");
+        println!("the replacement's font: {}", new.font);
+        assert!(new.font.to_ascii_lowercase().contains("bold"), "the stand-in is bold: {}", new.font);
+        drop(page);
+        drop(doc);
+        std::fs::remove_file(src).ok();
+        std::fs::remove_file(subset_file).ok();
+    }
+
     /// On a real document (`METALPDF_SAMPLE`): the first page with text
     /// objects, its first run replaced, in place or through a fallback
     /// font when the run's font is an embedded subset; the replaced run
@@ -1539,7 +1615,7 @@ pub mod tests {
         let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
         let api = api();
         let doc = Document::open(api, Path::new(&sample), None).unwrap();
-        let fallback = std::fs::read(r"C:\Windows\Fonts\arial.ttf").ok();
+        let mut fonts = crate::fonts::Fonts::default();
         let mut tried = 0;
         for index in 0..doc.page_count().min(20) {
             let page = doc.load_page(index).unwrap();
@@ -1564,7 +1640,12 @@ pub mod tests {
             };
             let mut before = Bitmap::new(api, bw, bh).unwrap();
             page.render(&mut before, at, sys::FPDF_ANNOT);
-            let replaced = page.set_text(object.index, "Replaced by MetalPDF 123", fallback.as_deref()).unwrap();
+            let replaced = page
+                .set_text(object.index, "Replaced by MetalPDF 123", &mut |name, flags| {
+                    println!("stand-in for {name} (flags {flags:#x}): {}", crate::fonts::file_of(crate::fonts::style_of(name, flags)));
+                    fonts.get(name, flags)
+                })
+                .unwrap();
             let mut after = Bitmap::new(api, bw, bh).unwrap();
             page.render(&mut after, at, sys::FPDF_ANNOT);
             let (a, b) = (ink(&before), ink(&after));
@@ -1576,6 +1657,33 @@ pub mod tests {
             }
         }
         assert!(tried > 0, "no page with text objects among the first 20");
+    }
+
+    /// On a real document (`METALPDF_SAMPLE`): the page numbering read off
+    /// the pages as the engine does it (`engine::numbering_shift`); prints
+    /// the shift found. The OpenStax book's page 1 is the file's 17th.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_real_documents_numbering_is_read_off_its_pages() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let api = api();
+        let doc = Document::open(api, Path::new(&sample), None).unwrap();
+        let count = doc.page_count();
+        let samples = 24.min(count);
+        let started = std::time::Instant::now();
+        let mut texts = Vec::new();
+        for s in 0..samples {
+            let index = if samples == count { s } else { s * count / samples + count / (2 * samples) };
+            let page = doc.load_page(index).unwrap();
+            let n = page.char_count();
+            let text = if n > 400 { format!("{}\n{}", page.text(0, 200), page.text(n - 200, 200)) } else { page.text(0, n) };
+            texts.push((index, text));
+        }
+        let shift = crate::engine::numbering_shift(&texts);
+        println!("numbering shift {shift:?} from {} pages in {:?}", texts.len(), started.elapsed());
+        if sample.to_string_lossy().contains("anatomy-and-physiology") {
+            assert_eq!(shift, Some(16));
+        }
     }
 
     /// On a real document (`METALPDF_SAMPLE`): its first page deleted and
