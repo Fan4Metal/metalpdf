@@ -7,7 +7,8 @@
 //! `layout`'s; the scroll position lives in the tab's `ViewState` as an
 //! anchor and is handed to egui's scroll area each frame.
 
-use egui::{Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use egui::scroll_area::ScrollSource;
+use egui::{Color32, CursorIcon, Event, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
 use crate::app::{ImageDrag, ImageSel, InlineEditor, Tab};
 use crate::cache::Textures;
@@ -15,7 +16,46 @@ use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey};
 use crate::layout;
 use crate::pdfium::Target;
 use crate::selection::{self, Selection};
+use crate::settings::ViewMode;
 use crate::style::Palette;
+use crate::view::{ViewState, WHEEL_STEP};
+
+/// The wheel's notches this frame, from the raw events (positive up or
+/// in): `scroll` without a modifier, `zoom` with Ctrl or from a pinch.
+#[derive(Default)]
+struct Wheel {
+    scroll: f32,
+    zoom: f32,
+}
+
+fn wheel_notches(ui: &Ui) -> Wheel {
+    let mut wheel = Wheel::default();
+    ui.input(|i| {
+        for event in &i.events {
+            match event {
+                Event::MouseWheel { unit, delta, modifiers, .. } => {
+                    // Shift scrolls sideways: the scroll area's business.
+                    if modifiers.shift {
+                        continue;
+                    }
+                    let notches = match unit {
+                        MouseWheelUnit::Line => delta.y,
+                        MouseWheelUnit::Point => delta.y / WHEEL_STEP,
+                        MouseWheelUnit::Page => delta.y * 3.0,
+                    };
+                    if modifiers.command || modifiers.ctrl {
+                        wheel.zoom += notches;
+                    } else {
+                        wheel.scroll += notches;
+                    }
+                }
+                Event::Zoom(factor) => wheel.zoom += ViewState::pinch_notches(*factor),
+                _ => {}
+            }
+        }
+    });
+    wheel
+}
 
 /// Pages rendered ahead in the direction of travel, and behind.
 const AHEAD: usize = 2;
@@ -32,6 +72,9 @@ pub struct ViewOutput {
     pub link: Option<Target>,
     /// Whether the pointer hovers the pages (for the wheel's zoom).
     pub hovered: bool,
+    /// Ctrl+wheel notches (positive in) and pinches over the pages this
+    /// frame, from the raw events: one notch is one zoom step.
+    pub zoom_notches: f32,
     /// The pointer's position in the page area, if there.
     pub pointer: Option<[f32; 2]>,
     /// In the editing mode, a text object clicked: page and object.
@@ -56,6 +99,15 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     ui.painter().rect_filled(area, 0.0, palette.backdrop);
     tab.view.resized([area.width(), area.height()]);
     let ppp = ui.ctx().pixels_per_point();
+    // The wheel from its raw events: egui smooths a notch over several
+    // frames, which would make a zoom step a frame.
+    let single = tab.view.mode == ViewMode::Single;
+    let wheel = if ui.rect_contains_pointer(area) { wheel_notches(ui) } else { Wheel::default() };
+    out.zoom_notches = wheel.zoom;
+    if single && wheel.scroll != 0.0 {
+        let layout = tab.view.layout(&tab.doc.sizes, tab.doc.fallback);
+        tab.view.wheel_single(&layout, wheel.scroll, tab.doc.page_count);
+    }
     let layout = tab.view.layout(&tab.doc.sizes, tab.doc.fallback);
     let scroll_y = layout.scroll_of(tab.view.anchor);
     let scroll_x = tab.view.scroll_x.clamp(0.0, (layout.size[0] - area.width()).max(0.0));
@@ -78,8 +130,9 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let scroll = egui::ScrollArea::both()
         .id_salt(("pages", tab.id))
         .auto_shrink([false, false])
-        // The mouse drags the selection, not the pages.
-        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL | egui::scroll_area::ScrollSource::SCROLL_BAR)
+        // The mouse drags the selection, not the pages; in single-page
+        // mode the wheel turns pages (above), so it is not the area's.
+        .scroll_source(if single { ScrollSource::SCROLL_BAR } else { ScrollSource::MOUSE_WHEEL | ScrollSource::SCROLL_BAR })
         .vertical_scroll_offset(scroll_y)
         .horizontal_scroll_offset(scroll_x)
         .show_viewport(ui, |ui, viewport| {

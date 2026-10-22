@@ -30,7 +30,18 @@ pub struct ViewState {
     pub forward: bool,
     /// The page the reader is on, from the last frame.
     pub current: usize,
+    /// Wheel notches not yet turned into a page flip (single-page mode;
+    /// a high-resolution wheel sends a notch in pieces).
+    pub wheel_acc: f32,
+    /// Wheel notches not yet turned into a zoom step.
+    pub zoom_acc: f32,
 }
+
+/// What a wheel notch scrolls within a page taller than the view, in
+/// points (egui's `line_scroll_speed`, as set in `App::new`).
+pub const WHEEL_STEP: f32 = 100.0;
+/// The pinch gesture's factor that counts as one notch.
+const PINCH_NOTCH: f32 = 0.4;
 
 impl ViewState {
     pub fn new(mode: ViewMode, zoom: ZoomSetting) -> ViewState {
@@ -44,6 +55,8 @@ impl ViewState {
             settle_until: None,
             forward: true,
             current: 0,
+            wheel_acc: 0.0,
+            zoom_acc: 0.0,
         }
     }
 
@@ -114,27 +127,84 @@ impl ViewState {
     /// overlap; in single-page mode the next page once the bottom is
     /// reached.
     pub fn page_step(&mut self, layout: &Layout, down: bool, count: usize) {
-        let scroll = layout.scroll_of(self.anchor);
         let step = (self.viewport[1] - 24.0).max(self.viewport[1] * 0.5);
         match self.mode {
             ViewMode::Continuous => self.scroll_by(layout, if down { step } else { -step }),
             ViewMode::Single => {
-                let bottom = (layout.size[1] - self.viewport[1]).max(0.0);
-                if down && scroll + 1.0 >= bottom {
-                    if self.anchor.page + 1 < count {
-                        self.go_to_page(self.anchor.page + 1, count);
-                    }
-                } else if !down && scroll <= 1.0 {
-                    if self.anchor.page > 0 {
-                        self.go_to_page(self.anchor.page - 1, count);
-                        // The bottom of the previous page.
-                        self.anchor.offset = 1.0;
-                    }
+                if self.at_edge(layout, down) {
+                    self.flip(down, count);
                 } else {
                     self.scroll_by(layout, if down { step } else { -step });
                 }
             }
         }
+    }
+
+    /// Single-page mode: whether the page is scrolled to its bottom (`down`)
+    /// or its top, so that the next step is the next page.
+    fn at_edge(&self, layout: &Layout, down: bool) -> bool {
+        let scroll = layout.scroll_of(self.anchor);
+        let bottom = (layout.size[1] - self.viewport[1]).max(0.0);
+        if down { scroll + 1.0 >= bottom } else { scroll <= 1.0 }
+    }
+
+    /// Single-page mode: the next page from its top, or the previous one
+    /// from its bottom.
+    fn flip(&mut self, down: bool, count: usize) {
+        if down {
+            if self.anchor.page + 1 < count {
+                self.go_to_page(self.anchor.page + 1, count);
+            }
+        } else if self.anchor.page > 0 {
+            self.go_to_page(self.anchor.page - 1, count);
+            self.anchor.offset = 1.0;
+        }
+    }
+
+    /// The wheel in single-page mode: `notches` turned (positive up, as
+    /// egui counts them). A page taller than the view scrolls by
+    /// `WHEEL_STEP` a notch; at its edge, and on a page that fits, every
+    /// whole notch is a page.
+    pub fn wheel_single(&mut self, layout: &Layout, notches: f32, count: usize) {
+        if notches == 0.0 {
+            return;
+        }
+        let down = notches < 0.0;
+        if self.wheel_acc != 0.0 && (self.wheel_acc < 0.0) != down {
+            self.wheel_acc = 0.0;
+        }
+        if self.at_edge(layout, down) {
+            self.wheel_acc += notches;
+            while self.wheel_acc.abs() >= 0.999 {
+                self.wheel_acc -= if down { -1.0 } else { 1.0 };
+                self.flip(down, count);
+            }
+        } else {
+            self.wheel_acc = 0.0;
+            self.scroll_by(layout, -notches * WHEEL_STEP);
+        }
+    }
+
+    /// Ctrl+wheel or a pinch: `notches` turned (positive in), one zoom
+    /// step per whole notch round `cursor`.
+    pub fn zoom_wheel(&mut self, notches: f32, cursor: Option<[f32; 2]>, sizes: &[Option<[f32; 2]>], fallback: [f32; 2]) {
+        if notches == 0.0 {
+            return;
+        }
+        if self.zoom_acc != 0.0 && (self.zoom_acc < 0.0) != (notches < 0.0) {
+            self.zoom_acc = 0.0;
+        }
+        self.zoom_acc += notches;
+        while self.zoom_acc.abs() >= 0.999 {
+            let up = self.zoom_acc > 0.0;
+            self.zoom_acc -= if up { 1.0 } else { -1.0 };
+            self.zoom_step(up, cursor, sizes, fallback);
+        }
+    }
+
+    /// A pinch gesture's factor as wheel notches.
+    pub fn pinch_notches(factor: f32) -> f32 {
+        if factor > 0.0 { factor.ln() / PINCH_NOTCH } else { 0.0 }
     }
 
     /// Next or previous page (`Right`/`Left` in single-page mode, the
@@ -259,6 +329,65 @@ mod tests {
         assert_eq!(view.anchor.offset, 1.0);
         view.turn_page(true, 3);
         assert_eq!(view.anchor.page, 1);
+    }
+
+    #[test]
+    fn a_wheel_notch_is_one_zoom_step_however_it_arrives() {
+        let s = sizes(3);
+        let mut view = ViewState::new(ViewMode::Continuous, ZoomSetting::Scale(1.0));
+        view.viewport = [1000.0, 800.0];
+        // A notch in four pieces (a high-resolution wheel, or egui's
+        // smoothing): one step, not four.
+        for _ in 0..4 {
+            view.zoom_wheel(0.25, None, &s, A4);
+        }
+        assert_eq!(view.zoom, ZoomSetting::Scale(1.25));
+        // A whole notch at once: one step; two notches: two.
+        view.zoom_wheel(1.0, None, &s, A4);
+        assert_eq!(view.zoom, ZoomSetting::Scale(1.5));
+        view.zoom_wheel(-2.0, None, &s, A4);
+        assert_eq!(view.zoom, ZoomSetting::Scale(1.0));
+        // Half a notch one way is forgotten when the wheel turns back.
+        view.zoom_wheel(0.5, None, &s, A4);
+        view.zoom_wheel(-0.5, None, &s, A4);
+        view.zoom_wheel(-0.5, None, &s, A4);
+        assert_eq!(view.zoom, ZoomSetting::Scale(0.75));
+    }
+
+    #[test]
+    fn the_wheel_turns_pages_in_single_page_mode() {
+        let s = sizes(3);
+        // A page that fits: every notch is a page.
+        let mut view = ViewState::new(ViewMode::Single, ZoomSetting::FitPage);
+        view.viewport = [1000.0, 800.0];
+        let layout = view.layout(&s, A4);
+        view.wheel_single(&layout, -1.0, 3);
+        assert_eq!(view.anchor.page, 1);
+        view.wheel_single(&layout, -0.5, 3);
+        assert_eq!(view.anchor.page, 1);
+        view.wheel_single(&layout, -0.5, 3);
+        assert_eq!(view.anchor.page, 2);
+        view.wheel_single(&layout, -1.0, 3);
+        assert_eq!(view.anchor.page, 2, "the last page stays");
+        view.wheel_single(&layout, 2.0, 3);
+        assert_eq!(view.anchor.page, 0);
+        // A page taller than the view scrolls first, then turns.
+        let mut view = ViewState::new(ViewMode::Single, ZoomSetting::Scale(1.0));
+        view.viewport = [1000.0, 400.0];
+        let layout = view.layout(&s, A4);
+        view.wheel_single(&layout, -1.0, 3);
+        assert_eq!(view.anchor.page, 0);
+        assert!(layout.scroll_of(view.anchor) > 90.0);
+        let mut notches = 1;
+        while view.anchor.page == 0 && notches < 40 {
+            view.wheel_single(&layout, -1.0, 3);
+            notches += 1;
+        }
+        assert_eq!(view.anchor.page, 1);
+        assert_eq!(view.anchor.offset, 0.0);
+        // About the page's height less a screen, a notch at a time, then one to turn.
+        let expected = ((layout.size[1] - 400.0) / WHEEL_STEP).ceil() as usize + 1;
+        assert_eq!(notches, expected);
     }
 
     #[test]

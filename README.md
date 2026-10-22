@@ -95,6 +95,7 @@ The changes live in a copy of the document until `Ctrl+S` saves it (a Save As di
 | `Ctrl+W`, `Ctrl+Shift+T` | Close the tab, reopen the last closed tab |
 | `Ctrl+Tab`, `Ctrl+Shift+Tab` | Next, previous tab |
 | `Page Down`, `Page Up`, `Space`, `Shift+Space` | A screen down or up (in single-page mode, the next or previous page at the end) |
+| Mouse wheel | Scrolling; in single-page mode a notch turns a page (a page taller than the view is scrolled through first) |
 | `Ctrl+Page Down`, `Ctrl+Page Up`, `N`, `P` | Next, previous page |
 | `Home`, `End` | First, last page |
 | `←` `↑` `→` `↓` | Scroll (in single-page mode, `←` `→` turn pages) |

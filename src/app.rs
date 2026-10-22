@@ -1835,12 +1835,11 @@ impl App {
         match tab.doc.status.clone() {
             Status::Ready => {
                 let out = crate::ui::view::show(ui, tab, &mut self.textures, frame, palette);
-                // Ctrl+wheel over the pages: a zoom step round the pointer.
-                let zoom = ui.input(|i| i.zoom_delta());
-                if out.hovered && (zoom - 1.0).abs() > 0.01 {
+                // Ctrl+wheel over the pages: a zoom step a notch round the pointer.
+                if out.zoom_notches != 0.0 {
                     let sizes = tab.doc.sizes.clone();
                     let fallback = tab.doc.fallback;
-                    tab.view.zoom_step(zoom > 1.0, out.pointer, &sizes, fallback);
+                    tab.view.zoom_wheel(out.zoom_notches, out.pointer, &sizes, fallback);
                 }
                 for page in out.visible.clone() {
                     tab.doc.need_text(engine, page);
