@@ -249,6 +249,25 @@ impl DocState {
         }
     }
 
+    /// The pages changed (put in, removed, replaced): everything read of
+    /// them is read again.
+    pub fn restructure(&mut self, engine: &Engine, page_count: usize) {
+        self.page_count = page_count;
+        self.sizes = vec![None; page_count];
+        self.labels = vec![None; page_count];
+        self.sizes_next = 0;
+        self.sizes_waiting = false;
+        self.outline = None;
+        self.outline_asked = false;
+        self.text.clear();
+        self.text_asked.clear();
+        self.links.clear();
+        self.links_asked.clear();
+        self.objects.clear();
+        self.objects_asked.clear();
+        self.ask_sizes(engine, 0);
+    }
+
     /// Ask for the text objects of `page` once.
     pub fn need_objects(&mut self, engine: &Engine, page: usize) {
         if self.ready() && page < self.page_count && !self.objects.contains_key(&page) && self.objects_asked.insert(page) {

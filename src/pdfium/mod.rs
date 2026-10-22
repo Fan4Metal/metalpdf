@@ -311,6 +311,43 @@ impl Document {
     }
 }
 
+impl Document {
+    /// Remove page `index`.
+    pub fn delete_page(&self, index: usize) -> Result<(), String> {
+        if index >= self.page_count() {
+            return Err("no such page".into());
+        }
+        unsafe { (self.api().FPDFPage_Delete)(self.inner.handle, index as c_int) };
+        Ok(())
+    }
+
+    /// A blank page of `size` (points) inserted at `index` (the count
+    /// puts it at the end).
+    pub fn insert_blank_page(&self, index: usize, size: [f32; 2]) -> Result<(), String> {
+        let index = index.min(self.page_count());
+        let page = unsafe { (self.api().FPDFPage_New)(self.inner.handle, index as c_int, f64::from(size[0].max(1.0)), f64::from(size[1].max(1.0))) };
+        if page.is_null() {
+            return Err("the page could not be made".into());
+        }
+        unsafe { (self.api().FPDF_ClosePage)(page) };
+        Ok(())
+    }
+
+    /// Every page of `source` inserted at `index`; how many came.
+    pub fn import_pages(&self, source: &Document, index: usize) -> Result<usize, String> {
+        let count = source.page_count();
+        if count == 0 {
+            return Err("the document has no pages".into());
+        }
+        let index = index.min(self.page_count());
+        let ok = unsafe { (self.api().FPDF_ImportPagesByIndex)(self.inner.handle, source.inner.handle, std::ptr::null(), 0, index as c_int) };
+        if ok == 0 {
+            return Err("the pages could not be imported".into());
+        }
+        Ok(count)
+    }
+}
+
 /// Where a link or a bookmark leads.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -1451,6 +1488,42 @@ pub mod tests {
         assert!(again.load_page(1).unwrap().image_objects().is_empty());
         drop(again);
         for f in [path, png_path, saved] {
+            std::fs::remove_file(f).unwrap();
+        }
+    }
+
+    /// Pages removed, a blank one put in, another document's pages imported,
+    /// and the result saved and read again.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn pages_are_deleted_inserted_and_imported() {
+        let api = api();
+        let path = sample_file("pages");
+        let other = sample_file("pages_other");
+        let doc = Document::open(api, &path, None).unwrap();
+        doc.delete_page(1).unwrap();
+        assert_eq!(doc.page_count(), 1);
+        assert!(doc.delete_page(5).is_err());
+        doc.insert_blank_page(1, [400.0, 300.0]).unwrap();
+        assert_eq!(doc.page_count(), 2);
+        assert_eq!(doc.page_size(1), Some([400.0, 300.0]));
+        let source = Document::open(api, &other, None).unwrap();
+        assert_eq!(doc.import_pages(&source, 0).unwrap(), 2);
+        assert_eq!(doc.page_count(), 4);
+        // The imported pages come first: the sample's text page, then its
+        // turned page; the original first page is third.
+        assert_eq!(doc.page_size(1), Some([842.0, 595.0]));
+        assert_eq!(doc.page_size(2), Some([595.0, 842.0]));
+        assert_eq!(doc.load_page(0).unwrap().text(0, 5), "Hello");
+        let saved = std::env::temp_dir().join(format!("metalpdf_pages_saved_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(source);
+        drop(doc);
+        let again = Document::open(api, &saved, None).unwrap();
+        assert_eq!(again.page_count(), 4);
+        assert_eq!(again.page_size(3), Some([400.0, 300.0]));
+        drop(again);
+        for f in [path, other, saved] {
             std::fs::remove_file(f).unwrap();
         }
     }

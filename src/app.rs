@@ -650,6 +650,19 @@ impl App {
         );
     }
 
+    /// Ask for the PDF whose pages go in at `page` of tab `tab`'s document
+    /// (or replace that page).
+    fn import_pdf_dialog(&mut self, ctx: &egui::Context, tab: u64, page: usize, replace: bool) {
+        let hwnd = self.windows[self.current].hwnd;
+        self.dialogs.start(
+            ctx,
+            hwnd,
+            Ask::ImportPdf { tab, page, replace },
+            || rfd::FileDialog::new().add_filter("PDF", &["pdf"]),
+            crate::dialog::pick_file,
+        );
+    }
+
     /// The edited document of tab `tab` written to `path`.
     fn save_to(&mut self, tab: u64, path: PathBuf) {
         for window in &mut self.windows {
@@ -803,6 +816,7 @@ impl App {
                         | Event::Objects { id, .. }
                         | Event::Edited { id, .. }
                         | Event::EditFailed { id, .. }
+                        | Event::Restructured { id, .. }
                         | Event::Saved { id, .. } => *id,
                         _ => continue,
                     };
@@ -826,6 +840,26 @@ impl App {
                         }
                         if reopen {
                             self.reopen_tab(doc);
+                        }
+                        continue;
+                    }
+                    if let Event::Restructured { page_count, .. } = &other {
+                        // Every page may be another now: the renders and
+                        // everything read of the pages go.
+                        self.textures.remove_doc(doc);
+                        self.uploads.retain(|(k, _)| k.doc != doc);
+                        let engine = &self.engine;
+                        if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
+                            tab.doc.restructure(engine, *page_count);
+                            let count = page_count.max(&1) - 1;
+                            if tab.view.anchor.page > count {
+                                tab.view.anchor.page = count;
+                            }
+                            tab.view.current = tab.view.current.min(count);
+                            tab.image = None;
+                            tab.editor = None;
+                            tab.selection = None;
+                            tab.find.close();
                         }
                         continue;
                     }
@@ -1444,6 +1478,30 @@ impl App {
                 SidebarAction::Tab(which) => {
                     self.settings.sidebar_tab = which;
                     self.settings_dirty = true;
+                }
+                SidebarAction::InsertBlank { at } => {
+                    if let Some(tab) = self.windows[cur].active_tab() {
+                        // The size of the page it goes next to.
+                        let size = tab.doc.size_of(at.min(tab.doc.page_count.saturating_sub(1)));
+                        self.engine.request(Request::Edit { id: tab.doc.id, edit: Edit::InsertBlank { page: at, size } });
+                    }
+                }
+                SidebarAction::InsertPdf { at } => {
+                    if let Some(tab) = self.windows[cur].active_tab() {
+                        let id = tab.id;
+                        self.import_pdf_dialog(ui.ctx(), id, at, false);
+                    }
+                }
+                SidebarAction::ReplacePdf { page } => {
+                    if let Some(tab) = self.windows[cur].active_tab() {
+                        let id = tab.id;
+                        self.import_pdf_dialog(ui.ctx(), id, page, true);
+                    }
+                }
+                SidebarAction::DeletePage { page } => {
+                    if let Some(tab) = self.windows[cur].active_tab() {
+                        self.engine.request(Request::Edit { id: tab.doc.id, edit: Edit::DeletePage { page } });
+                    }
                 }
             }
         }
@@ -2175,6 +2233,20 @@ impl eframe::App for App {
                     if let Some(path) = answer.paths.first() {
                         let path = if path.extension().is_none() { path.with_extension("pdf") } else { path.clone() };
                         self.save_to(tab, path);
+                    }
+                }
+                Ask::ImportPdf { tab, page, replace } => {
+                    if let Some(path) = answer.paths.first() {
+                        for window in &self.windows {
+                            if let Some(t) = window.tabs.iter().find(|t| t.id == tab) {
+                                let edit = if replace {
+                                    Edit::ReplacePdf { page, path: path.clone() }
+                                } else {
+                                    Edit::InsertPdf { page, path: path.clone() }
+                                };
+                                self.engine.request(Request::Edit { id: t.doc.id, edit });
+                            }
+                        }
                     }
                 }
                 Ask::ReplaceImage { tab, page, object } => {

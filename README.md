@@ -30,7 +30,7 @@ MetalPDF is a PDF viewer built around one idea: a document should be on screen t
 - **Sidebar** with page thumbnails and the document's outline, both following the page being read.
 - **Find** across the document, with the hits highlighted on the pages; **text selection** by dragging, copied with Ctrl+C.
 - **Links** inside the document and to the web, with a history for going back.
-- **Editing** (experimental): the text of a line changed in place, pictures moved, resized, replaced or removed, and the document saved (see [Editing text and pictures](#editing-text-and-pictures)).
+- **Editing** (experimental): the text of a line changed in place, pictures moved, resized, replaced or removed, pages inserted, replaced or deleted, and the document saved (see [Editing text, pictures and pages](#editing-text-pictures-and-pages)).
 - **Forms** are drawn with their field contents; **encrypted** documents ask for their password.
 - **Light, dark or system theme.**
 - **English or Russian interface**: it follows the language of Windows and can be changed in the About window (`F1`).
@@ -75,13 +75,15 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 
 Text is selected by dragging over it, across pages too, and copied with `Ctrl+C`; `Ctrl+A` selects the current page's text, `Esc` clears the selection. The pointer is an I-beam over text and a hand over a link; a link inside the document goes to its target, a web link opens in the browser. `Alt+Left` (or the mouse's back button) returns from a jump made through a link, a bookmark, a thumbnail, the page field or a hit; `Alt+Right` goes again.
 
-### Editing text and pictures
+### Editing text, pictures and pages
 
 The editing mode (`E`, or the pencil in the status bar) outlines the text objects of the pages, the runs of text a PDF is made of: usually a line or a part of one. A click on a run opens a field over it; `Enter` replaces the run's text, `Esc` leaves it as it was. `Ctrl+Z` takes the last change back. The pages keep their layout: a longer text runs past where the old one ended, nothing is reflowed.
 
 A run keeps its font when that font can show the new text; a font embedded as a subset of its glyphs cannot, and the run is set in Arial instead, at the same place, size and colour.
 
 Pictures are outlined too. A click selects one: it is moved by dragging and resized by its corner handles (the proportions kept), **Replace…** puts a JPEG or PNG file in its place, fitted into the old box with its own proportions, and **Delete** (or the `Del` key) removes it.
+
+Pages are handled from the context menu of a thumbnail in the sidebar: a blank page (the size of its neighbour) or every page of another PDF file inserted before or after it, the page replaced by the pages of another PDF, or the page deleted (the last one stays). These need no editing mode.
 
 The changes live in a copy of the document until `Ctrl+S` saves it (a Save As dialog, so the original is replaced only when chosen); closing a tab or quitting with unsaved changes asks first. Signed, tagged (accessible) and encrypted documents are not edited, and text and pictures inside form XObjects, which some generators put every page in, are not reachable. This part of the program is experimental; a copy of a valued document is advised.
 
@@ -136,7 +138,7 @@ Requirements: Rust (stable, MSVC), Visual Studio 2022 Build Tools (C++ workload)
 uv run build.py
 ```
 
-The script closes a `metalpdf.exe` running from `target\`, fetches the pinned `pdfium.dll` into `vendor\pdfium` if it is missing (`tools\get_pdfium.py`, checked by SHA-256) and runs `cargo build --release`; the DLL is copied next to `target\release\metalpdf.exe` by the build. `cargo test` runs the unit tests; `cargo test pdfium -- --ignored` also exercises the DLL (a PDF written by the test is opened, rendered, read, edited and saved). `metalpdf.exe --bench file.pdf` prints the engine's timings for a file.
+The script closes a `metalpdf.exe` running from `target\`, fetches the pinned `pdfium.dll` into `vendor\pdfium` if it is missing (`tools\get_pdfium.py`, checked by SHA-256) and runs `cargo build --release`; the DLL is copied next to `target\release\metalpdf.exe` by the build. `cargo test` runs the unit tests; `cargo test pdfium -- --ignored --test-threads=1` also exercises the DLL (a PDF written by the test is opened, rendered, read, edited and saved). `metalpdf.exe --bench file.pdf` prints the engine's timings for a file.
 
 <details>
 <summary>Setting up the environment with winget</summary>

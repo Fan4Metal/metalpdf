@@ -406,6 +406,10 @@ api! {
     FPDFFont_GetBaseFontName: fn(FPDF_FONT, *mut c_char, usize) -> usize;
     FPDFFont_GetIsEmbedded: fn(FPDF_FONT) -> c_int;
     FPDFFont_GetFlags: fn(FPDF_FONT) -> c_int;
+    // Pages: fpdf_edit.h, fpdf_ppo.h
+    FPDFPage_Delete: fn(FPDF_DOCUMENT, c_int);
+    FPDFPage_New: fn(FPDF_DOCUMENT, c_int, c_double, c_double) -> FPDF_PAGE;
+    FPDF_ImportPagesByIndex: fn(FPDF_DOCUMENT, FPDF_DOCUMENT, *const c_int, c_ulong, c_int) -> FPDF_BOOL;
     // fpdf_save.h, fpdf_signature.h, fpdf_catalog.h
     FPDF_SaveAsCopy: fn(FPDF_DOCUMENT, *mut FPDF_FILEWRITE, FPDF_DWORD) -> FPDF_BOOL;
     FPDF_GetSignatureCount: fn(FPDF_DOCUMENT) -> c_int;

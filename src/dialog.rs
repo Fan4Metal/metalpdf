@@ -23,6 +23,9 @@ pub enum Ask {
     SaveAs { tab: u64 },
     /// The picture to put into image `object` of `page` of a tab.
     ReplaceImage { tab: u64, page: usize, object: usize },
+    /// A PDF whose pages go in at `page` of a tab's document, or replace
+    /// that page.
+    ImportPdf { tab: u64, page: usize, replace: bool },
 }
 
 impl Ask {
@@ -32,6 +35,7 @@ impl Ask {
             Ask::Open { .. } => "open",
             Ask::SaveAs { .. } => "save as",
             Ask::ReplaceImage { .. } => "replace image",
+            Ask::ImportPdf { .. } => "import pages",
         }
     }
 }

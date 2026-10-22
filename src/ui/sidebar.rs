@@ -16,6 +16,13 @@ pub enum SidebarAction {
     GoToPage(usize),
     Follow(Target),
     Tab(SidebarTab),
+    /// A blank page before (`at` = the page) or after (`at` = the page + 1).
+    InsertBlank { at: usize },
+    /// The pages of a PDF chosen in a dialog, put in at `at`.
+    InsertPdf { at: usize },
+    /// The page replaced by the pages of a PDF chosen in a dialog.
+    ReplacePdf { page: usize },
+    DeletePage { page: usize },
 }
 
 /// The space round a thumbnail and under it (its label).
@@ -106,6 +113,35 @@ fn thumbnails(
             if response.clicked() {
                 actions.push(SidebarAction::GoToPage(i));
             }
+            // The page operations (edits: they go to the copy that is saved).
+            crate::ui::menu::context_menu(&response, |ui| {
+                ui.set_min_width(240.0);
+                if ui.button(tr!("Insert a blank page before", "Вставить пустую страницу перед")).clicked() {
+                    actions.push(SidebarAction::InsertBlank { at: i });
+                    ui.close();
+                }
+                if ui.button(tr!("Insert a blank page after", "Вставить пустую страницу после")).clicked() {
+                    actions.push(SidebarAction::InsertBlank { at: i + 1 });
+                    ui.close();
+                }
+                if ui.button(tr!("Insert pages from a PDF before…", "Вставить страницы из PDF перед…")).clicked() {
+                    actions.push(SidebarAction::InsertPdf { at: i });
+                    ui.close();
+                }
+                if ui.button(tr!("Insert pages from a PDF after…", "Вставить страницы из PDF после…")).clicked() {
+                    actions.push(SidebarAction::InsertPdf { at: i + 1 });
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(tr!("Replace with pages from a PDF…", "Заменить страницами из PDF…")).clicked() {
+                    actions.push(SidebarAction::ReplacePdf { page: i });
+                    ui.close();
+                }
+                if ui.add_enabled(count > 1, egui::Button::new(tr!("Delete the page", "Удалить страницу"))).clicked() {
+                    actions.push(SidebarAction::DeletePage { page: i });
+                    ui.close();
+                }
+            });
             if i == current && changed {
                 ui.scroll_to_rect(rect.expand(THUMB_MARGIN), Some(Align::Center));
             }

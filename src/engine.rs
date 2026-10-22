@@ -107,6 +107,9 @@ pub enum Event {
     Edited { id: DocId, page: usize, edits: usize },
     /// An edit could not be made (the reason, technical).
     EditFailed { id: DocId, reason: String },
+    /// The pages changed (one put in, removed or replaced): the document
+    /// has `page_count` pages now, sizes and all to be read again.
+    Restructured { id: DocId, page_count: usize },
     Saved { id: DocId, path: PathBuf, result: Result<(), String> },
 }
 
@@ -244,13 +247,33 @@ pub enum Edit {
     ReplaceImage { page: usize, object: usize, path: PathBuf },
     /// An image moved and resized to `bounds` (page space).
     Place { page: usize, object: usize, bounds: [f32; 4] },
+    /// A blank page of `size` (points) put in at `page`.
+    InsertBlank { page: usize, size: [f32; 2] },
+    /// Every page of the PDF at `path` put in at `page`.
+    InsertPdf { page: usize, path: PathBuf },
+    /// Page `page` replaced by every page of the PDF at `path`.
+    ReplacePdf { page: usize, path: PathBuf },
+    DeletePage { page: usize },
 }
 
 impl Edit {
     pub fn page(&self) -> usize {
         match self {
-            Edit::Text { page, .. } | Edit::Remove { page, .. } | Edit::ReplaceImage { page, .. } | Edit::Place { page, .. } => *page,
+            Edit::Text { page, .. }
+            | Edit::Remove { page, .. }
+            | Edit::ReplaceImage { page, .. }
+            | Edit::Place { page, .. }
+            | Edit::InsertBlank { page, .. }
+            | Edit::InsertPdf { page, .. }
+            | Edit::ReplacePdf { page, .. }
+            | Edit::DeletePage { page } => *page,
         }
+    }
+
+    /// Whether the edit changes which pages there are: after it, every
+    /// page of the document comes from the edited copy.
+    pub fn restructures(&self) -> bool {
+        matches!(self, Edit::InsertBlank { .. } | Edit::InsertPdf { .. } | Edit::ReplacePdf { .. } | Edit::DeletePage { .. })
     }
 }
 
@@ -261,6 +284,8 @@ struct EditState {
     log: Vec<Edit>,
     /// The pages rendered from the edited copy.
     edited: HashSet<usize>,
+    /// Pages were put in or removed: every page comes from the copy.
+    all_pages: bool,
 }
 
 /// The thread's side.
@@ -395,14 +420,14 @@ impl Worker {
                 }
             }
             Request::Sizes { id, start } => {
-                let Some(doc) = self.docs.get(&id) else { return };
+                let Some(doc) = self.view_doc(id) else { return };
                 let end = (start + SIZE_BATCH).min(doc.page_count());
                 let sizes: Vec<Option<[f32; 2]>> = (start..end).map(|i| doc.page_size(i)).collect();
                 let labels: Vec<Option<String>> = (start..end).map(|i| doc.page_label(i)).collect();
                 self.send(Event::Sizes { id, start, sizes, labels });
             }
             Request::Outline(id) => {
-                let Some(doc) = self.docs.get(&id) else { return };
+                let Some(doc) = self.view_doc(id) else { return };
                 let items = doc.outline();
                 self.send(Event::Outline { id, items });
             }
@@ -421,7 +446,7 @@ impl Worker {
                 if !self.docs.contains_key(&id) || query.is_empty() {
                     return;
                 }
-                let count = self.docs[&id].page_count();
+                let count = self.view_doc(id).map_or(0, Document::page_count);
                 let from = from.min(count.saturating_sub(1));
                 self.search = Some(SearchState { id, search, query, match_case, whole_words, next: from, first: from, searched: 0 });
             }
@@ -436,7 +461,12 @@ impl Worker {
                 self.send(Event::Objects { id, page, objects });
             }
             Request::Edit { id, edit } => match self.edit(id, edit.clone()) {
-                Ok(edits) => self.send(Event::Edited { id, page: edit.page(), edits }),
+                Ok(edits) => {
+                    self.send(Event::Edited { id, page: edit.page(), edits });
+                    if edit.restructures() {
+                        self.send_restructured(id);
+                    }
+                }
                 Err(reason) => {
                     log::info!("edit refused: {reason}");
                     self.send(Event::EditFailed { id, reason });
@@ -446,8 +476,14 @@ impl Worker {
                 let Some(state) = self.edits.get_mut(&id) else { return };
                 let Some(undone) = state.log.pop() else { return };
                 let log = state.log.clone();
+                let restructured = undone.restructures();
                 match self.rebuild_edits(id, log) {
-                    Ok(edits) => self.send(Event::Edited { id, page: undone.page(), edits }),
+                    Ok(edits) => {
+                        self.send(Event::Edited { id, page: undone.page(), edits });
+                        if restructured {
+                            self.send_restructured(id);
+                        }
+                    }
                     Err(reason) => self.send(Event::EditFailed { id, reason }),
                 }
             }
@@ -477,11 +513,41 @@ impl Worker {
             if !obstacles.is_empty() {
                 return Err(format!("the document is {}", obstacles.join(" and ")));
             }
-            self.edits.insert(id, EditState { doc, log: Vec::new(), edited: HashSet::new() });
+            self.edits.insert(id, EditState { doc, log: Vec::new(), edited: HashSet::new(), all_pages: false });
         }
         if self.fallback_font.is_none() {
             let fonts = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
             self.fallback_font = std::fs::read(fonts.join("Fonts").join("arial.ttf")).ok();
+        }
+        if edit.restructures() {
+            // Every open page of the document is stale (its index may
+            // name another page now); every page comes from the copy.
+            self.pages.retain(|k, _| k.0 != id);
+            self.page_order.retain(|k| k.0 != id);
+            let state = self.edits.get_mut(&id).expect("inserted above");
+            state.all_pages = true;
+            let doc = &state.doc;
+            match &edit {
+                Edit::InsertBlank { page, size } => doc.insert_blank_page(*page, *size)?,
+                Edit::InsertPdf { page, path } => {
+                    let source = Document::open(self.api, path, None).map_err(|e| e.to_string())?;
+                    doc.import_pages(&source, *page)?;
+                }
+                Edit::ReplacePdf { page, path } => {
+                    let source = Document::open(self.api, path, None).map_err(|e| e.to_string())?;
+                    doc.import_pages(&source, *page + 1)?;
+                    doc.delete_page(*page)?;
+                }
+                Edit::DeletePage { page } => {
+                    if doc.page_count() <= 1 {
+                        return Err("the last page stays".into());
+                    }
+                    doc.delete_page(*page)?;
+                }
+                _ => unreachable!("not a page edit"),
+            }
+            state.log.push(edit);
+            return Ok(state.log.len());
         }
         // The page comes from the edited copy from now on.
         self.pages.remove(&(id, page));
@@ -496,10 +562,26 @@ impl Worker {
             Edit::Remove { object, .. } => p.remove_object(*object)?,
             Edit::ReplaceImage { object, path, .. } => p.replace_image(*object, path)?,
             Edit::Place { object, bounds, .. } => p.place_object(*object, *bounds)?,
+            _ => unreachable!("a page edit"),
         }
         let state = self.edits.get_mut(&id).expect("inserted above");
         state.log.push(edit);
         Ok(state.log.len())
+    }
+
+    /// The document whose pages are shown: the edited copy once pages
+    /// were put in or removed, else the original.
+    fn view_doc(&self, id: DocId) -> Option<&Document> {
+        match self.edits.get(&id) {
+            Some(state) if state.all_pages => Some(&state.doc),
+            _ => self.docs.get(&id),
+        }
+    }
+
+    fn send_restructured(&self, id: DocId) {
+        if let Some(doc) = self.view_doc(id) {
+            self.send(Event::Restructured { id, page_count: doc.page_count() });
+        }
     }
 
     /// The edited copy made again from the file with `log` applied.
@@ -512,7 +594,7 @@ impl Worker {
             return Ok(0);
         }
         let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
-        self.edits.insert(id, EditState { doc, log: Vec::new(), edited: HashSet::new() });
+        self.edits.insert(id, EditState { doc, log: Vec::new(), edited: HashSet::new(), all_pages: false });
         let count = log.len();
         for entry in log {
             self.edit(id, entry)?;
@@ -523,12 +605,13 @@ impl Worker {
     /// One page of the search going on, round the document from where it
     /// started.
     fn search_page(&mut self) {
-        let Some(state) = self.search.as_mut() else { return };
-        let (id, search, page) = (state.id, state.search, state.next);
-        let Some(count) = self.docs.get(&id).map(Document::page_count) else {
+        let Some(id) = self.search.as_ref().map(|s| s.id) else { return };
+        let Some(count) = self.view_doc(id).map(Document::page_count) else {
             self.search = None;
             return;
         };
+        let Some(state) = self.search.as_mut() else { return };
+        let (search, page) = (state.search, state.next);
         let (query, match_case, whole_words) = (state.query.clone(), state.match_case, state.whole_words);
         state.searched += 1;
         state.next = (state.next + 1) % count.max(1);
@@ -552,7 +635,7 @@ impl Worker {
     fn page(&mut self, id: DocId, index: usize) -> Option<&Page> {
         let key = (id, index);
         if !self.pages.contains_key(&key) {
-            let edited = self.edits.get(&id).filter(|e| e.edited.contains(&index)).map(|e| &e.doc);
+            let edited = self.edits.get(&id).filter(|e| e.all_pages || e.edited.contains(&index)).map(|e| &e.doc);
             let page = edited.or_else(|| self.docs.get(&id))?.load_page(index)?;
             self.pages.insert(key, page);
             self.page_order.push_back(key);
@@ -578,7 +661,7 @@ impl Worker {
     /// a preview that becomes the most urgent render is made in a pause.
     fn render(&mut self, key: RenderKey) {
         let started = Instant::now();
-        let Some(size) = self.docs.get(&key.doc).and_then(|d| d.page_size(key.page as usize)) else {
+        let Some(size) = self.view_doc(key.doc).and_then(|d| d.page_size(key.page as usize)) else {
             self.send(Event::RenderFailed(key));
             return;
         };
@@ -662,7 +745,7 @@ impl Worker {
     /// A preview in one go, between the pauses of a larger render.
     fn render_preview(&mut self, key: RenderKey) {
         let started = Instant::now();
-        let Some(size) = self.docs.get(&key.doc).and_then(|d| d.page_size(key.page as usize)) else {
+        let Some(size) = self.view_doc(key.doc).and_then(|d| d.page_size(key.page as usize)) else {
             self.send(Event::RenderFailed(key));
             return;
         };
