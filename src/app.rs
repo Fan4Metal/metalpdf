@@ -438,9 +438,30 @@ impl App {
             // the family).
             o.input_options.line_scroll_speed = 100.0;
         });
-        // Scroll bars that stay wide: egui's floating ones thin out when
-        // idle and are hard to catch with the mouse.
-        cc.egui_ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
+        // Scroll bars of one width in a strip of their own, the handle a
+        // mid grey that darkens under the mouse: egui's floating bars thin
+        // out when idle and are hard to catch, and the solid ones have a
+        // 2-point handle (the bar less the margins) in a light grey near
+        // invisible on the track. A floating bar as wide at rest as when
+        // hovered, allocated its width, with the handle in the text colour
+        // at a low opacity, gives what is wanted.
+        cc.egui_ctx.all_styles_mut(|s| {
+            s.spacing.scroll = egui::style::ScrollStyle {
+                floating: true,
+                bar_width: 12.0,
+                floating_width: 12.0,
+                floating_allocated_width: 12.0,
+                handle_min_length: 24.0,
+                foreground_color: true,
+                dormant_handle_opacity: 0.4,
+                active_handle_opacity: 0.55,
+                interact_handle_opacity: 0.85,
+                dormant_background_opacity: 0.0,
+                active_background_opacity: 0.0,
+                interact_background_opacity: 0.08,
+                ..egui::style::ScrollStyle::floating()
+            };
+        });
         engine.set_context(cc.egui_ctx.clone());
         // The window is still hidden (eframe shows it after the first
         // frame), so a caption set now is shown from the start; set after
