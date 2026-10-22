@@ -112,6 +112,8 @@ impl ViewState {
     /// Scroll by `delta` points (positive down) in `layout`.
     pub fn scroll_by(&mut self, layout: &Layout, delta: f32) {
         let scroll = (layout.scroll_of(self.anchor) + delta).clamp(0.0, (layout.size[1] - self.viewport[1]).max(0.0));
+        // Single-page mode: within the page shown.
+        let scroll = layout.clamp_scroll(scroll, self.anchor.page, self.viewport[1]);
         self.set_scroll(layout, scroll);
     }
 
@@ -145,8 +147,8 @@ impl ViewState {
     /// or its top, so that the next step is the next page.
     fn at_edge(&self, layout: &Layout, down: bool) -> bool {
         let scroll = layout.scroll_of(self.anchor);
-        let bottom = (layout.size[1] - self.viewport[1]).max(0.0);
-        if down { scroll + 1.0 >= bottom } else { scroll <= 1.0 }
+        let (top, bottom) = layout.page_scroll_range(self.anchor.page, self.viewport[1]);
+        if down { scroll + 1.0 >= bottom } else { scroll <= top + 1.0 }
     }
 
     /// Single-page mode: the next page from its top, or the previous one
@@ -386,8 +388,9 @@ mod tests {
         }
         assert_eq!(view.anchor.page, 1);
         assert_eq!(view.anchor.offset, 0.0);
-        // About the page's height less a screen, a notch at a time, then one to turn.
-        let expected = ((layout.size[1] - 400.0) / WHEEL_STEP).ceil() as usize + 1;
+        // The page's own scroll range, a notch at a time, then one to turn.
+        let (top, bottom) = layout.page_scroll_range(0, 400.0);
+        let expected = ((bottom - top) / WHEEL_STEP).ceil() as usize + 1;
         assert_eq!(notches, expected);
     }
 

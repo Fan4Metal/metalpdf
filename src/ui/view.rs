@@ -142,7 +142,9 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
         tab.view.wheel_single(&layout, wheel.scroll, tab.doc.page_count);
     }
     let layout = tab.view.layout(&tab.doc.sizes, tab.doc.fallback);
-    let scroll_y = layout.scroll_of(tab.view.anchor);
+    // Single-page mode: the offset stays within the page shown; the bar
+    // still spans the document, and dragged out of the page it turns it.
+    let scroll_y = layout.clamp_scroll(layout.scroll_of(tab.view.anchor), tab.view.anchor.page, area.height());
     let scroll_x = tab.view.scroll_x.clamp(0.0, (layout.size[0] - area.width()).max(0.0));
     let settled = tab.view.settled();
     let doc_id = tab.doc.id;

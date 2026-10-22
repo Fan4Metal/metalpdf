@@ -97,29 +97,15 @@ impl Layout {
         let mut pages = Vec::with_capacity(count);
         let mut y = GAP;
         let doc_width = (widest[0] * scale + 2.0 * GAP).max(viewport[0]);
-        match mode {
-            ViewMode::Continuous => {
-                for i in 0..count {
-                    let s = page_size(i);
-                    let (w, h) = (s[0] * scale, s[1] * scale);
-                    pages.push([(doc_width - w) / 2.0, y, w, h]);
-                    y += h + GAP;
-                }
-            }
-            ViewMode::Single => {
-                // Only the current page has a place; the rest are off the
-                // document (a zero-size rectangle keeps the indices).
-                for i in 0..count {
-                    if i == current {
-                        let s = page_size(i);
-                        let (w, h) = (s[0] * scale, s[1] * scale);
-                        pages.push([(doc_width - w) / 2.0, GAP, w, h]);
-                        y = GAP + h + GAP;
-                    } else {
-                        pages.push([0.0, 0.0, 0.0, 0.0]);
-                    }
-                }
-            }
+        // Every page has its place in both modes, so that the scroll bar
+        // shows where in the document the reader is; single-page mode
+        // shows the one page the view's top is on and keeps the scroll
+        // within it (`page_scroll_range`).
+        for i in 0..count {
+            let s = page_size(i);
+            let (w, h) = (s[0] * scale, s[1] * scale);
+            pages.push([(doc_width - w) / 2.0, y, w, h]);
+            y += h + GAP;
         }
         let height = y.max(viewport[1]);
         Layout { mode, scale, turns, pages, size: [doc_width, height] }
@@ -140,11 +126,6 @@ impl Layout {
         if self.pages.is_empty() {
             return Anchor::default();
         }
-        if self.mode == ViewMode::Single {
-            let i = self.pages.iter().position(|p| p[3] > 0.0).unwrap_or(0);
-            let p = self.pages[i];
-            return Anchor { page: i, offset: if p[3] > 0.0 { (scroll - p[1] + GAP) / p[3] } else { 0.0 } };
-        }
         let scroll = scroll.max(0.0);
         // The first page whose bottom is below the view's top; the gap above
         // a page belongs to that page.
@@ -162,7 +143,8 @@ impl Layout {
             return 0..0;
         }
         if self.mode == ViewMode::Single {
-            let i = self.pages.iter().position(|p| p[3] > 0.0).unwrap_or(0);
+            // The one page the view's top is on.
+            let i = self.anchor_at(scroll, viewport_height).page;
             return i..i + 1;
         }
         let top = scroll;
@@ -172,12 +154,36 @@ impl Layout {
         first.min(self.pages.len())..last.max(first).min(self.pages.len())
     }
 
+    /// Single-page mode: the scroll offsets that show page `index` alone,
+    /// from its top (with the gap above) to its bottom (with the gap
+    /// below) at the view's bottom; a page shorter than the view sits at
+    /// the top.
+    pub fn page_scroll_range(&self, index: usize, viewport_height: f32) -> (f32, f32) {
+        let Some(p) = self.pages.get(index) else { return (0.0, 0.0) };
+        let top = p[1] - GAP;
+        let bottom = (p[1] + p[3] + GAP - viewport_height).max(top);
+        (top, bottom)
+    }
+
+    /// `scroll` kept within page `page`, in single-page mode; as it is in
+    /// continuous mode.
+    pub fn clamp_scroll(&self, scroll: f32, page: usize, viewport_height: f32) -> f32 {
+        if self.mode != ViewMode::Single || self.pages.is_empty() {
+            return scroll;
+        }
+        let (top, bottom) = self.page_scroll_range(page.min(self.pages.len() - 1), viewport_height);
+        scroll.clamp(top, bottom.max(top))
+    }
+
     /// The page the reader is "on": the one covering the middle of the
-    /// view, else the first visible one.
+    /// view, else the first visible one; in single-page mode the one shown.
     pub fn current(&self, scroll: f32, viewport_height: f32) -> usize {
         let range = self.visible(scroll, viewport_height);
         if range.is_empty() {
             return 0;
+        }
+        if self.mode == ViewMode::Single {
+            return range.start;
         }
         let middle = scroll + viewport_height / 2.0;
         range
@@ -317,12 +323,30 @@ mod tests {
     }
 
     #[test]
-    fn single_page_mode_places_one_page() {
+    fn single_page_mode_shows_one_page_of_the_whole_document() {
         let layout = Layout::new(ViewMode::Single, ZoomSetting::FitPage, 0, &pages(5), A4, [1000.0, 800.0], 2);
-        assert_eq!(layout.visible(0.0, 800.0), 2..3);
-        assert_eq!(layout.pages[0], [0.0, 0.0, 0.0, 0.0]);
+        // Every page has its place (the scroll bar spans the document),
+        // the current one fits the view.
+        assert!(layout.pages[0][3] > 0.0 && layout.pages[4][1] > layout.pages[2][1]);
         assert!((layout.pages[2][3] - (800.0 - 2.0 * GAP)).abs() < 0.01);
-        assert_eq!(layout.anchor_at(0.0, 800.0).page, 2);
+        let at_page_2 = layout.scroll_of(Layout::anchor_to_page(2));
+        assert_eq!(layout.visible(at_page_2, 800.0), 2..3);
+        assert_eq!(layout.current(at_page_2, 800.0), 2);
+        assert_eq!(layout.anchor_at(at_page_2, 800.0).page, 2);
+        // The scroll stays within the page shown: a fitting page at its top.
+        let (top, bottom) = layout.page_scroll_range(2, 800.0);
+        assert_eq!(top, layout.pages[2][1] - GAP);
+        assert!((bottom - top).abs() < 0.01, "a page that fits has one position");
+        assert_eq!(layout.clamp_scroll(top + 300.0, 2, 800.0), top);
+        // A page taller than the view scrolls from its top to its bottom.
+        let tall = Layout::new(ViewMode::Single, ZoomSetting::Scale(2.0), 0, &pages(5), A4, [1000.0, 800.0], 1);
+        let (top, bottom) = tall.page_scroll_range(1, 800.0);
+        assert!(bottom > top);
+        assert!((bottom - (tall.pages[1][1] + tall.pages[1][3] + GAP - 800.0)).abs() < 0.01);
+        assert_eq!(tall.clamp_scroll(bottom + 500.0, 1, 800.0), bottom);
+        // Continuous mode clamps nothing.
+        let flow = Layout::new(ViewMode::Continuous, ZoomSetting::Scale(2.0), 0, &pages(5), A4, [1000.0, 800.0], 1);
+        assert_eq!(flow.clamp_scroll(1234.5, 1, 800.0), 1234.5);
     }
 
     #[test]
