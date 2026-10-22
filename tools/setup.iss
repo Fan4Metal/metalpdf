@@ -42,13 +42,26 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; A running copy is closed (Restart Manager) before its exe is replaced.
 CloseApplications=yes
+; File associations change: Explorer is told to refresh its icons.
+ChangesAssociations=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
+[CustomMessages]
+english.AssocGroup=File types:
+russian.AssocGroup=Типы файлов:
+english.AssocTask=Offer MetalPDF for PDF files (in "Open with" and Default apps)
+russian.AssocTask=Предлагать MetalPDF для файлов PDF (в «Открыть с помощью» и приложениях по умолчанию)
+english.AssocStatus=Registering the file type...
+russian.AssocStatus=Регистрация типа файлов...
+english.ChooseDefault=Choose MetalPDF as the default program for PDF files (Settings)
+russian.ChooseDefault=Выбрать MetalPDF программой по умолчанию для PDF (Параметры)
+
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "assoc"; Description: "{cm:AssocTask}"; GroupDescription: "{cm:AssocGroup}"
 
 [Files]
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -66,7 +79,15 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; The file type is registered by the program itself (src\assoc.rs, under
+; HKCU); Windows lets only the user make it the default, in Settings.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--register"; StatusMsg: "{cm:AssocStatus}"; Flags: runhidden waituntilterminated; Tasks: assoc
+Filename: "ms-settings:defaultapps?registeredAppUser=MetalPDF"; Description: "{cm:ChooseDefault}"; Flags: shellexec nowait postinstall skipifsilent unchecked; Tasks: assoc
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+; Removes everything --register wrote; nothing happens if it was not run.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--unregister"; RunOnceId: "UnregisterFileTypes"; Flags: runhidden waituntilterminated
 
 ; Optional blocks, taken from the sibling projects when needed:
 ; - Explorer context menu for folders and drives ([Registry] under
