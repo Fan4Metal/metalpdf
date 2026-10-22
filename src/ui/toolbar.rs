@@ -1,7 +1,9 @@
-//! The status bar under the pages: the page field and count, the zoom,
-//! the turns, the view mode, and on the right what is going on (loading,
-//! an error, the search). What the reader does here comes back as
-//! `StatusAction`s; the app applies them.
+//! The toolbar under the tab bar: the page field and count, the zoom
+//! with its menu and the three fitting presets (fit width, fit page, 100 %,
+//! the one in force lit), the turns, the view mode, the editing mode's
+//! pencil, and on the right a note on what is going on (an edit refused, a
+//! save, unsaved changes). What the reader does here comes back as
+//! `ToolbarAction`s; the app applies them.
 
 use egui::{Align, Key, Layout, RichText, Ui};
 
@@ -9,10 +11,11 @@ use super::icons::Icon;
 use crate::settings::{ViewMode, ZoomSetting};
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum StatusAction {
+pub enum ToolbarAction {
     GoToPage(usize),
     ZoomIn,
     ZoomOut,
+    /// A zoom chosen (a preset or the menu): remembered for new documents.
     Zoom(ZoomSetting),
     Rotate { clockwise: bool },
     Mode(ViewMode),
@@ -20,7 +23,7 @@ pub enum StatusAction {
 }
 
 /// What the bar shows of the document.
-pub struct StatusInfo {
+pub struct ToolbarInfo {
     /// The page the reader is on and the count; `None` with no document.
     pub page: Option<(usize, usize)>,
     /// The label of the page shown in the field.
@@ -48,11 +51,16 @@ pub struct PageField {
 
 const ZOOM_CHOICES: [f32; 9] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 8.0];
 
+/// Whether `zoom` is the 100 % preset.
+pub fn is_actual_size(zoom: ZoomSetting) -> bool {
+    matches!(zoom, ZoomSetting::Scale(s) if (s - 1.0).abs() < 0.001)
+}
+
 /// Draw the bar; the actions the reader took.
-pub fn show(ui: &mut Ui, info: &StatusInfo, field: &mut PageField, resolve: impl Fn(&str) -> Option<usize>) -> Vec<StatusAction> {
+pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: impl Fn(&str) -> Option<usize>) -> Vec<ToolbarAction> {
     let mut actions = Vec::new();
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().item_spacing.x = 4.0;
         let enabled = info.page.is_some();
         // The page field: the label of the current page, editable; Enter
         // goes there.
@@ -69,9 +77,10 @@ pub fn show(ui: &mut Ui, info: &StatusInfo, field: &mut PageField, resolve: impl
         let typing = response.has_focus();
         if response.lost_focus() {
             if ui.input(|i| i.key_pressed(Key::Enter))
-                && let Some(page) = resolve(&field.text) {
-                    actions.push(StatusAction::GoToPage(page));
-                }
+                && let Some(page) = resolve(&field.text)
+            {
+                actions.push(ToolbarAction::GoToPage(page));
+            }
             field.text = info.label.clone();
             field.shown = info.label.clone();
         }
@@ -85,15 +94,11 @@ pub fn show(ui: &mut Ui, info: &StatusInfo, field: &mut PageField, resolve: impl
             ui.label("—");
         }
         ui.separator();
-        // The zoom.
+        // The zoom: a step out, the factor with its menu, a step in.
         if super::icon_button(ui, Icon::ZoomOut, false, tr!("Zoom out (Ctrl+−)", "Уменьшить (Ctrl+−)")).clicked() {
-            actions.push(StatusAction::ZoomOut);
+            actions.push(ToolbarAction::ZoomOut);
         }
-        let percent = format!("{:.0} %", info.zoom_factor * 100.0);
-        let zoom_label = match info.zoom {
-            ZoomSetting::FitWidth => tr!(format!("{percent} ▾"), format!("{percent} ▾")),
-            _ => format!("{percent} ▾"),
-        };
+        let zoom_label = format!("{:.0} % ▾", info.zoom_factor * 100.0);
         let zoom_button = ui.add_enabled(enabled, egui::Button::new(RichText::new(zoom_label).monospace()).frame(false));
         let zoom_button = zoom_button.on_hover_text(match info.zoom {
             ZoomSetting::FitWidth => tr!("Zoom: fit width", "Масштаб: по ширине"),
@@ -103,7 +108,7 @@ pub fn show(ui: &mut Ui, info: &StatusInfo, field: &mut PageField, resolve: impl
         egui::Popup::menu(&zoom_button).show(|ui| {
             ui.set_min_width(170.0);
             let fit = |ui: &mut Ui, setting: ZoomSetting, text: String, on: bool| {
-                ui.selectable_label(on, text).clicked().then_some(StatusAction::Zoom(setting))
+                ui.selectable_label(on, text).clicked().then_some(ToolbarAction::Zoom(setting))
             };
             if let Some(a) = fit(ui, ZoomSetting::FitWidth, tr!("Fit width\tCtrl+0", "По ширине\tCtrl+0").to_owned(), info.zoom == ZoomSetting::FitWidth) {
                 actions.push(a);
@@ -118,40 +123,64 @@ pub fn show(ui: &mut Ui, info: &StatusInfo, field: &mut PageField, resolve: impl
                 let on = matches!(info.zoom, ZoomSetting::Scale(s) if (s - z).abs() < 0.001);
                 let text = if z == 1.0 { "100 %\tCtrl+1".to_owned() } else { format!("{:.0} %", z * 100.0) };
                 if ui.selectable_label(on, text).clicked() {
-                    actions.push(StatusAction::Zoom(ZoomSetting::Scale(z)));
+                    actions.push(ToolbarAction::Zoom(ZoomSetting::Scale(z)));
                     ui.close();
                 }
             }
         });
         if super::icon_button(ui, Icon::ZoomIn, false, tr!("Zoom in (Ctrl++)", "Увеличить (Ctrl++)")).clicked() {
-            actions.push(StatusAction::ZoomIn);
+            actions.push(ToolbarAction::ZoomIn);
+        }
+        ui.separator();
+        // The presets: the one in force is lit; a choice is remembered.
+        let presets = [
+            (Icon::FitWidth, ZoomSetting::FitWidth, info.zoom == ZoomSetting::FitWidth, tr!("Fit width (Ctrl+0)", "По ширине (Ctrl+0)")),
+            (Icon::FitPage, ZoomSetting::FitPage, info.zoom == ZoomSetting::FitPage, tr!("Fit page (Ctrl+2)", "Страница целиком (Ctrl+2)")),
+            (Icon::ActualSize, ZoomSetting::Scale(1.0), is_actual_size(info.zoom), tr!("Actual size, 100 % (Ctrl+1)", "Истинный размер, 100 % (Ctrl+1)")),
+        ];
+        for (icon, setting, on, tip) in presets {
+            if super::icon_button(ui, icon, on, tip).clicked() {
+                actions.push(ToolbarAction::Zoom(setting));
+            }
         }
         ui.separator();
         if super::icon_button(ui, Icon::RotateLeft, false, tr!("Rotate left (Shift+R)", "Повернуть влево (Shift+R)")).clicked() {
-            actions.push(StatusAction::Rotate { clockwise: false });
+            actions.push(ToolbarAction::Rotate { clockwise: false });
         }
         if super::icon_button(ui, Icon::RotateRight, false, tr!("Rotate right (R)", "Повернуть вправо (R)")).clicked() {
-            actions.push(StatusAction::Rotate { clockwise: true });
+            actions.push(ToolbarAction::Rotate { clockwise: true });
         }
         ui.separator();
         let continuous = info.mode == ViewMode::Continuous;
         if super::icon_button(ui, Icon::Continuous, continuous, tr!("Continuous pages", "Непрерывная прокрутка")).clicked() {
-            actions.push(StatusAction::Mode(ViewMode::Continuous));
+            actions.push(ToolbarAction::Mode(ViewMode::Continuous));
         }
         if super::icon_button(ui, Icon::SinglePage, !continuous, tr!("One page at a time", "По одной странице")).clicked() {
-            actions.push(StatusAction::Mode(ViewMode::Single));
+            actions.push(ToolbarAction::Mode(ViewMode::Single));
         }
         ui.separator();
-        let edit_tip = tr!("Edit text (E): click a line of text to change it", "Правка текста (E): щёлкните строку текста, чтобы изменить её");
+        let edit_tip = tr!("Edit text and pictures (E): click a run of text or a picture to change it", "Правка текста и картинок (E): щёлкните строку текста или картинку, чтобы изменить её");
         if ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Edit, info.editing, edit_tip)).inner.clicked() {
-            actions.push(StatusAction::ToggleEdit);
+            actions.push(ToolbarAction::ToggleEdit);
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if !info.note.is_empty() {
                 let color = if info.note_is_error { crate::style::Palette::of(ui.ctx()).error } else { ui.visuals().weak_text_color() };
-                ui.add(egui::Label::new(RichText::new(&info.note).size(12.0).color(color)).truncate());
+                ui.add(egui::Label::new(RichText::new(&info.note).size(12.0).color(color)).truncate()).on_hover_text(&info.note);
             }
         });
     });
     actions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_actual_size_preset_is_100_percent() {
+        assert!(is_actual_size(ZoomSetting::Scale(1.0)));
+        assert!(!is_actual_size(ZoomSetting::Scale(1.25)));
+        assert!(!is_actual_size(ZoomSetting::FitWidth));
+    }
 }

@@ -53,7 +53,7 @@ Windows SmartScreen may warn about an unsigned program on the first start: "More
 
 A PDF is opened with `Ctrl+O`, by dropping it on the window, from the recent files on the start page, from Explorer (double click once MetalPDF is chosen for PDF files, or "Open with"), or from the command line: `metalpdf.exe file.pdf`. Each file opens in a tab; a file already open is brought to the front instead.
 
-The status bar holds the page field (a page number or a label such as `iv` typed there goes to that page; `Ctrl+G` focuses it), the zoom with its menu, the two turn buttons, the view mode (continuous pages or one page at a time) and the pencil of the editing mode. The tab bar holds Open, the sidebar toggle, the tabs, and on the right the theme switch, the update button when a newer version exists, and About.
+The toolbar under the tabs holds the page field (a page number or a label such as `iv` typed there goes to that page; `Ctrl+G` focuses it), the zoom with its menu, the three zoom presets (fit width, fit page, actual size; the one in force is lit, and a preset chosen is the zoom new documents open at), the two turn buttons, the view mode (continuous pages or one page at a time) and the pencil of the editing mode; a note on the right says when an edit was refused or a file saved. The tab bar holds Open, the sidebar toggle, the tabs, and on the right the theme switch, the update button when a newer version exists, and About.
 
 Where each document was left (page, zoom, turns) is remembered, as is the last session: started without files, MetalPDF opens the tabs it was closed with.
 
@@ -77,7 +77,7 @@ Text is selected by dragging over it, across pages too, and copied with `Ctrl+C`
 
 ### Editing text, pictures and pages
 
-The editing mode (`E`, or the pencil in the status bar) outlines the text objects of the pages, the runs of text a PDF is made of: usually a line or a part of one. A click on a run opens a field over it; `Enter` replaces the run's text, `Esc` leaves it as it was. `Ctrl+Z` takes the last change back. The pages keep their layout: a longer text runs past where the old one ended, nothing is reflowed.
+The editing mode (`E`, or the pencil on the toolbar) outlines the text objects of the pages, the runs of text a PDF is made of: usually a line or a part of one. A click on a run opens a field over it; `Enter` replaces the run's text, `Esc` leaves it as it was. `Ctrl+Z` takes the last change back. The pages keep their layout: a longer text runs past where the old one ended, nothing is reflowed.
 
 A run keeps its font when that font can show the new text; a font embedded as a subset of its glyphs cannot, and the run is set in Arial instead, at the same place, size and colour.
 
@@ -159,7 +159,7 @@ The Build Tools need the "Desktop development with C++" workload, chosen in the 
 - `src/pdfium/` — the PDFium C API declared by hand (`sys.rs`) and a safe layer over it (`mod.rs`): documents, pages, rendering (plain and progressive), text, search, links, bookmarks, editing, saving.
 - `src/engine.rs` — the one thread PDFium is called from, with the scheduler of renders.
 - `src/layout.rs`, `src/view.rs` — the geometry of the pages and the state of a view.
-- `src/app.rs` — the windows and tabs; `src/ui/` — the page area, the tab bar, the status bar, the sidebar, About, the Licenses window, the painted icons.
+- `src/app.rs` — the windows and tabs; `src/ui/` — the page area, the tab bar, the toolbar, the sidebar, About, the Licenses window, the painted icons.
 - `src/settings.rs` — the JSON settings; `src/single_instance.rs` — the hand-over between launches.
 - `tools/` — `get_pdfium.py`, `make_release.py`, `notices.py`, `setup.iss`.
 

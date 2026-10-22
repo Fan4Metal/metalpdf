@@ -100,6 +100,12 @@ fn thumbnails(
     ScrollArea::vertical().id_salt(("thumbs", tab.id)).auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
         ui.set_min_height(total);
         let origin = ui.min_rect().min;
+        if changed && current < count {
+            // Whether its row is in view or not (the list opens at the top).
+            let x = origin.x + (ui.available_width() - width) / 2.0;
+            let rect = Rect::from_min_size(pos2(x, origin.y + tops[current]), vec2(width, height_of(current)));
+            ui.scroll_to_rect(rect.expand(THUMB_MARGIN), Some(Align::Center));
+        }
         let first = tops.partition_point(|&t| t + 1.0 < viewport.min.y).saturating_sub(1).min(count - 1);
         let last = tops.partition_point(|&t| t < viewport.max.y).min(count);
         for (i, &top) in tops.iter().enumerate().take(last).skip(first) {
@@ -142,9 +148,6 @@ fn thumbnails(
                     ui.close();
                 }
             });
-            if i == current && changed {
-                ui.scroll_to_rect(rect.expand(THUMB_MARGIN), Some(Align::Center));
-            }
             let painter = ui.painter();
             painter.rect_filled(rect.translate(vec2(1.0, 2.0)), 1.0, palette.shadow);
             let key = RenderKey { doc: doc.id, page: i as u32, width: PREVIEW_WIDTH, turns, kind: Kind::Preview };

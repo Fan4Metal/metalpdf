@@ -1,6 +1,6 @@
 //! The egui windows: the root and the ones tabs were dragged out into,
 //! each with its tabs (a document and how it is looked at), the engine's
-//! answers taken in every frame, the keys, the tab bar and the status bar,
+//! answers taken in every frame, the keys, the tab bar and the toolbar,
 //! the start page with the recent files, and the pieces every app of the
 //! family has (theme switch, About, update check, dark caption, settings).
 //! The model of windows and tabs is MetalMD's.
@@ -31,7 +31,7 @@ use crate::ui::about::AboutDialog;
 use crate::ui::home::HomeAction;
 use crate::ui::icons::Icon;
 use crate::ui::menu::RightClick;
-use crate::ui::status::{PageField, StatusAction, StatusInfo};
+use crate::ui::toolbar::{PageField, ToolbarAction, ToolbarInfo};
 use crate::update::Updates;
 use crate::layout::Anchor;
 use crate::search::FindState;
@@ -78,7 +78,7 @@ pub struct Tab {
     pub editor: Option<InlineEditor>,
     /// The image selected in the editing mode.
     pub image: Option<ImageSel>,
-    /// A short message for the status bar (an edit refused, a save).
+    /// A short message for the toolbar (an edit refused, a save).
     pub notice: Option<(String, Instant)>,
 }
 
@@ -145,7 +145,7 @@ impl Tab {
         }
     }
 
-    /// Say something in the status bar for a few seconds.
+    /// Say something in the toolbar for a few seconds.
     pub fn notify(&mut self, text: String) {
         self.notice = Some((text, Instant::now()));
     }
@@ -400,7 +400,7 @@ const LOOK_FRAMES: u32 = 10;
 /// The window's place is saved this long after it last moved.
 const WINDOW_SAVE_DELAY: Duration = Duration::from_secs(1);
 
-/// What the status bar's page field resolves a typed label or number with.
+/// What the toolbar's page field resolves a typed label or number with.
 type PageResolver = Box<dyn Fn(&str) -> Option<usize>>;
 
 /// The title a detached window is made with, hidden, until it is found
@@ -1181,6 +1181,8 @@ impl App {
         if typing {
             return;
         }
+        // A zoom chosen by name, remembered once the tab is let go of.
+        let mut chosen = None;
         let Some(tab) = self.win().active_tab_mut() else {
             return;
         };
@@ -1231,14 +1233,11 @@ impl App {
                 view.scroll_x = (view.scroll_x - 60.0).max(0.0);
             }
         }
-        if consume(Modifiers::COMMAND, Key::Num0) {
-            view.set_zoom(ZoomSetting::FitWidth, None, &sizes, fallback);
-        }
-        if consume(Modifiers::COMMAND, Key::Num1) {
-            view.set_zoom(ZoomSetting::Scale(1.0), None, &sizes, fallback);
-        }
-        if consume(Modifiers::COMMAND, Key::Num2) {
-            view.set_zoom(ZoomSetting::FitPage, None, &sizes, fallback);
+        for (key, zoom) in [(Key::Num0, ZoomSetting::FitWidth), (Key::Num1, ZoomSetting::Scale(1.0)), (Key::Num2, ZoomSetting::FitPage)] {
+            if consume(Modifiers::COMMAND, key) {
+                view.set_zoom(zoom, None, &sizes, fallback);
+                chosen = Some(zoom);
+            }
         }
         if consume(Modifiers::COMMAND, Key::Plus)
             || consume(Modifiers::COMMAND, Key::Equals)
@@ -1255,32 +1254,39 @@ impl App {
         if consume(Modifiers::SHIFT, Key::R) {
             view.rotate(false);
         }
+        if let Some(zoom) = chosen {
+            self.remember_zoom(zoom);
+        }
     }
 
-    /// Apply what the status bar asked.
-    fn apply_status(&mut self, actions: Vec<StatusAction>) {
+    /// Apply what the toolbar asked.
+    fn apply_toolbar(&mut self, actions: Vec<ToolbarAction>) {
         let engine = &self.engine;
         let mut mode_change = None;
+        let mut zoom_change = None;
         if let Some(tab) = self.windows[self.current].active_tab_mut() {
             let count = tab.doc.page_count;
             let sizes = tab.doc.sizes.clone();
             let fallback = tab.doc.fallback;
             for action in actions {
                 match action {
-                    StatusAction::GoToPage(page) => {
+                    ToolbarAction::GoToPage(page) => {
                         tab.remember();
                         tab.view.go_to_page(page, count);
                         tab.doc.need_sizes_near(engine, page);
                     }
-                    StatusAction::ZoomIn => tab.view.zoom_step(true, None, &sizes, fallback),
-                    StatusAction::ZoomOut => tab.view.zoom_step(false, None, &sizes, fallback),
-                    StatusAction::Zoom(z) => tab.view.set_zoom(z, None, &sizes, fallback),
-                    StatusAction::Rotate { clockwise } => tab.view.rotate(clockwise),
-                    StatusAction::Mode(mode) => {
+                    ToolbarAction::ZoomIn => tab.view.zoom_step(true, None, &sizes, fallback),
+                    ToolbarAction::ZoomOut => tab.view.zoom_step(false, None, &sizes, fallback),
+                    ToolbarAction::Zoom(z) => {
+                        tab.view.set_zoom(z, None, &sizes, fallback);
+                        zoom_change = Some(z);
+                    }
+                    ToolbarAction::Rotate { clockwise } => tab.view.rotate(clockwise),
+                    ToolbarAction::Mode(mode) => {
                         tab.view.set_mode(mode);
                         mode_change = Some(mode);
                     }
-                    StatusAction::ToggleEdit => {
+                    ToolbarAction::ToggleEdit => {
                         tab.editing = !tab.editing;
                         tab.editor = None;
                         tab.image = None;
@@ -1291,6 +1297,19 @@ impl App {
         }
         if let Some(mode) = mode_change {
             self.settings.view_mode = mode;
+            self.settings_dirty = true;
+        }
+        if let Some(zoom) = zoom_change {
+            self.remember_zoom(zoom);
+        }
+    }
+
+    /// A zoom chosen by name (a preset, the menu, `Ctrl+0/1/2`) is the
+    /// zoom new documents open at; the steps of the wheel and the keys
+    /// are not.
+    fn remember_zoom(&mut self, zoom: ZoomSetting) {
+        if self.settings.zoom != zoom {
+            self.settings.zoom = zoom;
             self.settings_dirty = true;
         }
     }
@@ -1544,7 +1563,12 @@ impl App {
                     let mut drag_start = None;
                     for i in 0..tab_count {
                         let tab = &self.windows[cur].tabs[i];
-                        let (tab_id, path_text) = (tab.id, tab.path.display().to_string());
+                        // The tooltip: the document's title, if it has one, over its path.
+                        let path_text = match tab.doc.title.as_deref() {
+                            Some(t) if !t.trim().is_empty() => format!("{}\n{}", t.trim(), tab.path.display()),
+                            _ => tab.path.display().to_string(),
+                        };
+                        let tab_id = tab.id;
                         let shown = if tab.doc.modified { format!("{} •", tab.title) } else { tab.title.clone() };
                         let title = RichText::new(shown).size(13.5);
                         // Under the tab's own id, so a drag follows the tab
@@ -1951,22 +1975,19 @@ impl App {
         }
     }
 
-    fn status_bar(&mut self, ui: &mut Ui) {
+    fn toolbar(&mut self, ui: &mut Ui) {
         let cur = self.current;
-        let (info, resolve): (StatusInfo, PageResolver) = match self.windows[cur].active_tab() {
+        let (info, resolve): (ToolbarInfo, PageResolver) = match self.windows[cur].active_tab() {
             Some(tab) if tab.doc.ready() => {
                 let layout = tab.layout();
                 let note = match (&tab.notice, tab.doc.modified) {
                     (Some((text, since)), _) if since.elapsed() < Duration::from_secs(6) => text.clone(),
                     (_, true) => tr!("Edited, not saved (Ctrl+S)", "Изменено, не сохранено (Ctrl+S)").to_owned(),
-                    _ => match tab.doc.title.as_deref() {
-                        Some(t) if !t.is_empty() => t.to_owned(),
-                        _ => String::new(),
-                    },
+                    _ => String::new(),
                 };
                 let labels = tab.doc.labels.clone();
                 let count = tab.doc.page_count;
-                let info = StatusInfo {
+                let info = ToolbarInfo {
                     page: Some((tab.view.current, count)),
                     label: tab.doc.label(tab.view.current),
                     zoom_factor: crate::layout::zoom_of_scale(layout.scale),
@@ -1987,7 +2008,7 @@ impl App {
                 (info, Box::new(resolve))
             }
             _ => (
-                StatusInfo {
+                ToolbarInfo {
                     page: None,
                     label: String::new(),
                     zoom_factor: 1.0,
@@ -2000,9 +2021,9 @@ impl App {
                 Box::new(|_: &str| None),
             ),
         };
-        let actions = crate::ui::status::show(ui, &info, &mut self.windows[cur].page_field, resolve);
+        let actions = crate::ui::toolbar::show(ui, &info, &mut self.windows[cur].page_field, resolve);
         if !actions.is_empty() {
-            self.apply_status(actions);
+            self.apply_toolbar(actions);
         }
     }
 
@@ -2019,7 +2040,7 @@ impl App {
         }
     }
 
-    /// One window's frame: its tab bar, status bar and pages. `ui` is the
+    /// One window's frame: its tab bar, toolbar and pages. `ui` is the
     /// root `Ui` of its viewport.
     fn window_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
@@ -2059,9 +2080,11 @@ impl App {
         self.keys(&ctx);
         let palette = Palette::of(&ctx);
         self.tab_bar(ui, &palette);
-        self.find_bar(ui, &palette);
         let wid = self.windows[cur].id;
-        Panel::bottom(Id::new(("status", wid))).show(ui, |ui| self.status_bar(ui));
+        Panel::top(Id::new(("toolbar", wid)))
+            .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(Margin::symmetric(8, 4)))
+            .show(ui, |ui| self.toolbar(ui));
+        self.find_bar(ui, &palette);
         self.sidebar(ui, &palette);
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.central(ui, &palette));
         self.jump_to_hit();

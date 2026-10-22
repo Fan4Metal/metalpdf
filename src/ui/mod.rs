@@ -9,7 +9,7 @@ pub mod icons;
 pub mod licenses;
 pub mod menu;
 pub mod sidebar;
-pub mod status;
+pub mod toolbar;
 pub mod view;
 
 use egui::{Response, TextureHandle, TextureOptions, ThemePreference, Ui};

@@ -128,6 +128,14 @@ pub enum Icon {
     SinglePage,
     /// A panel at the left of a window: the sidebar toggle (MetalPDF).
     Sidebar,
+    /// A window with a page filling its width, cut top and bottom: zoom
+    /// to fit the width (MetalPDF).
+    FitWidth,
+    /// A window with a whole page inside it: zoom to fit the page
+    /// (MetalPDF).
+    FitPage,
+    /// "1:1" drawn in strokes: the actual size, 100 % (MetalPDF).
+    ActualSize,
 }
 
 impl Icon {
@@ -192,6 +200,9 @@ impl Icon {
         Icon::Continuous,
         Icon::SinglePage,
         Icon::Sidebar,
+        Icon::FitWidth,
+        Icon::FitPage,
+        Icon::ActualSize,
     ];
 }
 
@@ -385,6 +396,26 @@ pub fn paint(painter: &Painter, icon: Icon, c: Pos2, size: f32, color: Color32, 
             painter.add(polyline(&[(1.0, -6.0), (1.0, -2.5), (4.5, -2.5)]));
             painter.line_segment([p(-2.5, 0.5), p(2.5, 0.5)], pen(1.0));
             painter.line_segment([p(-2.5, 3.0), p(2.5, 3.0)], pen(1.0));
+        }
+        Icon::FitWidth => {
+            // A window, and a page as wide as its inside, running off the
+            // top and the bottom.
+            painter.rect_stroke(rect(-6.5, -5.5, 13.0, 11.0), 1.5 * k, line, StrokeKind::Middle);
+            painter.rect_filled(rect(-3.75, -4.85, 7.5, 9.7), 0.0, color);
+        }
+        Icon::FitPage => {
+            // A window with a whole page inside it, room all round.
+            painter.rect_stroke(rect(-6.5, -5.5, 13.0, 11.0), 1.5 * k, line, StrokeKind::Middle);
+            painter.rect_filled(rect(-2.5, -3.25, 5.0, 6.5), 0.0, color);
+        }
+        Icon::ActualSize => {
+            // 1:1 — two ones with their flags, two dots between.
+            for x in [-3.75, 3.75] {
+                painter.line_segment([p(x, -4.5), p(x, 4.5)], line);
+                painter.line_segment([p(x - 1.8, -2.7), p(x, -4.5)], line);
+            }
+            painter.circle_filled(p(0.0, -1.6), 0.95 * k, color);
+            painter.circle_filled(p(0.0, 1.6), 0.95 * k, color);
         }
         Icon::Sidebar => {
             // A window with a panel on its left.
