@@ -71,6 +71,17 @@ impl<T> Pool<T> {
         Some((best.width, Rc::clone(&e.item)))
     }
 
+    /// The tiles of the page `key` names at its width and turns, with
+    /// their rectangles; those that are drawn are to be marked used with
+    /// `get`.
+    pub fn tiles_of(&self, key: &RenderKey) -> Vec<RenderKey> {
+        self.entries
+            .keys()
+            .filter(|k| k.doc == key.doc && k.page == key.page && k.turns == key.turns && k.width == key.width && matches!(k.kind, Kind::Tile { .. }))
+            .copied()
+            .collect()
+    }
+
     /// Drop the least recently used entries over the budget, never those
     /// used in `frame` (the frame just drawn).
     pub fn trim(&mut self, frame: u64) {
@@ -135,7 +146,7 @@ impl Default for Textures {
 impl Textures {
     pub fn pool(&mut self, kind: Kind) -> &mut Pool<Texture> {
         match kind {
-            Kind::Full => &mut self.full,
+            Kind::Full | Kind::Tile { .. } => &mut self.full,
             Kind::Preview => &mut self.preview,
         }
     }

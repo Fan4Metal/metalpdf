@@ -5,7 +5,7 @@
 //! family has (theme switch, About, update check, dark caption, settings).
 //! The model of windows and tabs is MetalMD's.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -20,7 +20,7 @@ use egui::{
 use crate::cache::Textures;
 use crate::dialog::{Ask, Dialogs};
 use crate::document::{DocState, Status};
-use crate::engine::{DocId, Edit, Engine, Event, Kind, RenderKey, Request};
+use crate::engine::{DocId, Edit, Engine, Event, RenderKey, Request};
 use crate::pdfium::Target;
 use crate::pixels::Pixels;
 use crate::settings::{FilePosition, Settings, ThemeSetting, ViewMode, WindowGeometry, ZoomSetting, same_path};
@@ -68,6 +68,9 @@ pub struct Tab {
     pub selection: Option<Selection>,
     /// The mouse is dragging the selection out.
     pub selecting: bool,
+    /// The tile each page is shown from or waits for, at a zoom where the
+    /// whole page would be too large a texture (`ui/view.rs`).
+    pub tiles: HashMap<u32, RenderKey>,
     /// Where the reader was before each jump (a link, a bookmark, a
     /// thumbnail, the page field, a hit), for Alt+Left; and the jumps
     /// gone back from, for Alt+Right.
@@ -136,6 +139,7 @@ impl Tab {
             find: FindState::default(),
             selection: None,
             selecting: false,
+            tiles: HashMap::new(),
             back: Vec::new(),
             forward: Vec::new(),
             editing: false,
@@ -380,6 +384,8 @@ pub struct App {
     frame: u64,
     /// The first page has been drawn (a trace mark).
     first_drawn: bool,
+    /// `--screenshot`: the picture was asked for.
+    screenshot_asked: bool,
     /// The root window moved or resized: its place is saved after a pause.
     window_changed_at: Option<Instant>,
     last_geometry: Option<WindowGeometry>,
@@ -495,6 +501,7 @@ impl App {
             cloak,
             frame: 0,
             first_drawn: false,
+            screenshot_asked: false,
             window_changed_at: None,
             last_geometry: None,
             confirm: None,
@@ -859,6 +866,7 @@ impl App {
                             tab.image = None;
                             tab.editor = None;
                             tab.selection = None;
+                            tab.tiles.clear();
                             tab.find.close();
                         }
                         continue;
@@ -907,9 +915,9 @@ impl App {
         let distance = |k: &RenderKey| current.iter().find(|(d, _)| *d == k.doc).map_or(u32::MAX, |(_, p)| k.page.abs_diff(*p));
         let mut full_done = false;
         let mut rest = VecDeque::new();
-        self.uploads.make_contiguous().sort_by_key(|(k, _)| (k.kind == Kind::Full, distance(k)));
+        self.uploads.make_contiguous().sort_by_key(|(k, _)| (k.kind.is_large(), distance(k)));
         while let Some((key, pixels)) = self.uploads.pop_front() {
-            if key.kind == Kind::Full && full_done {
+            if key.kind.is_large() && full_done {
                 rest.push_back((key, pixels));
                 continue;
             }
@@ -917,7 +925,7 @@ impl App {
                 Ok(texture) => {
                     let bytes = texture.bytes;
                     self.textures.pool(key.kind).insert(key, texture, bytes, self.frame);
-                    if key.kind == Kind::Full {
+                    if key.kind.is_large() {
                         full_done = true;
                         if !self.first_drawn {
                             self.first_drawn = true;
@@ -2111,10 +2119,12 @@ impl App {
     /// been rendered and uploaded, write it and end.
     fn screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = crate::SCREENSHOT.get() else { return };
-        if self.frame == 60 {
+        // After 60 frames and 2 s: time for the renders, tiles included.
+        if self.frame >= 60 && !self.screenshot_asked && crate::since_start() >= Duration::from_secs(2) {
+            self.screenshot_asked = true;
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
         }
-        if self.frame < 120 {
+        if !self.screenshot_asked || self.frame < 120 {
             ctx.request_repaint();
         }
         let image = ctx.input(|i| {

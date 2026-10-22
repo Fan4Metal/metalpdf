@@ -12,7 +12,9 @@ use egui::{Color32, CursorIcon, Event, MouseWheelUnit, PointerButton, Pos2, Rect
 
 use crate::app::{ImageDrag, ImageSel, InlineEditor, Tab};
 use crate::cache::Textures;
-use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey};
+use std::collections::HashMap;
+
+use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey, pixel_height, too_large};
 use crate::layout;
 use crate::pdfium::Target;
 use crate::selection::{self, Selection};
@@ -60,6 +62,12 @@ fn wheel_notches(ui: &Ui) -> Wheel {
 /// Pages rendered ahead in the direction of travel, and behind.
 const AHEAD: usize = 2;
 const BEHIND: usize = 1;
+/// A tile reaches this share of the view's size beyond the part in view
+/// on every side, so that a little scrolling needs no new tile.
+const TILE_MARGIN: f32 = 0.3;
+/// Tile edges fall on this grid of page pixels: a tile is asked for once,
+/// not anew with every pixel the view moves while it is being made.
+const TILE_GRID: f32 = 256.0;
 
 /// What the page area tells the app.
 #[derive(Default)]
@@ -126,6 +134,8 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let editing = tab.editing;
     let editor: &mut Option<InlineEditor> = &mut tab.editor;
     let image: &mut Option<ImageSel> = &mut tab.image;
+    let tiles: &mut HashMap<u32, RenderKey> = &mut tab.tiles;
+    let max_side = ui.input(|i| i.max_texture_side) as u64;
 
     let scroll = egui::ScrollArea::both()
         .id_salt(("pages", tab.id))
@@ -153,12 +163,69 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 let rect = snap(Rect::from_min_size(origin + vec2(p[0], p[1]), vec2(p[2], p[3])), ppp);
                 let size = tab.doc.size_of(i);
                 let turned = layout::turned(size, turns);
-                let key = RenderKey { doc: doc_id, page: i as u32, width: layout::pixel_width(turned, layout.scale, ppp), turns, kind: Kind::Full };
+                let width_px = layout::pixel_width(turned, layout.scale, ppp);
+                let height_px = pixel_height(turned, width_px);
+                let key = RenderKey { doc: doc_id, page: i as u32, width: width_px, turns, kind: Kind::Full };
                 let preview_key = RenderKey { width: PREVIEW_WIDTH, kind: Kind::Preview, ..key };
                 let distance = ((p[1] + p[3] / 2.0 - middle).abs() / 100.0) as u32;
                 // Shadow, picture, edge.
                 painter.rect_filled(rect.translate(vec2(2.0, 3.0)), 2.0, palette.shadow);
-                if let Some(tex) = textures.full.get(&key, frame) {
+                if too_large(width_px, height_px, max_side) {
+                    // Too large a texture whole: the nearest full render
+                    // (else the preview, else paper) under a tile of the
+                    // part in view.
+                    if let Some((_, tex)) = textures.full.nearest(&key, frame) {
+                        painter.image(tex.id(), rect, uv(), Color32::WHITE);
+                    } else if let Some(tex) = textures.preview.get(&preview_key, frame) {
+                        painter.image(tex.id(), rect, uv(), Color32::WHITE);
+                    } else {
+                        painter.rect_filled(rect, 0.0, palette.paper);
+                        candidates.push((preview_key, 0, distance));
+                    }
+                    let view_rect = viewport.translate(origin.to_vec2());
+                    let shown = rect.intersect(view_rect);
+                    if shown.is_positive() {
+                        // The part in view, in pixels of the page.
+                        let (vx0, vy0) = ((shown.min.x - rect.min.x) * ppp, (shown.min.y - rect.min.y) * ppp);
+                        let (vx1, vy1) = ((shown.max.x - rect.min.x) * ppp, (shown.max.y - rect.min.y) * ppp);
+                        let holds_view = |k: &RenderKey| {
+                            k.width == width_px
+                                && k.turns == turns
+                                && matches!(k.kind, Kind::Tile { x, y, w, h }
+                                    if x as f32 <= vx0 + 0.5 && y as f32 <= vy0 + 0.5 && (x + w) as f32 >= vx1 - 0.5 && (y + h) as f32 >= vy1 - 0.5)
+                        };
+                        let have = textures.full.tiles_of(&key);
+                        // The tile holding the view: one at hand, else the
+                        // one waited for, else a new one round the view.
+                        let tile = have.iter().copied().find(holds_view).or_else(|| tiles.get(&(i as u32)).copied().filter(holds_view)).unwrap_or_else(|| {
+                            let (mw, mh) = (view_rect.width() * ppp * TILE_MARGIN, view_rect.height() * ppp * TILE_MARGIN);
+                            let x0 = ((vx0 - mw) / TILE_GRID).floor().max(0.0) * TILE_GRID;
+                            let y0 = ((vy0 - mh) / TILE_GRID).floor().max(0.0) * TILE_GRID;
+                            let x1 = (((vx1 + mw) / TILE_GRID).ceil() * TILE_GRID).min(width_px as f32);
+                            let y1 = (((vy1 + mh) / TILE_GRID).ceil() * TILE_GRID).min(height_px as f32);
+                            RenderKey { kind: Kind::Tile { x: x0 as u32, y: y0 as u32, w: (x1 - x0).max(1.0) as u32, h: (y1 - y0).max(1.0) as u32 }, ..key }
+                        });
+                        tiles.insert(i as u32, tile);
+                        let tile_rect = |k: &RenderKey| {
+                            let Kind::Tile { x, y, w, h } = k.kind else { return Rect::NOTHING };
+                            snap(Rect::from_min_size(rect.min + vec2(x as f32, y as f32) / ppp, vec2(w as f32, h as f32) / ppp), ppp)
+                        };
+                        // The other tiles at hand that touch the view, then the one holding it.
+                        for k in have.iter().filter(|k| **k != tile) {
+                            let r = tile_rect(k);
+                            if r.intersects(view_rect)
+                                && let Some(tex) = textures.full.get(k, frame)
+                            {
+                                painter.image(tex.id(), r, uv(), Color32::WHITE);
+                            }
+                        }
+                        if let Some(tex) = textures.full.get(&tile, frame) {
+                            painter.image(tex.id(), tile_rect(&tile), uv(), Color32::WHITE);
+                        } else if settled {
+                            candidates.push((tile, 1, distance));
+                        }
+                    }
+                } else if let Some(tex) = textures.full.get(&key, frame) {
                     painter.image(tex.id(), rect, uv(), Color32::WHITE);
                 } else if let Some((_, tex)) = textures.full.nearest(&key, frame) {
                     painter.image(tex.id(), rect, uv(), Color32::WHITE);
@@ -444,12 +511,14 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
         for (rank, i) in near.into_iter().enumerate() {
             let size = tab.doc.size_of(i);
             let turned = layout::turned(size, turns);
-            let key = RenderKey { doc: doc_id, page: i as u32, width: layout::pixel_width(turned, layout.scale, ppp), turns, kind: Kind::Full };
+            let width_px = layout::pixel_width(turned, layout.scale, ppp);
+            let key = RenderKey { doc: doc_id, page: i as u32, width: width_px, turns, kind: Kind::Full };
             let preview_key = RenderKey { width: PREVIEW_WIDTH, kind: Kind::Preview, ..key };
             if !textures.preview.contains(&preview_key) && !textures.full.contains(&key) {
                 candidates.push((preview_key, 3, rank as u32));
             }
-            if !textures.full.contains(&key) {
+            // A page drawn from tiles is not rendered whole ahead of time.
+            if !textures.full.contains(&key) && !too_large(width_px, pixel_height(turned, width_px), max_side) {
                 candidates.push((key, 4, rank as u32));
             }
         }

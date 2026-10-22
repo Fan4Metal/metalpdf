@@ -26,6 +26,21 @@ pub type DocId = u32;
 /// Previews are rendered this wide (and taken from a full render's mip
 /// levels when there is one).
 pub const PREVIEW_WIDTH: u32 = 200;
+/// A page whose whole render would have more pixels than this (or a side
+/// longer than the GPU takes) is drawn from tiles of the part in view.
+pub const TILE_PIXELS: u64 = 16 << 20;
+
+/// Whether a page of `width` × `height` pixels is drawn from tiles.
+pub fn too_large(width: u32, height: u32, max_side: u64) -> bool {
+    let (w, h) = (u64::from(width), u64::from(height));
+    w * h > TILE_PIXELS || w > max_side || h > max_side
+}
+
+/// The height in pixels of a page of `turned` size rendered `width` wide
+/// (the sum `Worker::render` makes).
+pub fn pixel_height(turned: [f32; 2], width: u32) -> u32 {
+    ((width as f32) * turned[1] / turned[0].max(1.0)).round().clamp(1.0, 1.0e5) as u32
+}
 /// Page sizes are read in batches of this many.
 pub const SIZE_BATCH: usize = 128;
 /// Render flags: annotations drawn; no LCD text (fringes when scaled).
@@ -39,6 +54,17 @@ pub enum Kind {
     /// A small picture of the page ([`PREVIEW_WIDTH`]) for the sidebar and
     /// for the time the full render takes.
     Preview,
+    /// A part of the page at its size on screen, when the whole would be
+    /// too large a texture (a high zoom): the rectangle in pixels of the
+    /// page rendered at the key's width, from its top left corner.
+    Tile { x: u32, y: u32, w: u32, h: u32 },
+}
+
+impl Kind {
+    /// Full renders and tiles: the large ones, uploaded one a frame.
+    pub fn is_large(self) -> bool {
+        self != Kind::Preview
+    }
 }
 
 /// A render, as the cache keys it: the page, its width in pixels (of the
@@ -195,6 +221,13 @@ impl Engine {
     pub fn want(&self, wanted: Vec<(RenderKey, u8)>) {
         let mut q = self.shared.queue.lock().unwrap();
         let wanted: Vec<(RenderKey, u8)> = wanted.into_iter().filter(|(k, _)| !q.done.contains(k)).collect();
+        // The render under way is dropped at its next pause when the
+        // list no longer names it (`Worker::still_wanted`).
+        if let Some(busy) = q.busy
+            && !wanted.iter().any(|(k, _)| *k == busy)
+        {
+            q.busy = None;
+        }
         if q.wanted.iter().map(|(k, _)| *k).eq(wanted.iter().map(|(k, _)| *k)) {
             return;
         }
@@ -373,8 +406,17 @@ impl Worker {
                     if let Some(request) = q.requests.pop_front() {
                         break Work::Request(request);
                     }
-                    if let Some(&(key, _)) = q.wanted.first() {
+                    // The first key not rendered meanwhile: the list the
+                    // UI sent while a render ran names that render too.
+                    let mut picked = None;
+                    while let Some(&(key, _)) = q.wanted.first() {
                         q.wanted.remove(0);
+                        if !q.done.contains(&key) {
+                            picked = Some(key);
+                            break;
+                        }
+                    }
+                    if let Some(key) = picked {
                         q.busy = Some(key);
                         break Work::Render(key);
                     }
@@ -413,8 +455,14 @@ impl Worker {
                             let page = first.page.min(page_count.saturating_sub(1));
                             let size = self.docs[&id].page_size(page).unwrap_or(size);
                             let width = first_width(size, first);
-                            let key = RenderKey { doc: id, page: page as u32, width, turns: first.turns, kind: Kind::Full };
-                            self.render(key);
+                            let height = pixel_height(crate::layout::turned(size, first.turns), width);
+                            if too_large(width, height, u64::MAX) {
+                                // A high zoom: the UI asks for the tile in view.
+                                log::debug!("first render skipped: {width}x{height} px is tiled");
+                            } else {
+                                let key = RenderKey { doc: id, page: page as u32, width, turns: first.turns, kind: Kind::Full };
+                                self.render(key);
+                            }
                         }
                     }
                     Err(e) => {
@@ -682,12 +730,18 @@ impl Worker {
         };
         let turned = crate::layout::turned(size, key.turns);
         let width = key.width.max(1);
-        let height = ((width as f32) * turned[1] / turned[0]).round().clamp(1.0, 1.0e5) as u32;
-        let Some(mut bitmap) = Bitmap::new(self.api, width, height) else {
+        let height = pixel_height(turned, width);
+        // A tile: a bitmap of its own size, the page placed so that the
+        // tile's corner is the bitmap's; PDFium draws what falls inside.
+        let (bw, bh, origin) = match key.kind {
+            Kind::Tile { x, y, w, h } => (w.min(width.saturating_sub(x)).max(1), h.min(height.saturating_sub(y)).max(1), (-(x as i32), -(y as i32))),
+            _ => (width, height, (0, 0)),
+        };
+        let Some(mut bitmap) = Bitmap::new(self.api, bw, bh) else {
             self.send(Event::RenderFailed(key));
             return;
         };
-        let at = Placement { start_x: 0, start_y: 0, size_x: width as i32, size_y: height as i32, rotate: i32::from(key.turns % 4) };
+        let at = Placement { start_x: origin.0, start_y: origin.1, size_x: width as i32, size_y: height as i32, rotate: i32::from(key.turns % 4) };
         if self.page(key.doc, key.page as usize).is_none() {
             self.send(Event::RenderFailed(key));
             return;
@@ -735,8 +789,8 @@ impl Worker {
         if status == RenderStatus::Done {
             let bgrx = bitmap.into_pixels();
             let pixels = match key.kind {
-                Kind::Full => Pixels::with_levels(width, height, bgrx),
-                Kind::Preview => Pixels::flat(width, height, bgrx),
+                Kind::Full | Kind::Tile { .. } => Pixels::with_levels(bw, bh, bgrx),
+                Kind::Preview => Pixels::flat(bw, bh, bgrx),
             };
             if key.kind == Kind::Full && width > PREVIEW_WIDTH {
                 // The preview comes free with the full render.
@@ -745,7 +799,10 @@ impl Worker {
                 self.shared.queue.lock().unwrap().done.insert(pk);
                 self.send(Event::Rendered { key: pk, pixels: preview, took_ms: 0.0 });
             }
-            log::debug!("page {} rendered at {}x{} in {took:.1} ms", key.page + 1, width, height);
+            match key.kind {
+                Kind::Tile { x, y, .. } => log::debug!("page {} tile {bw}x{bh} at {x},{y} of {width}x{height} rendered in {took:.1} ms", key.page + 1),
+                _ => log::debug!("page {} rendered at {width}x{height} in {took:.1} ms", key.page + 1),
+            }
             self.shared.queue.lock().unwrap().done.insert(key);
             self.send(Event::Rendered { key, pixels, took_ms: took });
         } else {
@@ -794,6 +851,19 @@ pub fn first_width(size: [f32; 2], first: FirstRender) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_pages_are_tiled() {
+        // A4 at fit width on a 4K screen: whole. At 800 % on a 150 % screen:
+        // tiles. A long, narrow page over the GPU's side: tiles.
+        let a4 = [595.0, 842.0];
+        assert!(!too_large(2200, pixel_height(a4, 2200), 16384));
+        let w = (595.0 * crate::layout::POINT_SCALE * 8.0 * 1.5) as u32;
+        assert!(too_large(w, pixel_height(a4, w), 16384));
+        assert_eq!(pixel_height([100.0, 1000.0], 1000), 10000);
+        assert!(too_large(1000, 10000, 8192));
+        assert!(!too_large(1000, 10000, 16384));
+    }
 
     #[test]
     fn tagged_documents_take_page_operations_only() {
