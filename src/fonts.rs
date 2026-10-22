@@ -32,7 +32,7 @@ const FLAG_ITALIC: i32 = 1 << 6;
 const FLAG_FORCE_BOLD: i32 = 1 << 18;
 
 /// The base font name without a subset tag (`ABCDEF+`).
-fn untagged(base_font: &str) -> &str {
+pub fn untagged(base_font: &str) -> &str {
     match base_font.split_once('+') {
         Some((tag, rest)) if tag.len() == 6 && tag.bytes().all(|b| b.is_ascii_uppercase()) => rest,
         _ => base_font,
@@ -62,6 +62,25 @@ pub fn file_of(style: Style) -> &'static str {
         ["arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"]
     };
     table[usize::from(style.bold) + 2 * usize::from(style.italic)]
+}
+
+/// The generic family that stands in for `base_font` with `flags` when
+/// it is not installed, named for people.
+pub fn generic_name(base_font: &str, flags: i32) -> &'static str {
+    match file_of(style_of(base_font, flags)) {
+        "arialbd.ttf" => "Arial Bold",
+        "ariali.ttf" => "Arial Italic",
+        "arialbi.ttf" => "Arial Bold Italic",
+        "times.ttf" => "Times New Roman",
+        "timesbd.ttf" => "Times New Roman Bold",
+        "timesi.ttf" => "Times New Roman Italic",
+        "timesbi.ttf" => "Times New Roman Bold Italic",
+        "cour.ttf" => "Courier New",
+        "courbd.ttf" => "Courier New Bold",
+        "couri.ttf" => "Courier New Italic",
+        "courbi.ttf" => "Courier New Bold Italic",
+        _ => "Arial",
+    }
 }
 
 /// Letters and digits only, lower case: how names are compared.
@@ -283,6 +302,23 @@ pub fn find<'a>(installed: &'a [Installed], base_font: &str, style: Style) -> Op
 pub struct Fonts {
     installed: Option<Vec<Installed>>,
     files: HashMap<PathBuf, Option<Arc<Vec<u8>>>>,
+    /// The installed font's full name by base font name, for the editor's
+    /// tooltip.
+    names: HashMap<String, Option<String>>,
+}
+
+impl Fonts {
+    /// The full name of the installed font that would stand in for
+    /// `base_font`; `None` when only a generic family would.
+    pub fn stand_in_name(&mut self, base_font: &str, flags: i32) -> Option<String> {
+        if let Some(name) = self.names.get(base_font) {
+            return name.clone();
+        }
+        let style = style_of(base_font, flags);
+        let name = find(self.installed(), base_font, style).map(|f| f.names.full.clone());
+        self.names.insert(base_font.to_owned(), name.clone());
+        name
+    }
 }
 
 impl Fonts {

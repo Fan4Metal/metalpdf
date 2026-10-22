@@ -756,6 +756,12 @@ pub struct TextObject {
     /// The font is embedded as a subset: new characters may have no
     /// glyph in it, so the text is replaced with a font of its own.
     pub subset: bool,
+    /// The font's descriptor flags (`FPDFFont_GetFlags`).
+    pub flags: i32,
+    /// The installed font that would stand in for this one, by name
+    /// (`fonts::Fonts::stand_in_name`, filled by the engine); `None` when
+    /// only a generic family would.
+    pub stand_in: Option<String>,
 }
 
 /// Gives the stand-in font's bytes for a base font's name and descriptor
@@ -956,8 +962,8 @@ impl Page {
             let mut size = 0f32;
             unsafe { (api.FPDFTextObj_GetFontSize)(object, &mut size) };
             let font = unsafe { (api.FPDFTextObj_GetFont)(object) };
-            let (name, subset) = if font.is_null() {
-                (String::new(), false)
+            let (name, subset, flags) = if font.is_null() {
+                (String::new(), false, 0)
             } else {
                 let mut buf = vec![0u8; 256];
                 let n = unsafe { (api.FPDFFont_GetBaseFontName)(font, buf.as_mut_ptr().cast(), buf.len()) };
@@ -965,7 +971,8 @@ impl Page {
                 let embedded = unsafe { (api.FPDFFont_GetIsEmbedded)(font) } == 1;
                 // A subset's name carries a six-letter tag: `ABCDEF+Name`.
                 let tagged = name.len() > 7 && name.as_bytes()[6] == b'+';
-                (name, embedded && tagged)
+                let flags = unsafe { (api.FPDFFont_GetFlags)(font) };
+                (name, embedded && tagged, flags)
             };
             // The size as drawn: the object's matrix scales the font (a
             // 1 pt font under a 24× matrix is how some generators write).
@@ -975,7 +982,7 @@ impl Page {
             } else {
                 size
             };
-            out.push(TextObject { index: index as usize, bounds: [l, b, r, t], text, font: name, font_size: drawn, subset });
+            out.push(TextObject { index: index as usize, bounds: [l, b, r, t], text, font: name, font_size: drawn, subset, flags, stand_in: None });
         }
         out
     }

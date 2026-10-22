@@ -8,7 +8,7 @@
 //! anchor and is handed to egui's scroll area each frame.
 
 use egui::scroll_area::ScrollSource;
-use egui::{Color32, CursorIcon, Event, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use egui::{Color32, CursorIcon, Event, MouseWheelUnit, PointerButton, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
 use crate::app::{ImageDrag, ImageSel, InlineEditor, Tab};
 use crate::cache::Textures;
@@ -321,6 +321,23 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                             }
                             if menu_opened {
                                 menu.text = Some((i, object.index));
+                            }
+                            // The run's font, and what would stand in for it.
+                            if editor.is_none()
+                                && let Some(pos) = pointer
+                            {
+                                let font = crate::fonts::untagged(&object.font);
+                                let mut tip = format!("{font}, {:.1} pt", object.font_size);
+                                if object.subset {
+                                    tip.push('\n');
+                                    tip.push_str(match &object.stand_in {
+                                        Some(name) => tr!(format!("Embedded subset; text it cannot show is set in {name}"), format!("Встроенное подмножество; текст, которого в нём нет, набирается шрифтом {name}")),
+                                        None => tr!(format!("Embedded subset; {font} is not installed, so text it cannot show is set in {}", crate::fonts::generic_name(&object.font, object.flags)), format!("Встроенное подмножество; {font} не установлен, и текст, которого в нём нет, набирается шрифтом {}", crate::fonts::generic_name(&object.font, object.flags))),
+                                    }.as_str());
+                                }
+                                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with(("run-tip", i, object.index)), pos + vec2(12.0, 16.0)).show(|ui| {
+                                    ui.label(RichText::new(tip).size(12.0));
+                                });
                             }
                         }
                     }

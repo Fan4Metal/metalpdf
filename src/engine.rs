@@ -555,8 +555,13 @@ impl Worker {
             }
             Request::Objects { id, page } => {
                 let Some(p) = self.page(id, page) else { return };
-                let objects = Arc::new(p.objects());
-                self.send(Event::Objects { id, page, objects });
+                let mut objects = p.objects();
+                // Which installed font would stand in for each run's, for
+                // the editor's tooltip.
+                for o in &mut objects.text {
+                    o.stand_in = self.fonts.stand_in_name(&o.font, o.flags);
+                }
+                self.send(Event::Objects { id, page, objects: Arc::new(objects) });
             }
             Request::Edit { id, edit } => match self.edit(id, edit.clone()) {
                 Ok(edits) => {
