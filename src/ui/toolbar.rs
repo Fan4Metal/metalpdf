@@ -106,25 +106,35 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
                 response
             };
             // The numbering: the right button on the field.
-            super::menu::context_menu(&response, |ui| {
+            super::menu::context_menu_with_fields(&response, |ui| {
                 ui.set_min_width(280.0);
-                ui.label(RichText::new(tr!("Page numbering", "Нумерация страниц")).strong());
+                // The title and the row with the field are labels: indented
+                // as a button's text, so that every line starts at one edge.
+                let pad = ui.spacing().button_padding.x;
+                ui.horizontal(|ui| {
+                    ui.add_space(pad);
+                    ui.label(RichText::new(tr!("Page numbering", "Нумерация страниц")).weak());
+                });
+                ui.separator();
                 if ui.button(tr!("Read the numbers printed on the pages", "Найти номера, напечатанные на страницах")).clicked() {
                     actions.push(ToolbarAction::DetectNumbering);
                     ui.close();
                 }
                 ui.horizontal(|ui| {
+                    ui.add_space(pad);
                     ui.label(tr!("This page is number", "Эта страница — номер"));
-                    let entry = ui.add(egui::TextEdit::singleline(&mut field.number_entry).desired_width(48.0));
-                    if entry.lost_focus()
-                        && ui.input(|i| i.key_pressed(Key::Enter))
-                        && let Ok(number) = field.number_entry.trim().parse::<i64>()
+                    let entry = ui.add(egui::TextEdit::singleline(&mut field.number_entry).hint_text(info.label.as_str()).desired_width(44.0).horizontal_align(egui::Align::Center));
+                    let number = field.number_entry.trim().parse::<i64>().ok();
+                    let ok = ui.add_enabled(number.is_some(), egui::Button::new(tr!("OK", "ОК")));
+                    if let Some(number) = number
+                        && (ok.clicked() || entry.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
                     {
                         actions.push(ToolbarAction::ThisPageIs { page: current, number });
                         field.number_entry.clear();
                         ui.close();
                     }
                 });
+                ui.separator();
                 if ui.add_enabled(info.page_shift != 0, egui::Button::new(tr!("The file's own numbering", "Нумерация как в файле"))).clicked() {
                     actions.push(ToolbarAction::FileNumbering);
                     ui.close();

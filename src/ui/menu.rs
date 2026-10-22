@@ -5,7 +5,7 @@
 //! opened no context menu, and egui closes a menu on a click only, so a
 //! press followed by a drag left an open menu in place.
 
-use egui::{Event, PointerButton, Popup, SetOpenCommand};
+use egui::{Event, PointerButton, Popup, PopupCloseBehavior, SetOpenCommand};
 
 /// The right button's press, held back until it is let go (`App`'s
 /// `raw_input_hook`): as Windows sends WM_CONTEXTMENU on the release, egui
@@ -71,6 +71,25 @@ pub fn context_menu(
     response: &egui::Response,
     add: impl FnOnce(&mut egui::Ui),
 ) -> Option<egui::InnerResponse<()>> {
+    menu_with(response, PopupCloseBehavior::CloseOnClick, add)
+}
+
+/// `context_menu` for a menu with a text field in it: a click inside the
+/// menu leaves it open (egui's menus close on a click on any of their
+/// widgets, the field included, so it could not be typed in); its items
+/// close it themselves with `ui.close()`.
+pub fn context_menu_with_fields(
+    response: &egui::Response,
+    add: impl FnOnce(&mut egui::Ui),
+) -> Option<egui::InnerResponse<()>> {
+    menu_with(response, PopupCloseBehavior::CloseOnClickOutside, add)
+}
+
+fn menu_with(
+    response: &egui::Response,
+    close: PopupCloseBehavior,
+    add: impl FnOnce(&mut egui::Ui),
+) -> Option<egui::InnerResponse<()>> {
     let ctx = &response.ctx;
     let menu = Popup::default_response_id(response);
     let reopen = menu.with("reopen");
@@ -101,6 +120,7 @@ pub fn context_menu(
     };
     Popup::menu(response)
         .open_memory(command)
+        .close_behavior(close)
         .at_pointer_fixed()
         .show(add)
 }
