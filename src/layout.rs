@@ -17,8 +17,10 @@ pub const GAP: f32 = 8.0;
 
 /// The zoom steps of the keyboard and the wheel: each step hits a cached
 /// render again on the way back.
-pub const ZOOM_STEPS: [f32; 17] =
-    [0.1, 0.125, 0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 16.0, 32.0];
+pub const ZOOM_STEPS: &[f32] = &[
+    0.1, 0.125, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.4, 1.6, 1.8, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 14.0,
+    16.0, 20.0, 24.0, 32.0, 48.0, 64.0,
+];
 
 /// The next step up or down from `zoom`; a zoom between steps goes to the
 /// nearest step in that direction.
@@ -351,11 +353,12 @@ mod tests {
 
     #[test]
     fn zoom_steps_go_up_and_down_the_ladder() {
-        assert_eq!(zoom_step(1.0, true), 1.25);
-        assert_eq!(zoom_step(1.0, false), 0.75);
-        assert_eq!(zoom_step(1.1, true), 1.25);
-        assert_eq!(zoom_step(1.1, false), 1.0);
-        assert_eq!(zoom_step(32.0, true), MAX_ZOOM);
+        assert_eq!(zoom_step(1.0, true), 1.1);
+        assert_eq!(zoom_step(1.0, false), 0.9);
+        assert_eq!(zoom_step(1.15, true), 1.25);
+        assert_eq!(zoom_step(1.15, false), 1.1);
+        assert_eq!(zoom_step(48.0, true), MAX_ZOOM);
+        assert_eq!(zoom_step(64.0, true), MAX_ZOOM);
         assert_eq!(zoom_step(0.1, false), MIN_ZOOM);
         assert_eq!(pixel_width(A4, 2.0 * POINT_SCALE, 1.5), 2380);
         assert_eq!(turned(A4, 1), [842.0, 595.0]);

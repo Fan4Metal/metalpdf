@@ -344,17 +344,17 @@ mod tests {
         for _ in 0..4 {
             view.zoom_wheel(0.25, None, &s, A4);
         }
-        assert_eq!(view.zoom, ZoomSetting::Scale(1.25));
+        assert_eq!(view.zoom, ZoomSetting::Scale(1.1));
         // A whole notch at once: one step; two notches: two.
         view.zoom_wheel(1.0, None, &s, A4);
-        assert_eq!(view.zoom, ZoomSetting::Scale(1.5));
+        assert_eq!(view.zoom, ZoomSetting::Scale(1.25));
         view.zoom_wheel(-2.0, None, &s, A4);
         assert_eq!(view.zoom, ZoomSetting::Scale(1.0));
         // Half a notch one way is forgotten when the wheel turns back.
         view.zoom_wheel(0.5, None, &s, A4);
         view.zoom_wheel(-0.5, None, &s, A4);
         view.zoom_wheel(-0.5, None, &s, A4);
-        assert_eq!(view.zoom, ZoomSetting::Scale(0.75));
+        assert_eq!(view.zoom, ZoomSetting::Scale(0.9));
     }
 
     #[test]
