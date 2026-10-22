@@ -16,9 +16,21 @@ pub struct PageText {
     /// `pdfium::Page::page_to_view`: page space to the unrotated page's
     /// points from its top left corner.
     pub to_view: [f32; 6],
+    /// Every character's box on the unrotated page (`[x, y, w, h]` in
+    /// points from its top left), for the selection; made once.
+    boxes: std::sync::OnceLock<Vec<[f32; 4]>>,
 }
 
 impl PageText {
+    pub fn new(layout: Arc<TextLayout>, to_view: [f32; 6]) -> PageText {
+        PageText { layout, to_view, boxes: std::sync::OnceLock::new() }
+    }
+
+    /// The characters' boxes on the unrotated page.
+    pub fn boxes(&self) -> &[[f32; 4]] {
+        self.boxes.get_or_init(|| self.layout.chars.iter().map(|c| self.rect_to_page(c.rect)).collect())
+    }
+
     /// A point of page space on the page as shown, in points from the top
     /// left corner of the unrotated page.
     pub fn to_page_points(&self, x: f32, y: f32) -> [f32; 2] {
@@ -147,7 +159,7 @@ impl DocState {
                 true
             }
             Event::TextLayout { id, page, layout, to_view } if *id == self.id => {
-                self.text.insert(*page, Arc::new(PageText { layout: Arc::clone(layout), to_view: *to_view }));
+                self.text.insert(*page, Arc::new(PageText::new(Arc::clone(layout), *to_view)));
                 true
             }
             Event::Links { id, page, links } if *id == self.id => {
@@ -229,10 +241,10 @@ mod tests {
     #[test]
     fn page_text_maps_rectangles_through_the_affine() {
         // An unrotated A4 page: y flipped.
-        let text = PageText { layout: Arc::new(TextLayout::default()), to_view: [1.0, 0.0, 0.0, -1.0, 0.0, 842.0] };
+        let text = PageText::new(Arc::new(TextLayout::default()), [1.0, 0.0, 0.0, -1.0, 0.0, 842.0]);
         assert_eq!(text.rect_to_page([72.0, 770.0, 172.0, 794.0]), [72.0, 48.0, 100.0, 24.0]);
         // Turned 90° clockwise (page x runs down the view).
-        let turned = PageText { layout: Arc::new(TextLayout::default()), to_view: [0.0, 1.0, 1.0, 0.0, 0.0, 0.0] };
+        let turned = PageText::new(Arc::new(TextLayout::default()), [0.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         assert_eq!(turned.rect_to_page([10.0, 20.0, 30.0, 50.0]), [20.0, 10.0, 30.0, 20.0]);
     }
 

@@ -2,18 +2,19 @@
 //! from the best texture at hand (the exact render, else the nearest one
 //! scaled, else the preview, else white paper), the renders the frame
 //! wants listed for the engine in order of urgency, links under the
-//! pointer. The geometry is `layout`'s; the scroll position lives in the
-//! tab's `ViewState` as an anchor and is handed to egui's scroll area each
-//! frame.
+//! pointer, the search's hits and the text selection painted over the
+//! pages and the selection dragged out with the mouse. The geometry is
+//! `layout`'s; the scroll position lives in the tab's `ViewState` as an
+//! anchor and is handed to egui's scroll area each frame.
 
-use egui::{Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use egui::{Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
 use crate::app::Tab;
 use crate::cache::Textures;
 use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey};
 use crate::layout;
 use crate::pdfium::Target;
-use crate::settings::ViewMode;
+use crate::selection::{self, Selection};
 use crate::style::Palette;
 
 /// Pages rendered ahead in the direction of travel, and behind.
@@ -51,10 +52,18 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let mut candidates: Vec<(RenderKey, u8, u32)> = Vec::new();
     let mut visible = 0..0;
     let mut hovered_link: Option<(Rect, Target)> = None;
+    let mut over_text = false;
+    // The character under the pointer, for a selection being made.
+    let mut char_under_pointer: Option<selection::CharPos> = None;
+    let mut selection = tab.selection;
+    let mut selecting = tab.selecting;
+    let find = &tab.find;
 
     let scroll = egui::ScrollArea::both()
         .id_salt(("pages", tab.id))
         .auto_shrink([false, false])
+        // The mouse drags the selection, not the pages.
+        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL | egui::scroll_area::ScrollSource::SCROLL_BAR)
         .vertical_scroll_offset(scroll_y)
         .horizontal_scroll_offset(scroll_x)
         .show_viewport(ui, |ui, viewport| {
@@ -62,10 +71,10 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
             let origin = ui.min_rect().min;
             visible = layout.visible(viewport.min.y, viewport.height());
             let middle = viewport.min.y + viewport.height() / 2.0;
-            let response = ui.interact(ui.min_rect(), ui.id().with("pages-sense"), Sense::click());
+            let response = ui.interact(ui.min_rect(), ui.id().with("pages-sense"), Sense::click_and_drag());
             out.hovered = response.hovered();
-            out.pointer = response.hover_pos().map(|p| [p.x - origin.x - scroll_x, p.y - origin.y - scroll_y]);
-            let pointer = response.hover_pos();
+            let pointer = response.hover_pos().or_else(|| if selecting { response.interact_pointer_pos() } else { None });
+            out.pointer = pointer.map(|p| [p.x - origin.x - scroll_x, p.y - origin.y - scroll_y]);
             let painter = ui.painter();
             for i in visible.clone() {
                 let p = layout.pages[i];
@@ -80,38 +89,66 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 let distance = ((p[1] + p[3] / 2.0 - middle).abs() / 100.0) as u32;
                 // Shadow, picture, edge.
                 painter.rect_filled(rect.translate(vec2(2.0, 3.0)), 2.0, palette.shadow);
-                let drawn = if let Some(tex) = textures.full.get(&key, frame) {
+                if let Some(tex) = textures.full.get(&key, frame) {
                     painter.image(tex.id(), rect, uv(), Color32::WHITE);
-                    true
                 } else if let Some((_, tex)) = textures.full.nearest(&key, frame) {
                     painter.image(tex.id(), rect, uv(), Color32::WHITE);
                     if settled {
                         candidates.push((key, 1, distance));
                     }
-                    true
                 } else if let Some(tex) = textures.preview.get(&preview_key, frame) {
                     painter.image(tex.id(), rect, uv(), Color32::WHITE);
                     if settled {
                         candidates.push((key, 1, distance));
                     }
-                    true
                 } else {
                     painter.rect_filled(rect, 0.0, palette.paper);
                     candidates.push((preview_key, 0, distance));
                     if settled {
                         candidates.push((key, 1, distance));
                     }
-                    false
-                };
-                let _ = drawn;
+                }
                 painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.page_edge), StrokeKind::Outside);
-                // Links: hovered one outlined, clicked one reported.
-                if let (Some(links), Some(text)) = (tab.doc.links.get(&i), tab.doc.text.get(&i)) {
-                    for link in links.iter() {
-                        let r = text.rect_to_page(link.rect);
+                let text = tab.doc.text.get(&i);
+                // The search's hits.
+                let (hits, current_hit) = find.hits_on(i);
+                if let Some(text) = text {
+                    for (h, hit) in hits.iter().enumerate() {
+                        let color = if current_hit == Some(h) { palette.search_current } else { palette.search };
+                        for r in &hit.rects {
+                            let screen = page_rect_to_screen(text.rect_to_page(*r), turns, size, rect);
+                            painter.rect_filled(screen.expand(1.0), 2.0, color);
+                        }
+                    }
+                }
+                // The selection on this page.
+                if let (Some(sel), Some(text)) = (selection, text)
+                    && let Some(range) = sel.range_on(i, text.layout.chars.len())
+                {
+                    for r in selection::line_rects(text.boxes(), range) {
                         let screen = page_rect_to_screen(r, turns, size, rect);
-                        if pointer.is_some_and(|pt| screen.contains(pt)) {
-                            hovered_link = Some((screen, link.target.clone()));
+                        painter.rect_filled(screen, 1.0, palette.selection);
+                    }
+                }
+                // The pointer over the page: text under it, links.
+                if let Some(pt) = pointer
+                    && rect.contains(pt)
+                {
+                    if let Some(text) = text {
+                        let on_page = screen_to_page_point(pt, turns, size, rect);
+                        if selection::over_text(text.boxes(), on_page) {
+                            over_text = true;
+                        }
+                        if let Some(c) = selection::char_at(text.boxes(), on_page) {
+                            char_under_pointer = Some((i, c));
+                        }
+                    }
+                    if let (Some(links), Some(text)) = (tab.doc.links.get(&i), text) {
+                        for link in links.iter() {
+                            let screen = page_rect_to_screen(text.rect_to_page(link.rect), turns, size, rect);
+                            if screen.contains(pt) {
+                                hovered_link = Some((screen, link.target.clone()));
+                            }
                         }
                     }
                 }
@@ -122,8 +159,33 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 if response.clicked() {
                     out.link = Some(target.clone());
                 }
+            } else if over_text || selecting {
+                ui.ctx().set_cursor_icon(CursorIcon::Text);
+            }
+            // The selection: begun with a press on text, grown while
+            // dragging, cleared by a plain click.
+            if response.drag_started_by(PointerButton::Primary) && hovered_link.is_none() {
+                selection = char_under_pointer.map(|c| Selection { anchor: c, focus: c });
+                selecting = selection.is_some();
+            }
+            if selecting && response.dragged_by(PointerButton::Primary) {
+                if let (Some(sel), Some(c)) = (selection.as_mut(), char_under_pointer) {
+                    sel.focus = c;
+                }
+                ui.ctx().request_repaint();
+            }
+            if response.drag_stopped() {
+                selecting = false;
+                if selection.is_some_and(|s| s.is_empty()) {
+                    selection = None;
+                }
+            }
+            if response.clicked() && hovered_link.is_none() {
+                selection = None;
             }
         });
+    tab.selection = selection;
+    tab.selecting = selecting;
     // Where the scroll area ended up (the wheel, the bar, a drag).
     let offset = scroll.state.offset;
     tab.view.set_scroll(&layout, offset.y);
@@ -146,15 +208,10 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 near.push(visible.start - k);
             }
         }
-        let scale = match tab.view.mode {
-            ViewMode::Continuous => layout.scale,
-            // Single page: the neighbour at its own fit.
-            ViewMode::Single => layout.scale,
-        };
         for (rank, i) in near.into_iter().enumerate() {
             let size = tab.doc.size_of(i);
             let turned = layout::turned(size, turns);
-            let key = RenderKey { doc: doc_id, page: i as u32, width: layout::pixel_width(turned, scale, ppp), turns, kind: Kind::Full };
+            let key = RenderKey { doc: doc_id, page: i as u32, width: layout::pixel_width(turned, layout.scale, ppp), turns, kind: Kind::Full };
             let preview_key = RenderKey { width: PREVIEW_WIDTH, kind: Kind::Preview, ..key };
             if !textures.preview.contains(&preview_key) && !textures.full.contains(&key) {
                 candidates.push((preview_key, 3, rank as u32));

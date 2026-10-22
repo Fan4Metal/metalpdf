@@ -21,6 +21,8 @@ mod layout;
 mod pdfium;
 mod pixels;
 mod placement;
+mod search;
+mod selection;
 mod settings;
 mod single_instance;
 mod style;

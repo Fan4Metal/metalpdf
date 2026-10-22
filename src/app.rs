@@ -33,6 +33,11 @@ use crate::ui::icons::Icon;
 use crate::ui::menu::RightClick;
 use crate::ui::status::{PageField, StatusAction, StatusInfo};
 use crate::update::Updates;
+use crate::layout::Anchor;
+use crate::search::FindState;
+use crate::selection::{self, Selection};
+use crate::settings::SidebarTab;
+use crate::ui::sidebar::SidebarAction;
 use crate::view::ViewState;
 
 /// What `main` hands the app: the files to open (or the last session), the
@@ -59,12 +64,76 @@ pub struct Tab {
     pub view: ViewState,
     /// The password being typed for an encrypted document.
     pub password: String,
+    pub find: FindState,
+    pub selection: Option<Selection>,
+    /// The mouse is dragging the selection out.
+    pub selecting: bool,
+    /// Where the reader was before each jump (a link, a bookmark, a
+    /// thumbnail, the page field, a hit), for Alt+Left; and the jumps
+    /// gone back from, for Alt+Right.
+    pub back: Vec<Anchor>,
+    pub forward: Vec<Anchor>,
 }
+
+/// Jumps remembered for Alt+Left.
+const MAX_HISTORY: usize = 100;
 
 impl Tab {
     fn new(id: u64, path: PathBuf, doc: DocState, view: ViewState) -> Tab {
         let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
-        Tab { id, path, title, doc, view, password: String::new() }
+        Tab {
+            id,
+            path,
+            title,
+            doc,
+            view,
+            password: String::new(),
+            find: FindState::default(),
+            selection: None,
+            selecting: false,
+            back: Vec::new(),
+            forward: Vec::new(),
+        }
+    }
+
+    /// Remember where the reader is before a jump.
+    pub fn remember(&mut self) {
+        self.back.push(self.view.anchor);
+        if self.back.len() > MAX_HISTORY {
+            self.back.remove(0);
+        }
+        self.forward.clear();
+    }
+
+    /// Back to where the reader was before the last jump.
+    pub fn go_back(&mut self) {
+        if let Some(anchor) = self.back.pop() {
+            self.forward.push(self.view.anchor);
+            self.view.anchor = anchor;
+        }
+    }
+
+    pub fn go_forward(&mut self) {
+        if let Some(anchor) = self.forward.pop() {
+            self.back.push(self.view.anchor);
+            self.view.anchor = anchor;
+        }
+    }
+
+    /// The selected text, page by page.
+    pub fn selected_text(&self) -> String {
+        let Some(sel) = self.selection else { return String::new() };
+        let ((p0, _), (p1, _)) = sel.ordered();
+        let mut out = String::new();
+        for page in p0..=p1 {
+            let Some(text) = self.doc.text.get(&page) else { continue };
+            let Some(range) = sel.range_on(page, text.layout.chars.len()) else { continue };
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&selection::text_of(&text.layout, range));
+        }
+        out
     }
 
     pub fn layout(&self) -> crate::layout::Layout {
@@ -540,6 +609,12 @@ impl App {
                         _ => continue,
                     };
                     let engine = &self.engine;
+                    if let Event::SearchHits { search, page, hits, done, .. } = &other {
+                        if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
+                            tab.find.take(*search, *page, hits.clone(), *done);
+                        }
+                        continue;
+                    }
                     if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc)
                         && tab.doc.take(&other, engine)
                         && matches!(other, Event::Opened { .. })
@@ -722,6 +797,65 @@ impl App {
         if consume(Modifiers::COMMAND, Key::G) {
             self.win().page_field.focus = true;
         }
+        if consume(Modifiers::NONE, Key::F4) {
+            self.settings.sidebar_visible = !self.settings.sidebar_visible;
+            self.settings_dirty = true;
+        }
+        if consume(Modifiers::COMMAND, Key::F)
+            && let Some(tab) = self.win().active_tab_mut()
+        {
+            tab.find.open();
+        }
+        if consume(Modifiers::NONE, Key::F3)
+            && let Some(tab) = self.win().active_tab_mut()
+            && tab.find.open
+        {
+            tab.find.step(true);
+        }
+        if consume(Modifiers::SHIFT, Key::F3)
+            && let Some(tab) = self.win().active_tab_mut()
+            && tab.find.open
+        {
+            tab.find.step(false);
+        }
+        if consume(Modifiers::NONE, Key::Escape)
+            && let Some(tab) = self.win().active_tab_mut()
+        {
+            if tab.find.open {
+                tab.find.close();
+            } else {
+                tab.selection = None;
+            }
+        }
+        // Ctrl+C comes as an event, not a key.
+        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+            && !typing
+            && let Some(tab) = self.win().active_tab()
+        {
+            let text = tab.selected_text();
+            if !text.is_empty() {
+                ctx.copy_text(text);
+            }
+        }
+        if (consume(Modifiers::ALT, Key::ArrowLeft) || ctx.input(|i| i.pointer.button_pressed(PointerButton::Extra1)))
+            && let Some(tab) = self.win().active_tab_mut() {
+                tab.go_back();
+            }
+        if (consume(Modifiers::ALT, Key::ArrowRight) || ctx.input(|i| i.pointer.button_pressed(PointerButton::Extra2)))
+            && let Some(tab) = self.win().active_tab_mut() {
+                tab.go_forward();
+            }
+        if consume(Modifiers::COMMAND, Key::A)
+            && !typing
+            && let Some(tab) = self.win().active_tab_mut()
+        {
+            let page = tab.view.current;
+            if let Some(text) = tab.doc.text.get(&page)
+                && !text.layout.chars.is_empty()
+            {
+                tab.selection = Some(Selection { anchor: (page, 0), focus: (page, text.layout.chars.len() - 1) });
+            }
+        }
         if consume(Modifiers::COMMAND, Key::W) {
             let active = self.win().active;
             self.close_tab(active);
@@ -830,6 +964,7 @@ impl App {
             for action in actions {
                 match action {
                     StatusAction::GoToPage(page) => {
+                        tab.remember();
                         tab.view.go_to_page(page, count);
                         tab.doc.need_sizes_near(engine, page);
                     }
@@ -864,6 +999,7 @@ impl App {
                 let engine = &self.engine;
                 if let Some(tab) = self.windows[self.current].active_tab_mut() {
                     let count = tab.doc.page_count;
+                    tab.remember();
                     match (y, tab.doc.text.get(&index)) {
                         // The point on the page, through the page's transform.
                         (Some(y), Some(text)) => {
@@ -879,6 +1015,164 @@ impl App {
         }
     }
 
+    /// The find bar under the tab bar while the active tab's search is
+    /// open: the query, the options, the count, previous and next.
+    fn find_bar(&mut self, ui: &mut Ui, palette: &Palette) {
+        let cur = self.current;
+        let wid = self.windows[cur].id;
+        let (case, words) = (self.settings.find_case, self.settings.find_words);
+        let engine = &self.engine;
+        let mut toggle_case = false;
+        let mut toggle_words = false;
+        let mut close = false;
+        let Some(tab) = self.windows[cur].active_tab_mut() else { return };
+        if !tab.find.open {
+            return;
+        }
+        Panel::top(Id::new(("find-bar", wid)))
+            .frame(egui::Frame::new().fill(ui.visuals().extreme_bg_color).inner_margin(Margin::symmetric(10, 5)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let input = ui.add(
+                        egui::TextEdit::singleline(&mut tab.find.query)
+                            .id(Id::new(("find-input", wid)))
+                            .hint_text(tr!("Find in document", "Найти в документе"))
+                            .desired_width(280.0),
+                    );
+                    if std::mem::take(&mut tab.find.request_focus) {
+                        input.request_focus();
+                    }
+                    if input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        let forward = !ui.input(|i| i.modifiers.shift);
+                        tab.find.step(forward);
+                        input.request_focus();
+                    }
+                    let toggle = |ui: &mut Ui, on: bool, text: RichText, tip: &str| {
+                        ui.add(egui::Button::selectable(on, text.size(13.0))).on_hover_text(tip).clicked()
+                    };
+                    toggle_case = toggle(ui, case, RichText::new("Aa"), tr!("Match case", "Учитывать регистр"));
+                    toggle_words = toggle(ui, words, RichText::new("ab").underline(), tr!("Whole words", "Слово целиком"));
+                    ui.label(RichText::new(tab.find.status()).size(12.5).color(palette.muted));
+                    if crate::ui::icon_button(ui, Icon::Up, false, tr!("Previous (Shift+F3)", "Предыдущее (Shift+F3)")).clicked() {
+                        tab.find.step(false);
+                    }
+                    if crate::ui::icon_button(ui, Icon::Next, false, tr!("Next (F3, Enter)", "Следующее (F3, Enter)")).clicked() {
+                        tab.find.step(true);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        close = crate::ui::close_cross(ui);
+                    });
+                });
+            });
+        // A changed query or option starts the search over, from the
+        // page the reader is on.
+        let (case, words) = (case != toggle_case, words != toggle_words);
+        if let Some(search) = tab.find.needs_search(case, words) {
+            engine.request(Request::StopSearch(tab.doc.id));
+            engine.request(Request::Search {
+                id: tab.doc.id,
+                search,
+                query: tab.find.query.clone(),
+                match_case: case,
+                whole_words: words,
+                from: tab.view.current,
+            });
+        }
+        if close {
+            tab.find.close();
+            engine.request(Request::StopSearch(tab.doc.id));
+        }
+        if toggle_case {
+            self.settings.find_case = !self.settings.find_case;
+            self.settings_dirty = true;
+        }
+        if toggle_words {
+            self.settings.find_words = !self.settings.find_words;
+            self.settings_dirty = true;
+        }
+    }
+
+    /// Scroll to the current hit once its page's text (the transform to
+    /// the page) is there.
+    fn jump_to_hit(&mut self) {
+        let engine = &self.engine;
+        let Some(tab) = self.windows[self.current].active_tab_mut() else { return };
+        if !tab.find.jump {
+            return;
+        }
+        let Some((page, hit)) = tab.find.current_hit() else {
+            tab.find.jump = false;
+            return;
+        };
+        let Some(rect) = hit.rects.first().copied() else {
+            tab.find.jump = false;
+            return;
+        };
+        match tab.doc.text.get(&page) {
+            Some(text) => {
+                let r = text.rect_to_page(rect);
+                let count = tab.doc.page_count;
+                let h = tab.doc.size_of(page)[1];
+                tab.find.jump = false;
+                tab.remember();
+                // The hit a third of the way down the view.
+                let above = tab.view.viewport[1] / 3.0 / tab.layout().scale.max(0.01);
+                tab.view.go_to_point(page, r[1] - above, count, h);
+                tab.doc.need_sizes_near(engine, page);
+            }
+            None => tab.doc.need_text(engine, page),
+        }
+    }
+
+    /// The sidebar at the left of the pages: thumbnails or the outline.
+    fn sidebar(&mut self, ui: &mut Ui, palette: &Palette) {
+        let cur = self.current;
+        let wid = self.windows[cur].id;
+        let which = self.settings.sidebar_tab;
+        let frame = self.frame;
+        let engine = &self.engine;
+        if !self.settings.sidebar_visible {
+            return;
+        }
+        let Some(tab) = self.windows[cur].active_tab_mut() else { return };
+        if !tab.doc.ready() {
+            return;
+        }
+        if which == SidebarTab::Outline {
+            tab.doc.need_outline(engine);
+        }
+        let mut actions = Vec::new();
+        let response = Panel::left(Id::new(("sidebar", wid)))
+            .resizable(true)
+            .default_size(self.settings.sidebar_width)
+            .size_range(120.0..=800.0)
+            .show(ui, |ui| {
+                actions = crate::ui::sidebar::show(ui, tab, which, &mut self.textures, frame, palette, &mut self.wanted);
+            });
+        let width = response.response.rect.width();
+        if (width - self.settings.sidebar_width).abs() > 0.5 && !ui.input(|i| i.pointer.any_down()) {
+            self.settings.sidebar_width = width;
+            self.settings_dirty = true;
+        }
+        for action in actions {
+            match action {
+                SidebarAction::GoToPage(page) => {
+                    if let Some(tab) = self.windows[cur].active_tab_mut() {
+                        let count = tab.doc.page_count;
+                        tab.remember();
+                        tab.view.go_to_page(page, count);
+                        tab.doc.need_sizes_near(&self.engine, page);
+                    }
+                }
+                SidebarAction::Follow(target) => self.follow(target),
+                SidebarAction::Tab(which) => {
+                    self.settings.sidebar_tab = which;
+                    self.settings_dirty = true;
+                }
+            }
+        }
+    }
+
     /// The tab bar: Open, the tabs with their close buttons, the family's
     /// buttons on the right.
     fn tab_bar(&mut self, ui: &mut Ui, palette: &Palette) {
@@ -887,6 +1181,8 @@ impl App {
         let mut open_dialog = false;
         let mut menu_action = None;
         let mut theme_click = false;
+        let mut sidebar_click = false;
+        let sidebar_visible = self.settings.sidebar_visible;
         let mut about_click = false;
         let mut update_tag = None;
         let cur = self.current;
@@ -901,6 +1197,10 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if crate::ui::icon_button(ui, Icon::Open, false, tr!("Open… (Ctrl+O)", "Открыть… (Ctrl+O)")).clicked() {
                         open_dialog = true;
+                    }
+                    let sidebar_tip = tr!("Pages and outline (F4)", "Страницы и оглавление (F4)");
+                    if crate::ui::icon_button(ui, Icon::Sidebar, sidebar_visible, sidebar_tip).clicked() {
+                        sidebar_click = true;
                     }
                     ui.separator();
                     self.windows[cur].tab_lead = ui.cursor().min.x - bar.min.x;
@@ -997,6 +1297,10 @@ impl App {
         }
         if about_click {
             self.about.toggle();
+        }
+        if sidebar_click {
+            self.settings.sidebar_visible = !self.settings.sidebar_visible;
+            self.settings_dirty = true;
         }
         if let Some(tag) = update_tag {
             crate::win::shell_open(crate::update::release_url(&tag));
@@ -1362,9 +1666,12 @@ impl App {
         self.keys(&ctx);
         let palette = Palette::of(&ctx);
         self.tab_bar(ui, &palette);
+        self.find_bar(ui, &palette);
         let wid = self.windows[cur].id;
         Panel::bottom(Id::new(("status", wid))).show(ui, |ui| self.status_bar(ui));
+        self.sidebar(ui, &palette);
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.central(ui, &palette));
+        self.jump_to_hit();
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::new(("drop-overlay", wid))));
             let rect = ctx.content_rect();
