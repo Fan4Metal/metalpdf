@@ -1,0 +1,6 @@
+# The C runtime linked into the exe: no VCRUNTIME140.dll, so the program
+# starts on a Windows without the Visual C++ Redistributable. About 100 KB.
+# A RUSTFLAGS environment variable would override this; after adding a
+# native dependency, check the exe's import table (only system DLLs).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

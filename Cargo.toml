@@ -1,0 +1,76 @@
+[package]
+# The identifier: the exe, the Cargo package, the GitHub repository, the
+# single-instance names. The display name ("MetalPDF") lives in main.rs,
+# setup.iss, build.rs and the READMEs (see SKILL.md, "Имя приложения").
+name = "metalpdf"
+# Between releases: the next version with "-dev", the last number raised by
+# one (after 0.1.0, "0.1.1-dev"); a release drops it.
+version = "0.1.0-dev"
+authors = ["Fan4_Metal"]
+edition = "2024"
+rust-version = "1.95"
+# One sentence, English: it is shown in About, in the exe's version
+# resource (build.rs) and as the README tagline.
+description = "Fast PDF viewer for Windows"
+license = "MIT"
+repository = "https://github.com/Fan4Metal/metalpdf"
+
+[dependencies]
+# glow, not the default wgpu: a smaller binary and a faster start (an OpenGL
+# context is created in ~130 ms against ~240 ms for wgpu on DX12). eframe's
+# default features are off: no accesskit, no wgpu and no `links` (URLs are
+# opened through win::shell_open instead of ui.hyperlink_to). No
+# `persistence`: the settings (window geometry included) are this app's
+# JSON (settings.rs), as in MetalMD.
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.36"
+# The page textures are uploaded with glow directly (textures.rs): egui's
+# texture manager converts the pixels and builds mipmaps on the UI thread.
+glow = "0.17"
+# File and folder dialogs without default features: only windows-sys,
+# raw-window-handle and log are pulled in.
+rfd = { version = "0.17.2", default-features = false }
+raw-window-handle = "0.6"
+# The settings file (JSON) and the single-instance pipe, as MetalMD.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6.0"
+interprocess = "2.4"
+# The PNG the --bench mode writes, to look at a rendered page.
+png = "0.18"
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(windows)'.dependencies]
+# Keep the feature list minimal; add a feature only for an API that is used.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",            # GetUserDefaultUILanguage (i18n)
+    "Win32_Networking_WinHttp",       # the update check
+    "Win32_Storage_FileSystem",       # CreateFileW: the document mapped into memory
+    "Win32_System_Console",           # AttachConsole for the command line modes
+    "Win32_System_LibraryLoader",     # LoadLibraryExW, GetProcAddress: pdfium.dll
+    "Win32_System_Memory",            # CreateFileMappingW, MapViewOfFile
+    "Win32_System_Registry",          # the .pdf association (assoc.rs)
+    "Win32_UI_Shell",                 # ShellExecuteW, SHChangeNotify
+    "Win32_UI_WindowsAndMessaging",   # SW_SHOWNORMAL, AllowSetForegroundWindow
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the icon and the version information into the exe.
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# A panic ends the process; main::install_panic_hook shows it first.
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+# Dependencies optimised in debug builds too, so that a debug build is usable.
+[profile.dev.package."*"]
+opt-level = 3

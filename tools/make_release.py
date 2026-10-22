@@ -1,0 +1,357 @@
+"""
+Release build: cargo build --release, the Inno Setup installer
+(dist\\<App>_<version>_Setup.exe) and the portable archive
+(dist\\<App>_<version>_portable.zip).
+
+Runs from any folder: python tools/make_release.py [--no-tests] [--install]
+--install then installs the build silently over the installed copy, to try it.
+No external dependencies. The output of cargo and ISCC is shown as is, so that
+the progress of the build is visible.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import winreg
+import zipfile
+from pathlib import Path
+
+# --- What differs between the apps of this family -----------------------------
+# The display name: the installer's AppName, the Start menu entry, the folder
+# in %LOCALAPPDATA%\Programs and in the portable archive.
+APP_NAME = "MetalPDF"
+# The exe's file stem (the Cargo package name).
+EXE_STEM = "metalpdf"
+# The installer's AppId (setup.iss): a new GUID for every app, never reused.
+APP_ID = "{552B831C-3586-44E1-A282-FDAFAAE5A014}"
+# Files the installer takes from the repository (see [Files] in setup.iss).
+BUNDLED_FILES = [
+    "LICENSE",
+    "THIRD_PARTY_LICENSES.md",
+    "licenses/PDFium-LICENSE.txt",
+    "licenses/THIRD_PARTY_NOTICES.txt",
+    "README.md",
+    "README.ru.md",
+]
+# Licences shipped with the portable archive (the documentation is on GitHub).
+PORTABLE_FILES = [
+    "LICENSE",
+    "THIRD_PARTY_LICENSES.md",
+    "licenses/PDFium-LICENSE.txt",
+    "licenses/THIRD_PARTY_NOTICES.txt",
+]
+# Must match the settings file the program looks for next to its exe
+# (settings::PORTABLE_FILE).
+PORTABLE_SETTINGS = "metalpdf.json"
+# The rendering engine, fetched by tools/get_pdfium.py and put next to the
+# exe by build.rs; shipped beside the exe by the installer and the archive.
+ENGINE_DLL = "pdfium.dll"
+# -----------------------------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parent.parent
+CARGO_TOML = ROOT / "Cargo.toml"
+ISS_FILE = ROOT / "tools" / "setup.iss"
+DIST_DIR = ROOT / "dist"
+EXE = ROOT / "target" / "release" / f"{EXE_STEM}.exe"
+DLL = EXE.parent / ENGINE_DLL
+GET_PDFIUM = ROOT / "tools" / "get_pdfium.py"
+ICON = ROOT / "target" / "app.ico"
+
+# Names without spaces: GitHub replaces spaces in release file names with dots.
+FILE_STEM = APP_NAME.replace(" ", "_")
+# Folder inside the portable archive, so that extracting "here" does not drop the exe among other files.
+PORTABLE_DIR = APP_NAME
+
+# Where Inno Setup records the installation.
+UNINSTALL_KEY = Rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_ID}_is1"
+# Silent installation: no wizard, no questions, no restart; the previous choices
+# (folder, tasks) are used again.
+SILENT_INSTALL = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
+
+ISCC_PATHS = [
+    Path(R"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"),
+    Path(R"C:\Program Files\Inno Setup 6\ISCC.exe"),
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Inno Setup 6" / "ISCC.exe",
+]
+
+
+class ReleaseError(Exception):
+    """Build failure with a message ready to be shown."""
+
+
+def human_size(num_bytes: int) -> str:
+    num = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if num < 1024:
+            return f"{num:.1f} {unit}" if unit != "B" else f"{int(num)} {unit}"
+        num /= 1024
+    return f"{num:.1f} TB"
+
+
+def fmt_cmd(command: list[str]) -> str:
+    return " ".join(f'"{c}"' if " " in c else c for c in command)
+
+
+def run_command(command: list[str], title: str) -> None:
+    """Run a command, showing its output as is; stop the build if it fails."""
+    print(f"$ {fmt_cmd(command)}\n")
+    started = time.monotonic()
+    result = subprocess.run(command, cwd=ROOT)
+    elapsed = time.monotonic() - started
+    if result.returncode != 0:
+        raise ReleaseError(f"{title}: the command exited with code {result.returncode} (after {elapsed:.0f} s)")
+    print(f"\n{title}: done in {elapsed:.0f} s")
+
+
+class Steps:
+    """Print step headers and the time the previous step took."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.number = 0
+        self.started: float | None = None
+
+    def _close(self) -> None:
+        if self.started is not None:
+            print(f"--- step took {time.monotonic() - self.started:.1f} s")
+
+    def next(self, title: str) -> None:
+        self._close()
+        self.number += 1
+        print(f"\n=== [{self.number}/{self.total}] {title} ===")
+        self.started = time.monotonic()
+
+    def finish(self) -> None:
+        self._close()
+        self.started = None
+
+
+def extract_version(path: Path) -> str:
+    """Version from the [package] section of Cargo.toml."""
+    content = path.read_text(encoding="utf-8")
+    package = re.search(r"^\[package\](.*?)(?=^\[|\Z)", content, re.S | re.M)
+    match = package and re.search(r'^version\s*=\s*"([^"]+)"', package.group(1), re.M)
+    if not match:
+        raise ReleaseError(f"package version not found in {path}")
+    return match.group(1)
+
+
+def windows_version(version: str) -> str:
+    """0.1.0 -> 0.1.0.0: VersionInfoVersion needs four numbers."""
+    numbers = [int(n) for n in re.findall(r"\d+", version.split("-")[0])][:4]
+    return ".".join(str(n) for n in numbers + [0] * (4 - len(numbers)))
+
+
+def find_cargo() -> str:
+    found = shutil.which("cargo")
+    if found:
+        return found
+    # rustup installed with --no-modify-path leaves cargo off PATH in new shells.
+    fallback = Path.home() / ".cargo" / "bin" / "cargo.exe"
+    if fallback.is_file():
+        return str(fallback)
+    raise ReleaseError("cargo not found: install Rust (rustup) or add ~/.cargo/bin to PATH")
+
+
+def find_iscc() -> Path:
+    for path in ISCC_PATHS:
+        if path.is_file():
+            return path
+    found = shutil.which("ISCC")
+    if found:
+        return Path(found)
+    raise ReleaseError("ISCC.exe not found: install Inno Setup 6 or add ISCC to PATH")
+
+
+def exe_locked(exe: Path) -> bool:
+    if not exe.is_file():
+        return False
+    try:
+        with exe.open("r+b"):
+            return False
+    except PermissionError:
+        return True
+
+
+def post_close(pid: int) -> None:
+    """WM_CLOSE posted to the top-level windows of `pid`, as the window's close button does, so that
+    it saves its settings: those with a title but the system's (the input method's, the OpenGL
+    driver's, winit's message target); the visible ones, else (a window hidden in the tray) the
+    hidden ones. taskkill without /F skipped a minimized window, which then could only be killed."""
+    import ctypes
+    from ctypes import wintypes
+
+    service = ("IME", "MSCTFIME UI", "NVOpenGLPbuffer", "Winit Thread Event Target")
+    user32 = ctypes.windll.user32
+    visible, hidden = [], []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, name, 64)
+        if owner.value == pid and user32.GetWindowTextLengthW(hwnd) > 0 and name.value not in service:
+            (visible if user32.IsWindowVisible(hwnd) else hidden).append(hwnd)
+        return True
+
+    user32.EnumWindows(each, 0)
+    for hwnd in visible or hidden:
+        user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+
+
+def close_running_exe(exe: Path) -> None:
+    """A running exe is locked by Windows, and cargo or the installer could not overwrite it.
+
+    The copy started from `exe` is closed as build.py does it: WM_CLOSE first (`post_close`),
+    so that it saves its settings, then by force after 3 seconds."""
+    if not exe_locked(exe):
+        return
+    # A ' in the path is written twice inside PowerShell's single quotes.
+    quoted = str(exe).replace("'", "''")
+    query = f"(Get-Process {EXE_STEM} -ErrorAction SilentlyContinue | Where-Object Path -eq '{quoted}').Id"
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", query], capture_output=True, text=True)
+    pids = out.stdout.split()
+    for pid in pids:
+        print(f"  closing {exe.name} (PID {pid})")
+        post_close(int(pid))
+    deadline = time.monotonic() + 3
+    while exe_locked(exe) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    if exe_locked(exe):
+        for pid in pids:
+            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+        time.sleep(0.5)
+    if exe_locked(exe):
+        raise ReleaseError(f"{exe} is in use: close {APP_NAME} and try again")
+
+
+def installed_exe() -> Path:
+    """The exe of the installed copy: where Inno Setup recorded it, or the default folder."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
+            folder = Path(winreg.QueryValueEx(key, "InstallLocation")[0])
+    except OSError:
+        folder = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / APP_NAME
+    return folder / EXE.name
+
+
+def check_prerequisites() -> tuple[str, Path]:
+    missing = [name for name in BUNDLED_FILES if not (ROOT / name).is_file()]
+    if missing:
+        raise ReleaseError("files for the installer not found: " + ", ".join(missing))
+    cargo = find_cargo()
+    iscc = find_iscc()
+    print(f"  cargo:                 {cargo}")
+    print(f"  Inno Setup:            {iscc}")
+    return cargo, iscc
+
+
+def make_portable_zip(version: str) -> Path:
+    """Archive with the exe, the licences and an empty settings file in the PORTABLE_DIR folder.
+
+    The settings file next to the exe makes the copy keep its settings there instead of in %APPDATA%."""
+    archive = DIST_DIR / f"{FILE_STEM}_{version}_portable.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.write(EXE, f"{PORTABLE_DIR}/{EXE.name}")
+        z.write(DLL, f"{PORTABLE_DIR}/{DLL.name}")
+        z.writestr(f"{PORTABLE_DIR}/{PORTABLE_SETTINGS}", "")
+        for name in PORTABLE_FILES:
+            z.write(ROOT / name, f"{PORTABLE_DIR}/{name}")
+    return archive
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=f"Build a {APP_NAME} release")
+    parser.add_argument("--no-tests", action="store_true", help="do not run cargo test")
+    parser.add_argument(
+        "--install", action="store_true", help="then install the build silently over the installed copy"
+    )
+    args = parser.parse_args()
+
+    # Line buffering: with output redirected to a file, step headers still come before the tools' output.
+    sys.stdout.reconfigure(line_buffering=True)
+    total_started = time.monotonic()
+    steps = Steps((5 if args.no_tests else 6) + args.install)
+    try:
+        steps.next("Checks")
+        version = extract_version(CARGO_TOML)
+        print(f"  version:               {version} (from {CARGO_TOML.name})")
+        if "-dev" in version:
+            print("  note: a development version; a release drops -dev in Cargo.toml first")
+        cargo, iscc = check_prerequisites()
+
+        steps.next("PDFium")
+        run_command([sys.executable, str(GET_PDFIUM)], "get_pdfium")
+
+        if not args.no_tests:
+            steps.next("Tests")
+            run_command([cargo, "test"], "cargo test")
+
+        steps.next("Release build")
+        # Checked right before the build: the program may have been started while the tests ran.
+        close_running_exe(EXE)
+        run_command([cargo, "build", "--release"], "cargo build")
+        if not EXE.is_file():
+            raise ReleaseError(f"cargo finished, but {EXE} was not found")
+        if not DLL.is_file():
+            raise ReleaseError(f"{DLL.name} was not put next to the exe (see build.rs)")
+
+        steps.next("Installer icon")
+        ICON.unlink(missing_ok=True)
+        run_command([str(EXE), "--export-icon", str(ICON)], "icon export")
+        if not ICON.is_file():
+            raise ReleaseError(f"icon not created: {ICON}")
+
+        steps.next("Inno Setup installer")
+        DIST_DIR.mkdir(exist_ok=True)
+        run_command(
+            [
+                str(iscc),
+                f"/DMyAppVersion={version}",
+                f"/DVersionInfoVersion={windows_version(version)}",
+                f"/DAppIcon={ICON}",
+                str(ISS_FILE),
+            ],
+            "ISCC",
+        )
+        installer = DIST_DIR / f"{FILE_STEM}_{version}_Setup.exe"
+        if not installer.is_file():
+            raise ReleaseError(f"ISCC finished, but the installer was not found: {installer}")
+        portable = make_portable_zip(version)
+        print(f"Portable version: {portable.relative_to(ROOT)}")
+
+        if args.install:
+            steps.next("Silent installation")
+            installed = installed_exe()
+            # Closed here rather than by the installer (/CLOSEAPPLICATIONS is the fallback), so that
+            # it saves its settings.
+            close_running_exe(installed)
+            run_command([str(installer), *SILENT_INSTALL], "installation")
+            if not installed.is_file():
+                raise ReleaseError(f"the installer finished, but {installed} was not found")
+            print(f"Installed: {installed}")
+        steps.finish()
+
+    except ReleaseError as e:
+        print(f"\nERROR: build stopped: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nERROR: build interrupted by the user", file=sys.stderr)
+        return 1
+
+    minutes, seconds = divmod(int(time.monotonic() - total_started), 60)
+    print(f"\n=== Release {version} built in {minutes} min {seconds} s ===")
+    print(f"  installer:   {installer}  ({human_size(installer.stat().st_size)})")
+    print(f"  portable:    {portable}  ({human_size(portable.stat().st_size)})")
+    if args.install:
+        print(f"  installed:   {installed}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
