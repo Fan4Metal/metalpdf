@@ -2,7 +2,7 @@
 //! bookmarks), each a list that follows the page the reader is on. What
 //! the reader clicks comes back as a `SidebarAction`.
 
-use egui::{Align, CursorIcon, Label, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Align, CursorIcon, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::app::Tab;
 use crate::cache::Textures;
@@ -198,17 +198,38 @@ fn outline(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarA
     if changed {
         ui.data_mut(|d| d.insert_temp(last_id, active.clone()));
     }
+    // The page a bookmark goes to, as the document numbers it (labels or
+    // the page numbering's shift).
+    let label = |target: &Option<Target>| match target {
+        Some(Target::Page { index, .. }) => Some(tab.doc.label(*index)),
+        _ => None,
+    };
+    let mut cx = OutlineCx { active: active.as_deref(), changed, palette, label: &label, actions };
     ScrollArea::vertical().id_salt(("outline", tab.id)).auto_shrink([false, false]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
+        // Rows touch, so the indent guides run on unbroken.
+        ui.spacing_mut().item_spacing.y = 0.0;
         ui.add_space(4.0);
         let mut path = Vec::new();
         for (i, item) in items.iter().enumerate() {
             path.push(i);
-            outline_item(ui, item, &mut path, active.as_deref(), changed, palette, actions);
+            outline_item(ui, item, &mut path, &mut cx);
             path.pop();
         }
+        ui.add_space(8.0);
     });
 }
+
+/// What every row of the outline needs.
+struct OutlineCx<'a> {
+    active: Option<&'a [usize]>,
+    changed: bool,
+    palette: &'a Palette,
+    label: &'a dyn Fn(&Option<Target>) -> Option<String>,
+    actions: &'a mut Vec<SidebarAction>,
+}
+
+/// The outline's indent a level, and the column the fold triangle is in.
+const OUTLINE_INDENT: f32 = 16.0;
 
 /// The most rows the search list lays out.
 const SEARCH_ROWS: usize = 5000;
@@ -289,65 +310,113 @@ fn search(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarAc
     }
 }
 
-/// One bookmark with its children under a fold.
-fn outline_item(
-    ui: &mut Ui,
-    item: &OutlineItem,
-    path: &mut Vec<usize>,
-    active: Option<&[usize]>,
-    changed: bool,
-    palette: &Palette,
-    actions: &mut Vec<SidebarAction>,
-) {
-    let is_active = active == Some(path.as_slice());
-    let on_active_path = active.is_some_and(|a| a.starts_with(path));
+/// One bookmark, and its children when its fold is open: a row of its
+/// own, drawn by hand. The levels differ in size, weight and colour, the
+/// text of a level in one column whether the row has a fold or not (the
+/// triangle sits in its own column to the left), faint guides run down
+/// the levels, the page number is on the right, and the current bookmark
+/// has a bar behind it.
+fn outline_item(ui: &mut Ui, item: &OutlineItem, path: &mut Vec<usize>, cx: &mut OutlineCx<'_>) {
+    let is_active = cx.active == Some(path.as_slice());
+    let on_active_path = cx.active.is_some_and(|a| a.starts_with(path));
     let depth = path.len() - 1;
-    let id = ui.id().with(("outline-item", path.clone()));
-    let mut text = RichText::new(&item.title).size(if depth == 0 { 13.5 } else { 13.0 });
-    text = if is_active {
-        text.color(palette.accent).strong()
-    } else if depth > 1 {
-        text.color(palette.muted)
-    } else {
-        text
-    };
-    let row = |ui: &mut Ui, actions: &mut Vec<SidebarAction>| {
-        let response = ui.add(Label::new(text.clone()).truncate().sense(Sense::click()));
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-        }
-        if is_active && changed {
-            response.scroll_to_me(Some(Align::Center));
-        }
-        if response.clicked()
-            && let Some(target) = &item.target
-        {
-            actions.push(SidebarAction::Follow(target.clone()));
-        }
-    };
-    if item.children.is_empty() {
-        ui.horizontal(|ui| {
-            ui.add_space(depth as f32 * 12.0 + 18.0);
-            row(ui, actions);
-        });
-        return;
+    let has_children = !item.children.is_empty();
+    let palette = cx.palette;
+    // Chapters get air above them.
+    if depth == 0 && path[0] > 0 {
+        ui.add_space(6.0);
     }
-    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, depth == 0);
-    if on_active_path && changed {
+    let id = ui.id().with(("outline-item", path.clone()));
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    if on_active_path && has_children && cx.changed && !is_active {
         state.set_open(true);
     }
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 12.0);
-        state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
-        row(ui, actions);
-    });
-    state.show_body_unindented(ui, |ui| {
+    let height = if depth == 0 { 24.0 } else { 21.0 };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+    let painter = ui.painter();
+    let left = rect.left() + 4.0;
+    // The bar behind the current bookmark, else the hover.
+    if is_active {
+        painter.rect_filled(rect.shrink2(vec2(2.0, 1.0)), 3.0, palette.accent.gamma_multiply(0.16));
+    } else if response.hovered() {
+        painter.rect_filled(rect.shrink2(vec2(2.0, 1.0)), 3.0, palette.muted.gamma_multiply(0.12));
+    }
+    // The guides of the levels above.
+    let guide = Stroke::new(1.0, palette.muted.gamma_multiply(0.3));
+    for level in 0..depth {
+        let x = (left + level as f32 * OUTLINE_INDENT + OUTLINE_INDENT / 2.0).round() + 0.5;
+        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], guide);
+    }
+    // The fold's triangle, in its column.
+    let fold = Rect::from_min_size(pos2(left + depth as f32 * OUTLINE_INDENT, rect.top()), vec2(OUTLINE_INDENT, height));
+    if has_children {
+        let c = fold.center();
+        let s = 3.6;
+        let points = if state.is_open() {
+            vec![pos2(c.x - s, c.y - s * 0.55), pos2(c.x + s, c.y - s * 0.55), pos2(c.x, c.y + s * 0.75)]
+        } else {
+            vec![pos2(c.x - s * 0.55, c.y - s), pos2(c.x + s * 0.75, c.y), pos2(c.x - s * 0.55, c.y + s)]
+        };
+        let over = response.hover_pos().is_some_and(|p| fold.contains(p));
+        let color = if over { palette.text } else { palette.muted };
+        painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    }
+    // The page number on the right.
+    let number = (cx.label)(&item.target);
+    let number_font = egui::FontId::proportional(11.5);
+    let number_galley = number.map(|n| painter.layout_no_wrap(n, number_font, palette.muted));
+    let number_width = number_galley.as_ref().map_or(0.0, |g| g.size().x + 10.0);
+    // The title: chapters larger and darker, sections plain, deeper levels
+    // smaller and muted; the current one in the accent colour.
+    let (size, color) = match depth {
+        0 => (14.0, ui.visuals().strong_text_color()),
+        1 => (13.0, palette.text),
+        _ => (12.5, palette.muted),
+    };
+    let color = if is_active { palette.accent } else { color };
+    let text_x = fold.right() + 2.0;
+    let mut job = egui::text::LayoutJob::single_section(item.title.clone(), egui::text::TextFormat { font_id: egui::FontId::proportional(size), color, ..Default::default() });
+    job.wrap.max_width = (rect.right() - 6.0 - number_width - text_x).max(20.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    let galley = painter.layout_job(job);
+    let elided = galley.elided;
+    let text_pos = pos2(text_x, rect.center().y - galley.size().y / 2.0);
+    painter.galley(text_pos, galley.clone(), color);
+    // Chapters, the current bookmark and the chapters round it heavier: the
+    // text drawn again a pixel to the right (the default font has no bold).
+    if depth == 0 || is_active || (on_active_path && depth == 0) {
+        let px = 1.0 / ui.ctx().pixels_per_point();
+        painter.galley(text_pos + vec2(px, 0.0), galley, color);
+    }
+    if let Some(g) = number_galley {
+        let pos = pos2(rect.right() - 6.0 - g.size().x, rect.center().y - g.size().y / 2.0);
+        painter.galley(pos, g, palette.muted);
+    }
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let response = if elided { response.on_hover_text(&item.title) } else { response };
+    if is_active && cx.changed {
+        response.scroll_to_me(Some(Align::Center));
+    }
+    if response.clicked() {
+        let on_fold = response.interact_pointer_pos().is_some_and(|p| fold.contains(p));
+        match (&item.target, has_children && (on_fold || item.target.is_none())) {
+            (_, true) => state.toggle(ui),
+            (Some(target), false) => cx.actions.push(SidebarAction::Follow(target.clone())),
+            (None, false) => {}
+        }
+    }
+    state.store(ui.ctx());
+    if has_children && state.is_open() {
         for (i, child) in item.children.iter().enumerate() {
             path.push(i);
-            outline_item(ui, child, path, active, changed, palette, actions);
+            outline_item(ui, child, path, cx);
             path.pop();
         }
-    });
+    }
 }
 
 /// The path (indices down the tree) of the bookmark the reader is in: the
