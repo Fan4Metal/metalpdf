@@ -304,7 +304,10 @@ impl DocState {
     /// The page's label if the document names it, else its number.
     pub fn label(&self, page: usize) -> String {
         if self.page_shift != 0 {
-            return (page as i64 + 1 - i64::from(self.page_shift)).to_string();
+            let number = page as i64 + 1 - i64::from(self.page_shift);
+            // The pages before the printed page 1 (the front matter): their
+            // place in the file in roman numerals, as books number them.
+            return if number >= 1 { number.to_string() } else { roman(page as u32 + 1) };
         }
         self.labels.get(page).cloned().flatten().unwrap_or_else(|| (page + 1).to_string())
     }
@@ -324,9 +327,67 @@ impl DocState {
     }
 }
 
+/// `n` (1 and up) in lower-case roman numerals.
+pub fn roman(mut n: u32) -> String {
+    const DIGITS: [(u32, &str); 13] =
+        [(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")];
+    let mut out = String::new();
+    for (value, digits) in DIGITS {
+        while n >= value {
+            out.push_str(digits);
+            n -= value;
+        }
+    }
+    out
+}
+
+/// A roman numeral (either case), if `text` is a well-formed one.
+pub fn parse_roman(text: &str) -> Option<u32> {
+    let text = text.trim().to_ascii_lowercase();
+    if text.is_empty() || !text.chars().all(|c| "ivxlcdm".contains(c)) {
+        return None;
+    }
+    let value = |c: char| match c {
+        'i' => 1,
+        'v' => 5,
+        'x' => 10,
+        'l' => 50,
+        'c' => 100,
+        'd' => 500,
+        _ => 1000,
+    };
+    let chars: Vec<i64> = text.chars().map(value).collect();
+    let mut n = 0i64;
+    for (i, &v) in chars.iter().enumerate() {
+        if chars.get(i + 1).is_some_and(|&next| next > v) { n -= v } else { n += v }
+    }
+    // Only the numeral's own spelling (no "iiii", "vx").
+    let n = u32::try_from(n).ok()?;
+    (n > 0 && roman(n) == text).then_some(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn front_matter_is_numbered_in_roman_numerals() {
+        assert_eq!(roman(1), "i");
+        assert_eq!(roman(4), "iv");
+        assert_eq!(roman(16), "xvi");
+        assert_eq!(roman(1994), "mcmxciv");
+        assert_eq!(parse_roman("XVI"), Some(16));
+        assert_eq!(parse_roman("iv"), Some(4));
+        assert_eq!(parse_roman("iiii"), None);
+        assert_eq!(parse_roman("12"), None);
+        let mut doc = DocState::new(1);
+        doc.page_count = 40;
+        doc.page_shift = 16;
+        assert_eq!(doc.label(0), "i");
+        assert_eq!(doc.label(15), "xvi");
+        assert_eq!(doc.label(16), "1");
+        assert_eq!(doc.label(39), "24");
+    }
 
     #[test]
     fn page_text_maps_rectangles_through_the_affine() {

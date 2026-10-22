@@ -65,7 +65,7 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 
 ### Sidebar
 
-`F4` (or the button beside Open) shows the sidebar with two lists. **Pages** shows every page as a thumbnail, the current one framed and kept in view; a click goes to the page. **Outline** shows the document's bookmarks as a tree, the one the reader is in highlighted; a click follows it. The sidebar's width is kept.
+`F4` (or the button beside Open) shows the sidebar with three lists. **Pages** shows every page as a thumbnail, the current one framed and kept in view; a click goes to the page. **Outline** shows the document's bookmarks as a tree, the levels set apart by size, weight and indent with guides down them, each with its page number; the chapters are folded but the one the reader is in, whose bookmark is highlighted; a click follows a bookmark, a click on its triangle folds it. **Search** lists the hits of a search. The sidebar's width is kept.
 
 ### Find
 
@@ -73,7 +73,7 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 
 The right button over the pages opens a menu: copy the selection, select the page, copy the picture under the pointer (to the clipboard, at its own resolution, as shown: masks and transparency applied), open a link or copy its address, the tools, and in the editing mode the text run or the picture under the pointer. Two tools are on the toolbar: with the text tool (`V`) dragging selects text, with the hand (`H`) dragging scrolls the pages. A double click selects the word under the pointer with either.
 
-When a document's printed page numbers differ from the file's (a book whose page 1 is the file's 17th page, say), the right button on the page field offers to read the printed numbers off the pages (two dozen pages are sampled and the shift they agree on is taken), to state the number of the page shown, or to go back to the file's numbering. The page field, the thumbnails and the search list then show the printed numbers, a number typed in the field is the printed one, and the setting is kept with the document's position. A document with page labels of its own (such as roman numerals for a preface) shows those as it is.
+When a document's printed page numbers differ from the file's (a book whose page 1 is the file's 17th page, say), the right button on the page field offers to read the printed numbers off the pages (two dozen pages are sampled and the shift they agree on is taken), to state the number of the page shown, or to go back to the file's numbering. The page field, the thumbnails, the outline and the search list then show the printed numbers (the pages before page 1 in roman numerals, as a book's front matter), a number typed in the field is the printed one, and the setting is kept with the document's position. A document with page labels of its own (such as roman numerals for a preface) shows those as it is.
 
 ### Text selection and links
 

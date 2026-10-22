@@ -2193,6 +2193,15 @@ impl App {
                     if let Some(i) = labels.iter().position(|l| l.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(text))) {
                         return Some(i);
                     }
+                    // A roman numeral under a page shift: a page of the
+                    // front matter, by its place in the file.
+                    if shift > 0
+                        && let Some(r) = crate::document::parse_roman(text)
+                        && r as i64 <= i64::from(shift)
+                        && (r as usize) <= count
+                    {
+                        return Some(r as usize - 1);
+                    }
                     let n: i64 = text.parse().ok()?;
                     // Under a page shift the number is the printed one;
                     // outside the printed range, the file's.
