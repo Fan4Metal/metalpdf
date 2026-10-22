@@ -17,7 +17,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
-use crate::pdfium::{self, Bitmap, Document, Link, OpenError, OutlineItem, Page, Pause, Placement, RenderStatus, TextLayout};
+use crate::pdfium::{self, Bitmap, Document, Link, OpenError, OutlineItem, Page, Pause, Placement, RenderStatus, TextLayout, TextObject};
 use crate::pixels::Pixels;
 use crate::settings::ZoomSetting;
 
@@ -77,6 +77,14 @@ pub enum Request {
     /// Find `query` in every page from `from` on, round the document.
     Search { id: DocId, search: u32, query: String, match_case: bool, whole_words: bool, from: usize },
     StopSearch(DocId),
+    /// The text objects of a page, for the editing.
+    TextObjects { id: DocId, page: usize },
+    /// Replace the text of object `object` on `page`.
+    EditText { id: DocId, page: usize, object: usize, text: String },
+    /// Take the last edit back.
+    UndoEdit(DocId),
+    /// Write the edited document to `path`.
+    Save { id: DocId, path: PathBuf },
 }
 
 /// What the engine says back.
@@ -93,6 +101,13 @@ pub enum Event {
     Links { id: DocId, page: usize, links: Arc<Vec<Link>> },
     /// The hits on one page; `done` after the last page searched.
     SearchHits { id: DocId, search: u32, page: usize, hits: Vec<SearchHit>, done: bool },
+    TextObjects { id: DocId, page: usize, objects: Arc<Vec<TextObject>> },
+    /// `page` changed (an edit, or one taken back); `edits` is how many
+    /// remain.
+    Edited { id: DocId, page: usize, edits: usize },
+    /// An edit could not be made (the reason, technical).
+    EditFailed { id: DocId, reason: String },
+    Saved { id: DocId, path: PathBuf, result: Result<(), String> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -221,6 +236,24 @@ struct SearchState {
     searched: usize,
 }
 
+/// One replacement of a text object's text.
+#[derive(Clone, Debug)]
+struct EditEntry {
+    page: usize,
+    object: usize,
+    text: String,
+}
+
+/// A document's edits: a second copy of the file they are applied to,
+/// the viewed one staying as it is; undo rebuilds it from the log.
+struct EditState {
+    doc: Document,
+    path: PathBuf,
+    log: Vec<EditEntry>,
+    /// The pages rendered from the edited copy.
+    edited: HashSet<usize>,
+}
+
 /// The thread's side.
 struct Worker {
     shared: Arc<Shared>,
@@ -232,6 +265,12 @@ struct Worker {
     pages: HashMap<(DocId, usize), Page>,
     page_order: VecDeque<(DocId, usize)>,
     search: Option<SearchState>,
+    /// The documents' paths, for the edited copies.
+    paths: HashMap<DocId, PathBuf>,
+    edits: HashMap<DocId, EditState>,
+    /// A TrueType font every character can be set in (Arial), read when
+    /// an edit first needs it.
+    fallback_font: Option<Vec<u8>>,
 }
 
 /// Open pages kept per engine: the decoded images of a scanned page are
@@ -259,6 +298,9 @@ impl Worker {
             pages: HashMap::new(),
             page_order: VecDeque::new(),
             search: None,
+            paths: HashMap::new(),
+            edits: HashMap::new(),
+            fallback_font: None,
         };
         worker.serve();
     }
@@ -317,6 +359,7 @@ impl Worker {
                         let title = doc.meta_text("Title");
                         log::debug!("opened {} ({page_count} pages) in {:.1} ms", path.display(), started.elapsed().as_secs_f64() * 1e3);
                         self.docs.insert(id, doc);
+                        self.paths.insert(id, path.clone());
                         self.send(Event::Opened { id, result: Ok(DocInfo { page_count, first_size, title }) });
                         if let (Some(first), Some(size)) = (first, first_size) {
                             let page = first.page.min(page_count.saturating_sub(1));
@@ -335,6 +378,8 @@ impl Worker {
             Request::Close(id) => {
                 self.page_order.retain(|k| k.0 != id);
                 self.pages.retain(|k, _| k.0 != id);
+                self.edits.remove(&id);
+                self.paths.remove(&id);
                 self.docs.remove(&id);
                 if self.search.as_ref().is_some_and(|s| s.id == id) {
                     self.search = None;
@@ -376,7 +421,84 @@ impl Worker {
                     self.search = None;
                 }
             }
+            Request::TextObjects { id, page } => {
+                let Some(p) = self.page(id, page) else { return };
+                let objects = Arc::new(p.text_objects());
+                self.send(Event::TextObjects { id, page, objects });
+            }
+            Request::EditText { id, page, object, text } => match self.edit_text(id, page, object, text) {
+                Ok(edits) => self.send(Event::Edited { id, page, edits }),
+                Err(reason) => {
+                    log::info!("edit refused: {reason}");
+                    self.send(Event::EditFailed { id, reason });
+                }
+            },
+            Request::UndoEdit(id) => {
+                let Some(state) = self.edits.get_mut(&id) else { return };
+                let Some(undone) = state.log.pop() else { return };
+                let log = state.log.clone();
+                match self.rebuild_edits(id, log) {
+                    Ok(edits) => self.send(Event::Edited { id, page: undone.page, edits }),
+                    Err(reason) => self.send(Event::EditFailed { id, reason }),
+                }
+            }
+            Request::Save { id, path } => {
+                let result = match self.edits.get(&id) {
+                    Some(state) => state.doc.save_to(&path),
+                    None => Err("nothing was edited".into()),
+                };
+                self.send(Event::Saved { id, path, result });
+            }
         }
+    }
+
+    /// Replace the text of `object` on `page` in the document's edited
+    /// copy (opened at the first edit); how many edits there are then.
+    fn edit_text(&mut self, id: DocId, page: usize, object: usize, text: String) -> Result<usize, String> {
+        if text.trim().is_empty() {
+            return Err("the text is empty".into());
+        }
+        if !self.edits.contains_key(&id) {
+            let path = self.paths.get(&id).cloned().ok_or("no such document")?;
+            let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
+            let obstacles = doc.edit_obstacles();
+            if !obstacles.is_empty() {
+                return Err(format!("the document is {}", obstacles.join(" and ")));
+            }
+            self.edits.insert(id, EditState { doc, path, log: Vec::new(), edited: HashSet::new() });
+        }
+        if self.fallback_font.is_none() {
+            let fonts = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+            self.fallback_font = std::fs::read(fonts.join("Fonts").join("arial.ttf")).ok();
+        }
+        // The page comes from the edited copy from now on.
+        self.pages.remove(&(id, page));
+        self.page_order.retain(|k| *k != (id, page));
+        self.edits.get_mut(&id).expect("inserted above").edited.insert(page);
+        let fallback = self.fallback_font.clone();
+        let p = self.page(id, page).ok_or("the page could not be loaded")?;
+        p.set_text(object, &text, fallback.as_deref())?;
+        let state = self.edits.get_mut(&id).expect("inserted above");
+        state.log.push(EditEntry { page, object, text });
+        Ok(state.log.len())
+    }
+
+    /// The edited copy made again from the file with `log` applied.
+    fn rebuild_edits(&mut self, id: DocId, log: Vec<EditEntry>) -> Result<usize, String> {
+        let path = self.paths.get(&id).cloned().ok_or("no such document")?;
+        self.pages.retain(|k, _| k.0 != id);
+        self.page_order.retain(|k| k.0 != id);
+        self.edits.remove(&id);
+        if log.is_empty() {
+            return Ok(0);
+        }
+        let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
+        self.edits.insert(id, EditState { doc, path, log: Vec::new(), edited: HashSet::new() });
+        let count = log.len();
+        for entry in log {
+            self.edit_text(id, entry.page, entry.object, entry.text)?;
+        }
+        Ok(count)
     }
 
     /// One page of the search going on, round the document from where it
@@ -406,11 +528,13 @@ impl Worker {
         self.send(Event::SearchHits { id, search, page, hits, done });
     }
 
-    /// Page `index` of document `id`, loaded if it is not open.
+    /// Page `index` of document `id`, loaded if it is not open: from the
+    /// edited copy when the page was edited.
     fn page(&mut self, id: DocId, index: usize) -> Option<&Page> {
         let key = (id, index);
         if !self.pages.contains_key(&key) {
-            let page = self.docs.get(&id)?.load_page(index)?;
+            let edited = self.edits.get(&id).filter(|e| e.edited.contains(&index)).map(|e| &e.doc);
+            let page = edited.or_else(|| self.docs.get(&id))?.load_page(index)?;
             self.pages.insert(key, page);
             self.page_order.push_back(key);
             while self.page_order.len() > PAGE_CACHE {

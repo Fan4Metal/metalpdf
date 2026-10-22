@@ -89,6 +89,16 @@ impl<T> Pool<T> {
         }
     }
 
+    /// Forget the renders of `page` of document `doc` (its content changed).
+    pub fn remove_page(&mut self, doc: crate::engine::DocId, page: u32) {
+        let gone: Vec<RenderKey> = self.entries.keys().filter(|k| k.doc == doc && k.page == page).copied().collect();
+        for k in gone {
+            if let Some(e) = self.entries.remove(&k) {
+                self.bytes -= e.bytes;
+            }
+        }
+    }
+
     /// Forget everything of document `doc`.
     pub fn remove_doc(&mut self, doc: crate::engine::DocId) {
         let gone: Vec<RenderKey> = self.entries.keys().filter(|k| k.doc == doc).copied().collect();

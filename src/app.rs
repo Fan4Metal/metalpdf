@@ -73,6 +73,32 @@ pub struct Tab {
     /// gone back from, for Alt+Right.
     pub back: Vec<Anchor>,
     pub forward: Vec<Anchor>,
+    /// The text editing mode: text objects are outlined, a click edits.
+    pub editing: bool,
+    pub editor: Option<InlineEditor>,
+    /// A short message for the status bar (an edit refused, a save).
+    pub notice: Option<(String, Instant)>,
+}
+
+/// A text object being edited in place.
+pub struct InlineEditor {
+    pub page: usize,
+    pub object: usize,
+    pub text: String,
+    /// The object's box on the unrotated page, in points.
+    pub rect: [f32; 4],
+    pub font_size: f32,
+    /// Just opened: takes the focus.
+    pub fresh: bool,
+}
+
+/// Something to confirm before it happens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confirm {
+    /// Closing tab `tab` of window `window`, which has unsaved edits.
+    CloseTab { window: u64, tab: u64 },
+    /// Quitting with unsaved edits.
+    Quit,
 }
 
 /// Jumps remembered for Alt+Left.
@@ -93,7 +119,15 @@ impl Tab {
             selecting: false,
             back: Vec::new(),
             forward: Vec::new(),
+            editing: false,
+            editor: None,
+            notice: None,
         }
+    }
+
+    /// Say something in the status bar for a few seconds.
+    pub fn notify(&mut self, text: String) {
+        self.notice = Some((text, Instant::now()));
     }
 
     /// Remember where the reader is before a jump.
@@ -329,6 +363,9 @@ pub struct App {
     /// The root window moved or resized: its place is saved after a pause.
     window_changed_at: Option<Instant>,
     last_geometry: Option<WindowGeometry>,
+    confirm: Option<Confirm>,
+    /// The reader chose to quit with unsaved edits: the close goes on.
+    quitting: bool,
 }
 
 /// Closed tabs Ctrl+Shift+T can open again.
@@ -440,6 +477,8 @@ impl App {
             first_drawn: false,
             window_changed_at: None,
             last_geometry: None,
+            confirm: None,
+            quitting: false,
         };
         // The tabs: the active one is being opened by the engine already
         // under `first_id`; the others are asked for now.
@@ -531,8 +570,129 @@ impl App {
         if index >= self.win().tabs.len() {
             return;
         }
+        let (window, tab_id, modified) = {
+            let w = self.win();
+            (w.id, w.tabs[index].id, w.tabs[index].doc.modified)
+        };
+        if modified && self.confirm.is_none() {
+            self.confirm = Some(Confirm::CloseTab { window, tab: tab_id });
+            return;
+        }
         let tab = self.win().remove_tab(index);
         self.drop_tab(tab);
+    }
+
+    /// Close tab `tab` of window `window` whatever its edits.
+    fn force_close_tab(&mut self, window: u64, tab: u64) {
+        if let Some(w) = self.window_index(window)
+            && let Some(i) = self.windows[w].tab_index(tab)
+        {
+            let tab = self.windows[w].remove_tab(i);
+            self.drop_tab(tab);
+        }
+    }
+
+    /// Ask where to save the edited document of tab `tab` of window
+    /// `window`.
+    fn save_as(&mut self, ctx: &egui::Context, window: u64, tab: u64) {
+        let Some(w) = self.window_index(window) else { return };
+        let Some(i) = self.windows[w].tab_index(tab) else { return };
+        let path = self.windows[w].tabs[i].path.clone();
+        let hwnd = self.windows[w].hwnd;
+        self.dialogs.start(
+            ctx,
+            hwnd,
+            Ask::SaveAs { tab },
+            move || {
+                let mut dialog = rfd::FileDialog::new().add_filter("PDF", &["pdf"]);
+                if let Some(folder) = path.parent() {
+                    dialog = dialog.set_directory(folder);
+                }
+                if let Some(name) = path.file_name() {
+                    dialog = dialog.set_file_name(name.to_string_lossy());
+                }
+                dialog
+            },
+            crate::dialog::save_file,
+        );
+    }
+
+    /// The edited document of tab `tab` written to `path`.
+    fn save_to(&mut self, tab: u64, path: PathBuf) {
+        for window in &mut self.windows {
+            if let Some(t) = window.tabs.iter_mut().find(|t| t.id == tab) {
+                self.engine.request(Request::Save { id: t.doc.id, path });
+                return;
+            }
+        }
+    }
+
+    /// Open the tab's file again after it was saved over: the viewed
+    /// document read the old file; the view stays where it is.
+    fn reopen_tab(&mut self, doc: DocId) {
+        let new_id = self.take_doc_id();
+        for window in &mut self.windows {
+            if let Some(t) = window.tabs.iter_mut().find(|t| t.doc.id == doc) {
+                self.textures.remove_doc(doc);
+                self.uploads.retain(|(k, _)| k.doc != doc);
+                self.engine.request(Request::Close(doc));
+                self.engine.request(Request::Open { id: new_id, path: t.path.clone(), password: None, first: None });
+                t.doc = DocState::new(new_id);
+                t.editor = None;
+                t.selection = None;
+                t.find.close();
+                return;
+            }
+        }
+    }
+
+    /// The confirmation asked for, as a modal.
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(confirm) = self.confirm else { return };
+        let name = match confirm {
+            Confirm::CloseTab { window, tab } => self
+                .window_index(window)
+                .and_then(|w| self.windows[w].tab_index(tab).map(|i| self.windows[w].tabs[i].title.clone()))
+                .unwrap_or_default(),
+            Confirm::Quit => String::new(),
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.add_space(4.0);
+            let text = match confirm {
+                Confirm::CloseTab { .. } => tr!(format!("{name} has unsaved changes."), format!("В {name} есть несохранённые изменения.")),
+                Confirm::Quit => tr!("Some documents have unsaved changes.", "В некоторых документах есть несохранённые изменения.").to_owned(),
+            };
+            ui.label(text);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if matches!(confirm, Confirm::CloseTab { .. }) && ui.button(tr!("Save as…", "Сохранить как…")).clicked() {
+                    choice = Some(0);
+                }
+                if ui.button(tr!("Discard", "Не сохранять")).clicked() {
+                    choice = Some(1);
+                }
+                if ui.button(tr!("Cancel", "Отмена")).clicked() {
+                    choice = Some(2);
+                }
+            });
+            ui.add_space(4.0);
+        });
+        if modal.should_close() {
+            choice = Some(2);
+        }
+        let Some(choice) = choice else { return };
+        self.confirm = None;
+        match (confirm, choice) {
+            (Confirm::CloseTab { window, tab }, 0) => self.save_as(ctx, window, tab),
+            (Confirm::CloseTab { window, tab }, 1) => self.force_close_tab(window, tab),
+            (Confirm::Quit, 1) => {
+                self.quitting = true;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            _ => {}
+        }
     }
 
     /// Closes every tab of the current window but tab `index`.
@@ -605,9 +765,43 @@ impl App {
                         | Event::Outline { id, .. }
                         | Event::TextLayout { id, .. }
                         | Event::Links { id, .. }
-                        | Event::SearchHits { id, .. } => *id,
+                        | Event::SearchHits { id, .. }
+                        | Event::TextObjects { id, .. }
+                        | Event::Edited { id, .. }
+                        | Event::EditFailed { id, .. }
+                        | Event::Saved { id, .. } => *id,
                         _ => continue,
                     };
+                    if let Event::EditFailed { reason, .. } = &other {
+                        if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
+                            tab.notify(tr!(format!("The text could not be edited: {reason}"), format!("Текст не удалось изменить: {reason}")));
+                        }
+                        continue;
+                    }
+                    if let Event::Saved { path, result, .. } = &other {
+                        let mut reopen = false;
+                        if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
+                            match result {
+                                Ok(()) => {
+                                    tab.doc.modified = false;
+                                    tab.notify(tr!(format!("Saved to {}", path.display()), format!("Сохранено в {}", path.display())));
+                                    reopen = same_path(path, &tab.path);
+                                }
+                                Err(e) => tab.notify(tr!(format!("Could not save: {e}"), format!("Не удалось сохранить: {e}"))),
+                            }
+                        }
+                        if reopen {
+                            self.reopen_tab(doc);
+                        }
+                        continue;
+                    }
+                    if let Event::Edited { page, .. } = &other {
+                        // The page's renders show the old content.
+                        let page = *page as u32;
+                        self.textures.full.remove_page(doc, page);
+                        self.textures.preview.remove_page(doc, page);
+                        self.uploads.retain(|(k, _)| !(k.doc == doc && k.page == page));
+                    }
                     let engine = &self.engine;
                     if let Event::SearchHits { search, page, hits, done, .. } = &other {
                         if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
@@ -863,6 +1057,32 @@ impl App {
         if consume(Modifiers::COMMAND | Modifiers::SHIFT, Key::T) {
             self.reopen_closed_tab();
         }
+        if consume(Modifiers::COMMAND, Key::S) || consume(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+            let w = self.win();
+            if let Some(tab) = w.active_tab()
+                && tab.doc.edits > 0
+            {
+                let (window, tab) = (w.id, tab.id);
+                self.save_as(ctx, window, tab);
+            }
+        }
+        if consume(Modifiers::COMMAND, Key::Z) && !typing {
+            let engine = &self.engine;
+            if let Some(tab) = self.windows[self.current].active_tab_mut()
+                && tab.doc.edits > 0
+            {
+                tab.editor = None;
+                engine.request(Request::UndoEdit(tab.doc.id));
+            }
+        }
+        if consume(Modifiers::NONE, Key::E)
+            && !typing
+            && let Some(tab) = self.win().active_tab_mut()
+        {
+            tab.editing = !tab.editing;
+            tab.editor = None;
+            tab.selection = None;
+        }
         let count = self.win().tabs.len();
         if count > 1 {
             if consume(Modifiers::COMMAND, Key::Tab) {
@@ -975,6 +1195,11 @@ impl App {
                     StatusAction::Mode(mode) => {
                         tab.view.set_mode(mode);
                         mode_change = Some(mode);
+                    }
+                    StatusAction::ToggleEdit => {
+                        tab.editing = !tab.editing;
+                        tab.editor = None;
+                        tab.selection = None;
                     }
                 }
             }
@@ -1211,7 +1436,8 @@ impl App {
                     for i in 0..tab_count {
                         let tab = &self.windows[cur].tabs[i];
                         let (tab_id, path_text) = (tab.id, tab.path.display().to_string());
-                        let title = RichText::new(&tab.title).size(13.5);
+                        let shown = if tab.doc.modified { format!("{} •", tab.title) } else { tab.title.clone() };
+                        let title = RichText::new(shown).size(13.5);
                         // Under the tab's own id, so a drag follows the tab
                         // when it is moved along the bar.
                         let response = ui
@@ -1509,6 +1735,31 @@ impl App {
                 for page in out.visible.clone() {
                     tab.doc.need_text(engine, page);
                     tab.doc.need_links(engine, page);
+                    if tab.editing {
+                        tab.doc.need_objects(engine, page);
+                    }
+                }
+                if let Some((page, object)) = out.edit_click
+                    && let (Some(objects), Some(text)) = (tab.doc.objects.get(&page), tab.doc.text.get(&page))
+                    && let Some(o) = objects.iter().find(|o| o.index == object)
+                {
+                    tab.editor = Some(InlineEditor {
+                        page,
+                        object,
+                        text: o.text.clone(),
+                        rect: text.rect_to_page(o.bounds),
+                        font_size: o.font_size.max(1.0),
+                        fresh: true,
+                    });
+                }
+                if let Some((page, object, text)) = out.edit_commit {
+                    tab.editor = None;
+                    let unchanged = tab.doc.objects.get(&page).and_then(|os| os.iter().find(|o| o.index == object)).is_some_and(|o| o.text == text);
+                    if !unchanged && !text.trim().is_empty() {
+                        engine.request(Request::EditText { id: tab.doc.id, page, object, text });
+                    }
+                } else if out.edit_cancel {
+                    tab.editor = None;
                 }
                 if let Some(first) = out.visible.clone().next() {
                     tab.doc.need_sizes_near(engine, first);
@@ -1572,9 +1823,13 @@ impl App {
         let (info, resolve): (StatusInfo, PageResolver) = match self.windows[cur].active_tab() {
             Some(tab) if tab.doc.ready() => {
                 let layout = tab.layout();
-                let note = match tab.doc.title.as_deref() {
-                    Some(t) if !t.is_empty() => t.to_owned(),
-                    _ => String::new(),
+                let note = match (&tab.notice, tab.doc.modified) {
+                    (Some((text, since)), _) if since.elapsed() < Duration::from_secs(6) => text.clone(),
+                    (_, true) => tr!("Edited, not saved (Ctrl+S)", "Изменено, не сохранено (Ctrl+S)").to_owned(),
+                    _ => match tab.doc.title.as_deref() {
+                        Some(t) if !t.is_empty() => t.to_owned(),
+                        _ => String::new(),
+                    },
                 };
                 let labels = tab.doc.labels.clone();
                 let count = tab.doc.page_count;
@@ -1584,6 +1839,7 @@ impl App {
                     zoom_factor: crate::layout::zoom_of_scale(layout.scale),
                     zoom: tab.view.zoom,
                     mode: tab.view.mode,
+                    editing: tab.editing,
                     note,
                     note_is_error: false,
                 };
@@ -1604,6 +1860,7 @@ impl App {
                     zoom_factor: 1.0,
                     zoom: self.settings.zoom,
                     mode: self.settings.view_mode,
+                    editing: false,
                     note: String::new(),
                     note_is_error: false,
                 },
@@ -1648,7 +1905,10 @@ impl App {
         }
         if close_requested {
             if cur == 0 {
-                if self.windows.len() > 1 {
+                if !self.quitting && self.all_tabs().any(|t| t.doc.modified) {
+                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                    self.confirm = Some(Confirm::Quit);
+                } else if self.windows.len() > 1 {
                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                     self.adopt_window(&ctx, maximized);
                 }
@@ -1807,7 +2067,12 @@ impl eframe::App for App {
                     let target = self.window_index(window);
                     self.open_paths(answer.paths, target);
                 }
-                Ask::SaveAs { .. } => {}
+                Ask::SaveAs { tab } => {
+                    if let Some(path) = answer.paths.first() {
+                        let path = if path.extension().is_none() { path.with_extension("pdf") } else { path.clone() };
+                        self.save_to(tab, path);
+                    }
+                }
             }
         }
         self.wanted.clear();
@@ -1828,6 +2093,7 @@ impl eframe::App for App {
         self.close_windows();
 
         self.about.show(&ctx, &mut self.updates);
+        self.confirm_dialog(&ctx);
         self.follow_theme(&ctx);
         // The renders every window wants, the most urgent first.
         let mut wanted = std::mem::take(&mut self.wanted);

@@ -16,6 +16,7 @@ pub enum StatusAction {
     Zoom(ZoomSetting),
     Rotate { clockwise: bool },
     Mode(ViewMode),
+    ToggleEdit,
 }
 
 /// What the bar shows of the document.
@@ -28,6 +29,8 @@ pub struct StatusInfo {
     pub zoom_factor: f32,
     pub zoom: ZoomSetting,
     pub mode: ViewMode,
+    /// The text editing mode is on.
+    pub editing: bool,
     /// Text on the right: what is going on.
     pub note: String,
     pub note_is_error: bool,
@@ -137,6 +140,11 @@ pub fn show(ui: &mut Ui, info: &StatusInfo, field: &mut PageField, resolve: impl
         }
         if super::icon_button(ui, Icon::SinglePage, !continuous, tr!("One page at a time", "По одной странице")).clicked() {
             actions.push(StatusAction::Mode(ViewMode::Single));
+        }
+        ui.separator();
+        let edit_tip = tr!("Edit text (E): click a line of text to change it", "Правка текста (E): щёлкните строку текста, чтобы изменить её");
+        if ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Edit, info.editing, edit_tip)).inner.clicked() {
+            actions.push(StatusAction::ToggleEdit);
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if !info.note.is_empty() {

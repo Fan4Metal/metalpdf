@@ -701,6 +701,196 @@ impl Page {
     }
 }
 
+/// A text object of a page (a run of text drawn with one font at one
+/// size), as the editing sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextObject {
+    /// Its index among the page's objects (`FPDFPage_GetObject`).
+    pub index: usize,
+    /// left, bottom, right, top in page space.
+    pub bounds: [f32; 4],
+    pub text: String,
+    pub font: String,
+    pub font_size: f32,
+    /// The font is embedded as a subset: new characters may have no
+    /// glyph in it, so the text is replaced with a font of its own.
+    pub subset: bool,
+}
+
+/// How a text object's text was replaced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replaced {
+    /// In place, with the object's own font.
+    SameFont,
+    /// By a new object in the fallback font (the old one is gone).
+    FallbackFont,
+}
+
+impl Page {
+    /// The page's text objects, top level only (text inside form
+    /// XObjects is not reachable for editing).
+    pub fn text_objects(&self) -> Vec<TextObject> {
+        let api = self.api();
+        let Some(text_page) = self.text_page() else {
+            return Vec::new();
+        };
+        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle) }.max(0);
+        let mut out = Vec::new();
+        for index in 0..count {
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index) };
+            if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
+                continue;
+            }
+            let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+            if unsafe { (api.FPDFPageObj_GetBounds)(object, &mut l, &mut b, &mut r, &mut t) } == 0 {
+                continue;
+            }
+            let text = utf16_text(|buf, len| unsafe { (api.FPDFTextObj_GetText)(object, text_page, buf.cast(), len) }).unwrap_or_default();
+            let mut size = 0f32;
+            unsafe { (api.FPDFTextObj_GetFontSize)(object, &mut size) };
+            let font = unsafe { (api.FPDFTextObj_GetFont)(object) };
+            let (name, subset) = if font.is_null() {
+                (String::new(), false)
+            } else {
+                let mut buf = vec![0u8; 256];
+                let n = unsafe { (api.FPDFFont_GetBaseFontName)(font, buf.as_mut_ptr().cast(), buf.len()) };
+                let name = String::from_utf8_lossy(&buf[..n.saturating_sub(1).min(buf.len())]).into_owned();
+                let embedded = unsafe { (api.FPDFFont_GetIsEmbedded)(font) } == 1;
+                // A subset's name carries a six-letter tag: `ABCDEF+Name`.
+                let tagged = name.len() > 7 && name.as_bytes()[6] == b'+';
+                (name, embedded && tagged)
+            };
+            out.push(TextObject { index: index as usize, bounds: [l, b, r, t], text, font: name, font_size: size, subset });
+        }
+        out
+    }
+
+    /// Replace the text of object `index` with `text`: in place when the
+    /// object's font can show any text (not an embedded subset), else by
+    /// a new object with `fallback` (a TrueType font's bytes) at the same
+    /// place, size and colour. The page's content is regenerated; the
+    /// text page is reloaded.
+    pub fn set_text(&self, index: usize, text: &str, fallback: Option<&[u8]>) -> Result<Replaced, String> {
+        let api = self.api();
+        let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index as c_int) };
+        if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
+            return Err("not a text object".into());
+        }
+        if text.is_empty() {
+            return Err("the text is empty".into());
+        }
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let font = unsafe { (api.FPDFTextObj_GetFont)(object) };
+        let subset = !font.is_null() && {
+            let mut buf = vec![0u8; 256];
+            let n = unsafe { (api.FPDFFont_GetBaseFontName)(font, buf.as_mut_ptr().cast(), buf.len()) };
+            let embedded = unsafe { (api.FPDFFont_GetIsEmbedded)(font) } == 1;
+            embedded && n > 7 && buf[6] == b'+'
+        };
+        let replaced = match (subset, fallback) {
+            (true, Some(bytes)) => {
+                // The same place, size, colour and mode in a font that has
+                // every glyph.
+                let mut size = 12f32;
+                unsafe { (api.FPDFTextObj_GetFontSize)(object, &mut size) };
+                let mut matrix = sys::FS_MATRIX::default();
+                unsafe { (api.FPDFPageObj_GetMatrix)(object, &mut matrix) };
+                let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 255u32);
+                unsafe { (api.FPDFPageObj_GetFillColor)(object, &mut r, &mut g, &mut b, &mut a) };
+                let mode = unsafe { (api.FPDFTextObj_GetTextRenderMode)(object) };
+                let new_font = unsafe { (api.FPDFText_LoadFont)(self.doc.handle, bytes.as_ptr(), bytes.len() as u32, sys::FPDF_FONT_TRUETYPE, 1) };
+                if new_font.is_null() {
+                    return Err("the fallback font could not be loaded".into());
+                }
+                let new = unsafe { (api.FPDFPageObj_CreateTextObj)(self.doc.handle, new_font, size) };
+                if new.is_null() {
+                    unsafe { (api.FPDFFont_Close)(new_font) };
+                    return Err("a text object could not be made".into());
+                }
+                unsafe {
+                    (api.FPDFText_SetText)(new, wide.as_ptr());
+                    (api.FPDFPageObj_SetMatrix)(new, &matrix);
+                    (api.FPDFPageObj_SetFillColor)(new, r, g, b, a);
+                    (api.FPDFTextObj_SetTextRenderMode)(new, mode);
+                    (api.FPDFPage_InsertObject)(self.handle, new);
+                    if (api.FPDFPage_RemoveObject)(self.handle, object) != 0 {
+                        (api.FPDFPageObj_Destroy)(object);
+                    }
+                    (api.FPDFFont_Close)(new_font);
+                }
+                Replaced::FallbackFont
+            }
+            _ => {
+                if unsafe { (api.FPDFText_SetText)(object, wide.as_ptr()) } == 0 {
+                    return Err("the text could not be set".into());
+                }
+                Replaced::SameFont
+            }
+        };
+        if unsafe { (api.FPDFPage_GenerateContent)(self.handle) } == 0 {
+            return Err("the page's content could not be regenerated".into());
+        }
+        // The text page describes the old content.
+        if let Some(text) = self.text.take() {
+            unsafe { (api.FPDFText_ClosePage)(text) };
+        }
+        Ok(replaced)
+    }
+}
+
+impl Document {
+    /// Write the document (its edits included) to `path`, through a
+    /// temporary file beside it: the target is replaced only once the
+    /// whole file is written.
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
+        use std::io::Write;
+        let tmp = path.with_extension("pdf.metalpdf-tmp");
+        let file = std::fs::File::create(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+        // `raw` first in memory: PDFium hands the callback a pointer to it,
+        // which is the pointer to the whole writer.
+        #[repr(C)]
+        struct Writer {
+            raw: sys::FPDF_FILEWRITE,
+            out: std::io::BufWriter<std::fs::File>,
+            failed: bool,
+        }
+        unsafe extern "C" fn write_block(this: *mut sys::FPDF_FILEWRITE, data: *const c_void, size: c_ulong) -> c_int {
+            // SAFETY: `this` is the `raw` field at the start of a `Writer`,
+            // which outlives the save.
+            let writer = unsafe { &mut *(this as *mut Writer) };
+            let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, size as usize) };
+            if writer.out.write_all(bytes).is_err() {
+                writer.failed = true;
+                return 0;
+            }
+            1
+        }
+        let mut writer = Box::new(Writer {
+            raw: sys::FPDF_FILEWRITE { version: 1, WriteBlock: Some(write_block) },
+            out: std::io::BufWriter::new(file),
+            failed: false,
+        });
+        let ok = unsafe {
+            (self.api().FPDF_SaveAsCopy)(
+                self.inner.handle,
+                &mut writer.raw,
+                sys::FPDF_NO_INCREMENTAL | sys::FPDF_SUBSET_NEW_FONTS,
+            )
+        };
+        let flushed = writer.out.flush().is_ok();
+        let failed = writer.failed;
+        drop(writer);
+        if ok == 0 || failed || !flushed {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("PDFium could not write the document".into());
+        }
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("cannot replace {}: {e}", path.display())
+        })
+    }
+}
+
 /// A BGRx bitmap PDFium paints into, over pixels this side owns. The pixel
 /// buffer must not move while PDFium holds the bitmap, hence the `Box`.
 pub struct Bitmap {
@@ -971,6 +1161,92 @@ pub mod tests {
             dark(a),
             dark(b)
         );
+    }
+
+    /// The text of a run replaced in place (a standard font), the page
+    /// regenerated, the document saved and read again.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn text_is_replaced_and_the_document_saved() {
+        let api = api();
+        let path = sample_file("edit");
+        let doc = Document::open(api, &path, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let objects = page.text_objects();
+        assert_eq!(objects.len(), 2, "{objects:?}");
+        assert_eq!(objects[0].text, "Hello MetalPDF");
+        assert_eq!(objects[0].font, "Helvetica");
+        assert_eq!(objects[0].font_size, 24.0);
+        assert!(!objects[0].subset);
+        assert!(objects[0].bounds[0] >= 71.0 && objects[0].bounds[1] < 770.0 && objects[0].bounds[3] > 770.0, "{:?}", objects[0].bounds);
+        assert_eq!(page.set_text(objects[0].index, "Edited text", None).unwrap(), Replaced::SameFont);
+        assert_eq!(page.text_objects()[0].text, "Edited text");
+        assert_eq!(page.find("Edited", true, false).len(), 1);
+        assert!(page.find("Hello", true, false).is_empty());
+        let saved = std::env::temp_dir().join(format!("metalpdf_saved_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(page);
+        drop(doc);
+        let again = Document::open(api, &saved, None).unwrap();
+        let page = again.load_page(0).unwrap();
+        assert_eq!(page.text(0, 11), "Edited text");
+        let mut bitmap = Bitmap::new(api, 300, 424).unwrap();
+        page.render(&mut bitmap, Placement { start_x: 0, start_y: 0, size_x: 300, size_y: 424, rotate: 0 }, sys::FPDF_ANNOT);
+        assert!(bitmap.pixels().chunks(4).filter(|p| p[0] < 128).count() > 100);
+        drop(page);
+        drop(again);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(saved).unwrap();
+    }
+
+    /// On a real document (`METALPDF_SAMPLE`): the first page with text
+    /// objects, its first run replaced, in place or through a fallback
+    /// font when the run's font is an embedded subset; the replaced run
+    /// must leave ink where it was. With `--nocapture` it prints what it
+    /// found.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_real_document_takes_an_edit() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let api = api();
+        let doc = Document::open(api, Path::new(&sample), None).unwrap();
+        let fallback = std::fs::read(r"C:\Windows\Fonts\arial.ttf").ok();
+        let mut tried = 0;
+        for index in 0..doc.page_count().min(20) {
+            let page = doc.load_page(index).unwrap();
+            let objects = page.text_objects();
+            let Some(object) = objects.iter().find(|o| o.text.trim().chars().count() >= 3) else { continue };
+            println!("page {}: {} text objects; editing {:?} ({}, {} pt, subset {})", index + 1, objects.len(), object.text, object.font, object.font_size, object.subset);
+            let [w, h] = page.size();
+            let scale = 2.0;
+            let (bw, bh) = ((w * scale) as u32, (h * scale) as u32);
+            let at = Placement { start_x: 0, start_y: 0, size_x: bw as i32, size_y: bh as i32, rotate: 0 };
+            // The ink within the run's box before and after.
+            let ink = |bitmap: &Bitmap| {
+                let b = object.bounds;
+                let (x0, x1) = ((b[0] * scale) as usize, (b[2] * scale) as usize);
+                let (y0, y1) = (((h - b[3]) * scale) as usize, ((h - b[1]) * scale) as usize);
+                let mut dark = 0;
+                for y in y0..y1.min(bh as usize) {
+                    let row = &bitmap.pixels()[y * bw as usize * 4..(y + 1) * bw as usize * 4];
+                    dark += row.chunks(4).skip(x0).take(x1.saturating_sub(x0)).filter(|p| p[0] < 160).count();
+                }
+                dark
+            };
+            let mut before = Bitmap::new(api, bw, bh).unwrap();
+            page.render(&mut before, at, sys::FPDF_ANNOT);
+            let replaced = page.set_text(object.index, "Replaced by MetalPDF 123", fallback.as_deref()).unwrap();
+            let mut after = Bitmap::new(api, bw, bh).unwrap();
+            page.render(&mut after, at, sys::FPDF_ANNOT);
+            let (a, b) = (ink(&before), ink(&after));
+            println!("  {replaced:?}: ink {a} before, {b} after");
+            assert!(b > a / 4, "the new text left too little ink ({b} against {a})");
+            tried += 1;
+            if tried >= 3 {
+                break;
+            }
+        }
+        assert!(tried > 0, "no page with text objects among the first 20");
     }
 
     #[test]

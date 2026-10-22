@@ -9,7 +9,7 @@
 
 use egui::{Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
-use crate::app::Tab;
+use crate::app::{InlineEditor, Tab};
 use crate::cache::Textures;
 use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey};
 use crate::layout;
@@ -34,6 +34,11 @@ pub struct ViewOutput {
     pub hovered: bool,
     /// The pointer's position in the page area, if there.
     pub pointer: Option<[f32; 2]>,
+    /// In the editing mode, a text object clicked: page and object.
+    pub edit_click: Option<(usize, usize)>,
+    /// The inline editor was confirmed with this text.
+    pub edit_commit: Option<(usize, usize, String)>,
+    pub edit_cancel: bool,
 }
 
 /// Draw the pages of `tab` into `ui`.
@@ -58,6 +63,8 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let mut selection = tab.selection;
     let mut selecting = tab.selecting;
     let find = &tab.find;
+    let editing = tab.editing;
+    let editor: &mut Option<InlineEditor> = &mut tab.editor;
 
     let scroll = egui::ScrollArea::both()
         .id_salt(("pages", tab.id))
@@ -75,7 +82,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
             out.hovered = response.hovered();
             let pointer = response.hover_pos().or_else(|| if selecting { response.interact_pointer_pos() } else { None });
             out.pointer = pointer.map(|p| [p.x - origin.x - scroll_x, p.y - origin.y - scroll_y]);
-            let painter = ui.painter();
+            let painter = ui.painter().clone();
             for i in visible.clone() {
                 let p = layout.pages[i];
                 if p[3] <= 0.0 {
@@ -130,6 +137,54 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                         painter.rect_filled(screen, 1.0, palette.selection);
                     }
                 }
+                // The editing mode: the text objects outlined, the one under
+                // the pointer stronger, a click opens the inline editor.
+                if editing
+                    && let (Some(objects), Some(text)) = (tab.doc.objects.get(&i), text)
+                {
+                    for object in objects.iter() {
+                        let screen = page_rect_to_screen(text.rect_to_page(object.bounds), turns, size, rect).expand(1.0);
+                        let under = pointer.is_some_and(|pt| screen.contains(pt));
+                        let being_edited = editor.as_ref().is_some_and(|e| e.page == i && e.object == object.index);
+                        if being_edited {
+                            continue;
+                        }
+                        let color = if under { palette.accent } else { palette.muted.gamma_multiply(0.5) };
+                        painter.rect_stroke(screen, 1.0, Stroke::new(1.0, color), StrokeKind::Outside);
+                        if under {
+                            ui.ctx().set_cursor_icon(CursorIcon::Text);
+                            if response.clicked() {
+                                out.edit_click = Some((i, object.index));
+                            }
+                        }
+                    }
+                }
+                // The inline editor over the object being edited.
+                if let Some(e) = editor.as_mut()
+                    && e.page == i
+                {
+                    let screen = page_rect_to_screen(e.rect, turns, size, rect);
+                    let scale = rect.height() / size[1].max(1.0);
+                    let font = egui::FontId::proportional((e.font_size * scale).clamp(8.0, 64.0));
+                    let field = Rect::from_min_size(
+                        screen.min - vec2(4.0, 3.0),
+                        vec2((screen.width() + 40.0).max(120.0), screen.height().max(font.size + 8.0) + 6.0),
+                    );
+                    let widget = egui::TextEdit::singleline(&mut e.text).font(font).margin(vec2(4.0, 3.0));
+                    let edit = ui.put(field, widget);
+                    if std::mem::take(&mut e.fresh) {
+                        edit.request_focus();
+                    }
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if edit.lost_focus() || enter || escape {
+                        if enter && !escape {
+                            out.edit_commit = Some((e.page, e.object, e.text.clone()));
+                        } else {
+                            out.edit_cancel = true;
+                        }
+                    }
+                }
                 // The pointer over the page: text under it, links.
                 if let Some(pt) = pointer
                     && rect.contains(pt)
@@ -164,7 +219,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
             }
             // The selection: begun with a press on text, grown while
             // dragging, cleared by a plain click.
-            if response.drag_started_by(PointerButton::Primary) && hovered_link.is_none() {
+            if response.drag_started_by(PointerButton::Primary) && hovered_link.is_none() && !editing {
                 selection = char_under_pointer.map(|c| Selection { anchor: c, focus: c });
                 selecting = selection.is_some();
             }
@@ -180,8 +235,11 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                     selection = None;
                 }
             }
-            if response.clicked() && hovered_link.is_none() {
+            if response.clicked() && hovered_link.is_none() && out.edit_click.is_none() {
                 selection = None;
+                if editor.is_some() {
+                    out.edit_cancel = true;
+                }
             }
         });
     tab.selection = selection;

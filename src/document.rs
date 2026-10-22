@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::engine::{DocId, DocInfo, Engine, Event, Request, SIZE_BATCH};
-use crate::pdfium::{Link, OpenError, OutlineItem, TextLayout};
+use crate::pdfium::{Link, OpenError, OutlineItem, TextLayout, TextObject};
 
 /// A page's text with the transform that puts it on the page as shown.
 #[derive(Debug)]
@@ -78,6 +78,13 @@ pub struct DocState {
     text_asked: HashSet<usize>,
     pub links: HashMap<usize, Arc<Vec<Link>>>,
     links_asked: HashSet<usize>,
+    /// The text objects of the pages asked for (the editing).
+    pub objects: HashMap<usize, Arc<Vec<TextObject>>>,
+    objects_asked: HashSet<usize>,
+    /// How many edits the document carries; saved ones are kept.
+    pub edits: usize,
+    /// Edits made since the last save.
+    pub modified: bool,
 }
 
 /// A page size to lay a document out with before its first page is known
@@ -102,6 +109,10 @@ impl DocState {
             text_asked: HashSet::new(),
             links: HashMap::new(),
             links_asked: HashSet::new(),
+            objects: HashMap::new(),
+            objects_asked: HashSet::new(),
+            edits: 0,
+            modified: false,
         }
     }
 
@@ -166,6 +177,24 @@ impl DocState {
                 self.links.insert(*page, Arc::clone(links));
                 true
             }
+            Event::TextObjects { id, page, objects } if *id == self.id => {
+                self.objects.insert(*page, Arc::clone(objects));
+                true
+            }
+            Event::Edited { id, page, edits } if *id == self.id => {
+                // The page's text, links and objects describe the old content.
+                self.forget_page(*page);
+                if *edits == 0 {
+                    // Everything taken back: every edited page is as it was.
+                    let pages: Vec<usize> = self.objects.keys().copied().collect();
+                    for p in pages {
+                        self.forget_page(p);
+                    }
+                }
+                self.edits = *edits;
+                self.modified = *edits > 0;
+                true
+            }
             _ => false,
         }
     }
@@ -201,6 +230,23 @@ impl DocState {
         if self.ready() && page < self.page_count && !self.text.contains_key(&page) && self.text_asked.insert(page) {
             engine.request(Request::TextLayout { id: self.id, page });
         }
+    }
+
+    /// Ask for the text objects of `page` once.
+    pub fn need_objects(&mut self, engine: &Engine, page: usize) {
+        if self.ready() && page < self.page_count && !self.objects.contains_key(&page) && self.objects_asked.insert(page) {
+            engine.request(Request::TextObjects { id: self.id, page });
+        }
+    }
+
+    /// Forget what was read of `page`: asked again when needed.
+    pub fn forget_page(&mut self, page: usize) {
+        self.text.remove(&page);
+        self.text_asked.remove(&page);
+        self.links.remove(&page);
+        self.links_asked.remove(&page);
+        self.objects.remove(&page);
+        self.objects_asked.remove(&page);
     }
 
     /// Ask for the links of `page` once.
