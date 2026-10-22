@@ -108,6 +108,41 @@ pub fn line_rects(boxes: &[[f32; 4]], range: std::ops::Range<usize>) -> Vec<[f32
 
 /// The text of characters `range` of `layout`: PDFium's UTF-16 units
 /// decoded, its generated line breaks kept as `\n`.
+/// The word round character `index`: the first and last character
+/// (inclusive) of the run of letters and digits it is in; a punctuation
+/// mark is a word of its own; nothing on whitespace or a line break.
+pub fn word_at(layout: &TextLayout, index: usize) -> Option<(usize, usize)> {
+    let chars = &layout.chars;
+    // 2 a word character, 1 a mark, 0 whitespace or nothing.
+    let class = |i: usize| -> u8 {
+        let Some(c) = chars.get(i) else { return 0 };
+        if c.generated {
+            return 0;
+        }
+        match char::from_u32(c.code) {
+            Some(ch) if ch.is_alphanumeric() || ch == '_' => 2,
+            Some(ch) if ch.is_whitespace() => 0,
+            Some(_) => 1,
+            None => 0,
+        }
+    };
+    match class(index) {
+        0 => None,
+        1 => Some((index, index)),
+        _ => {
+            let mut start = index;
+            while start > 0 && class(start - 1) == 2 {
+                start -= 1;
+            }
+            let mut end = index;
+            while class(end + 1) == 2 {
+                end += 1;
+            }
+            Some((start, end))
+        }
+    }
+}
+
 pub fn text_of(layout: &TextLayout, range: std::ops::Range<usize>) -> String {
     let units: Vec<u16> = layout.chars[range.start.min(layout.chars.len())..range.end.min(layout.chars.len())]
         .iter()
@@ -120,6 +155,26 @@ pub fn text_of(layout: &TextLayout, range: std::ops::Range<usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_double_click_takes_the_word() {
+        let text = "Hello, wide world\r\n2026-10";
+        let layout = TextLayout {
+            chars: text
+                .encode_utf16()
+                .map(|u| crate::pdfium::Char { code: u32::from(u), rect: [0.0; 4], origin: [0.0; 2], generated: u == 13 || u == 10 })
+                .collect(),
+        };
+        assert_eq!(word_at(&layout, 0), Some((0, 4)), "Hello");
+        assert_eq!(word_at(&layout, 3), Some((0, 4)));
+        assert_eq!(word_at(&layout, 5), Some((5, 5)), "the comma");
+        assert_eq!(word_at(&layout, 6), None, "a space");
+        assert_eq!(word_at(&layout, 12), Some((12, 16)), "world");
+        assert_eq!(word_at(&layout, 17), None, "the line break");
+        assert_eq!(word_at(&layout, 19), Some((19, 22)), "2026, not across the hyphen");
+        assert_eq!(word_at(&layout, 24), Some((24, 25)), "10, to the end");
+        assert_eq!(word_at(&layout, 99), None);
+    }
     use crate::pdfium::Char;
 
     fn boxes() -> Vec<[f32; 4]> {

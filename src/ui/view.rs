@@ -638,6 +638,39 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                     *image = None;
                 }
             }
+            // A double click takes the word under the pointer (after the
+            // click above, which cleared the selection).
+            // The character is looked for at the click's own position:
+            // the hover position is not always there in the frame the
+            // button is let go of (the scroll area's drag, with the hand).
+            // A triple click counts too: egui calls a click a triple when
+            // the one before the last was within twice the double-click
+            // delay, checking the distance to the last click only, so a
+            // second double click on another word within a second of the
+            // first comes as a "triple".
+            if (response.double_clicked() || response.triple_clicked())
+                && hovered_link.is_none()
+                && !editing
+                && let Some(pos) = response.interact_pointer_pos().or(pointer)
+            {
+                for i in visible.clone() {
+                    let p = layout.pages[i];
+                    let rect = snap(Rect::from_min_size(origin + vec2(p[0], p[1]), vec2(p[2], p[3])), ppp);
+                    if !rect.contains(pos) {
+                        continue;
+                    }
+                    if let Some(text) = tab.doc.text.get(&i) {
+                        let on_page = screen_to_page_point(pos, turns, tab.doc.size_of(i), rect);
+                        if let Some(c) = selection::char_at(text.boxes(), on_page)
+                            && let Some((start, end)) = selection::word_at(&text.layout, c)
+                        {
+                            selection = Some(Selection { anchor: (i, start), focus: (i, end) });
+                            selecting = false;
+                        }
+                    }
+                    break;
+                }
+            }
         });
     tab.selection = selection;
     tab.selecting = selecting;
