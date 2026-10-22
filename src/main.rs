@@ -22,6 +22,7 @@ mod pdfium;
 mod pixels;
 mod placement;
 mod settings;
+mod single_instance;
 mod style;
 mod textures;
 mod ui;
@@ -67,6 +68,7 @@ fn main() -> eframe::Result {
     // The command line modes. `args_os`: `args` panics on an argument that
     // is not valid Unicode.
     let mut files: Vec<PathBuf> = Vec::new();
+    let mut new_instance = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -124,22 +126,40 @@ fn main() -> eframe::Result {
                 }
                 return Ok(());
             }
-            Some("--new-instance") => {}
+            Some("--new-instance") => new_instance = true,
             Some(flag) if flag.starts_with("--") => log::warn!("unknown option {flag}"),
             _ => files.push(normalize(Path::new(&arg))),
         }
     }
     files.dedup_by(|a, b| settings::same_path(a, b));
 
+    // A running copy takes the files (a few milliseconds instead of a
+    // second window); without one, this copy becomes the one that listens.
+    if !new_instance && single_instance::hand_off(&files) {
+        log::debug!("handed over to the running instance");
+        return Ok(());
+    }
+    let server = if new_instance { None } else { single_instance::Server::bind() };
+
     let settings = settings::Settings::load();
     // The language before anything is shown (About may change it later).
     i18n::set_lang(settings.language.resolve());
     let stored = settings::location();
 
-    // The engine starts now, opening and rendering the first file while
-    // the window is made (~150 ms): the first frame finds the page ready.
+    // Without files, the last session's tabs (those still there).
+    let (tabs, active, restored) = if files.is_empty() {
+        let session: Vec<PathBuf> = settings.session.iter().filter(|p| p.is_file()).cloned().collect();
+        let active = settings.session_active.min(session.len().saturating_sub(1));
+        (session, active, true)
+    } else {
+        (files, 0, false)
+    };
+
+    // The engine starts now, opening and rendering the shown tab's file
+    // while the window is made (~150 ms): the first frame finds the page
+    // ready.
     let first_id: engine::DocId = 1;
-    let initial = files.first().map(|path| {
+    let initial = tabs.get(active).map(|path| {
         let position = settings.position(path);
         let first = engine::FirstRender {
             viewport: predicted_viewport(&settings),
@@ -174,7 +194,7 @@ fn main() -> eframe::Result {
         centered: !stored.has_saved() || settings.window.is_none(),
         ..Default::default()
     };
-    let startup = app::Startup { files, settings, engine, first_id };
+    let startup = app::Startup { tabs, active, restored, settings, engine, first_id, server };
     eframe::run_native(APP_ID, options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, startup)))))
 }
 

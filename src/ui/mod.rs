@@ -6,6 +6,7 @@
 pub mod about;
 pub mod home;
 pub mod icons;
+pub mod menu;
 pub mod status;
 pub mod view;
 
