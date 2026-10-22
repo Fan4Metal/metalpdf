@@ -833,7 +833,7 @@ impl App {
     }
 
     /// Take the engine's answers.
-    fn poll_engine(&mut self) {
+    fn poll_engine(&mut self, ctx: &egui::Context) {
         while let Some(event) = self.engine.poll() {
             match event {
                 Event::Unavailable(reason) => {
@@ -866,6 +866,7 @@ impl App {
                         | Event::EditFailed { id, .. }
                         | Event::Restructured { id, .. }
                         | Event::Numbering { id, .. }
+                        | Event::ImagePixels { id, .. }
                         | Event::Saved { id, .. } => *id,
                         _ => continue,
                     };
@@ -889,6 +890,18 @@ impl App {
                         }
                         if reopen {
                             self.reopen_tab(doc);
+                        }
+                        continue;
+                    }
+                    if let Event::ImagePixels { picture, .. } = &other {
+                        if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
+                            match picture {
+                                Ok((w, h, rgba)) => {
+                                    ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba));
+                                    tab.notify(tr!(format!("Picture copied, {w} × {h}"), format!("Картинка скопирована, {w} × {h}")));
+                                }
+                                Err(e) => tab.notify(tr!(format!("The picture could not be copied: {e}"), format!("Не удалось скопировать картинку: {e}"))),
+                            }
                         }
                         continue;
                     }
@@ -2000,9 +2013,9 @@ impl App {
                 for page in out.visible.clone() {
                     tab.doc.need_text(engine, page);
                     tab.doc.need_links(engine, page);
-                    if tab.editing {
-                        tab.doc.need_objects(engine, page);
-                    }
+                    // The objects too: the context menu copies a picture
+                    // under the pointer in any mode.
+                    tab.doc.need_objects(engine, page);
                 }
                 if let Some((page, object)) = out.edit_click
                     && let (Some(objects), Some(text)) = (tab.doc.objects.get(&page), tab.doc.text.get(&page))
@@ -2064,6 +2077,9 @@ impl App {
                 }
                 if let Some(text) = out.copy_text {
                     ui.ctx().copy_text(text);
+                }
+                if let Some((page, object)) = out.copy_image {
+                    engine.request(Request::ImagePixels { id: tab.doc.id, page, object });
                 }
                 if let Some((page, object, rect, replace)) = out.image_menu {
                     tab.editor = None;
@@ -2430,7 +2446,7 @@ impl eframe::App for App {
         crate::textures::delete_dropped();
         self.updates.poll();
         self.uncloak(&ctx);
-        self.poll_engine();
+        self.poll_engine(&ctx);
         self.upload_pending(frame);
         if let Some(answer) = self.dialogs.take() {
             match answer.ask {

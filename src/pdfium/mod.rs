@@ -1120,6 +1120,78 @@ impl Page {
     }
 }
 
+impl Page {
+    /// The picture of image object `index` as shown (its matrix, masks and
+    /// colour keys applied): width, height and RGBA pixels, straight
+    /// alpha.
+    pub fn image_pixels(&self, index: usize) -> Result<(u32, u32, Vec<u8>), String> {
+        let api = self.api();
+        let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index as c_int) };
+        if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_IMAGE {
+            return Err("not an image object".into());
+        }
+        // Rendered at the image's own size, not the size it has on the
+        // page (PDFium renders a point as a pixel): the object's matrix is
+        // scaled to that many pixels for the render and put back after.
+        let mut matrix = sys::FS_MATRIX::default();
+        let had_matrix = unsafe { (api.FPDFPageObj_GetMatrix)(object, &mut matrix) } != 0;
+        let (mut pw, mut ph) = (0u32, 0u32);
+        let native = unsafe { (api.FPDFImageObj_GetImagePixelSize)(object, &mut pw, &mut ph) } != 0 && pw > 0 && ph > 0;
+        let rescaled = had_matrix && native;
+        if rescaled {
+            const LIMIT: u32 = 8192;
+            let across = (matrix.a * matrix.a + matrix.b * matrix.b).sqrt().max(1e-3);
+            let down = (matrix.c * matrix.c + matrix.d * matrix.d).sqrt().max(1e-3);
+            let (sx, sy) = (pw.min(LIMIT) as f32 / across, ph.min(LIMIT) as f32 / down);
+            let scaled = sys::FS_MATRIX { a: matrix.a * sx, b: matrix.b * sx, c: matrix.c * sy, d: matrix.d * sy, e: matrix.e, f: matrix.f };
+            unsafe { (api.FPDFPageObj_SetMatrix)(object, &scaled) };
+        }
+        let bitmap = unsafe { (api.FPDFImageObj_GetRenderedBitmap)(self.doc.handle, self.handle, object) };
+        if rescaled {
+            unsafe { (api.FPDFPageObj_SetMatrix)(object, &matrix) };
+        }
+        if bitmap.is_null() {
+            return Err("the picture could not be rendered".into());
+        }
+        let (width, height, stride, format) = unsafe {
+            ((api.FPDFBitmap_GetWidth)(bitmap), (api.FPDFBitmap_GetHeight)(bitmap), (api.FPDFBitmap_GetStride)(bitmap), (api.FPDFBitmap_GetFormat)(bitmap))
+        };
+        let result = if width <= 0 || height <= 0 || stride <= 0 {
+            Err("an empty picture".to_owned())
+        } else {
+            let (w, h, stride) = (width as usize, height as usize, stride as usize);
+            // SAFETY: the buffer is the bitmap's, `stride` × `height` bytes, alive until destroyed below.
+            let buffer = unsafe { std::slice::from_raw_parts((api.FPDFBitmap_GetBuffer)(bitmap) as *const u8, stride * h) };
+            let mut rgba = Vec::with_capacity(w * h * 4);
+            for row in buffer.chunks_exact(stride).take(h) {
+                for x in 0..w {
+                    match format {
+                        sys::FPDFBitmap_BGRA => {
+                            let p = &row[x * 4..x * 4 + 4];
+                            rgba.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+                        }
+                        sys::FPDFBitmap_BGRx => {
+                            let p = &row[x * 4..x * 4 + 4];
+                            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
+                        }
+                        sys::FPDFBitmap_BGR => {
+                            let p = &row[x * 3..x * 3 + 3];
+                            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
+                        }
+                        _ => {
+                            let g = row[x];
+                            rgba.extend_from_slice(&[g, g, g, 255]);
+                        }
+                    }
+                }
+            }
+            Ok((w as u32, h as u32, rgba))
+        };
+        unsafe { (api.FPDFBitmap_Destroy)(bitmap) };
+        result
+    }
+}
+
 impl Document {
     /// Write the document (its edits included) to `path`, through a
     /// temporary file beside it: the target is replaced only once the
@@ -1548,6 +1620,30 @@ pub mod tests {
         drop(again);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(saved).unwrap();
+    }
+
+    /// The picture on the sample's second page read back as shown: RGBA
+    /// pixels, not all alike.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn a_pictures_pixels_are_read() {
+        let api = api();
+        let path = sample_file("pixels");
+        let doc = Document::open(api, &path, None).unwrap();
+        let page = doc.load_page(1).unwrap();
+        let images = page.image_objects();
+        assert_eq!(images.len(), 1, "{images:?}");
+        let (w, h, rgba) = page.image_pixels(images[0].index).unwrap();
+        println!("picture {w}x{h}");
+        // The image's own size (2 × 2), not its 100 × 50 points on the page.
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        let pixels = rgba.as_chunks::<4>().0;
+        assert!(pixels.iter().any(|p| *p != pixels[0]), "all one colour");
+        assert!(page.image_pixels(0).is_err(), "object 0 is text");
+        drop(page);
+        drop(doc);
+        std::fs::remove_file(path).unwrap();
     }
 
     /// The picture on the sample's second page moved and resized, replaced

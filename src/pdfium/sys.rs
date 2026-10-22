@@ -314,6 +314,14 @@ api! {
     FPDFBitmap_CreateEx: fn(c_int, c_int, c_int, *mut c_void, c_int) -> FPDF_BITMAP;
     FPDFBitmap_FillRect: fn(FPDF_BITMAP, c_int, c_int, c_int, c_int, FPDF_DWORD) -> FPDF_BOOL;
     FPDFBitmap_Destroy: fn(FPDF_BITMAP);
+    FPDFBitmap_GetBuffer: fn(FPDF_BITMAP) -> *mut c_void;
+    FPDFBitmap_GetWidth: fn(FPDF_BITMAP) -> c_int;
+    FPDFBitmap_GetHeight: fn(FPDF_BITMAP) -> c_int;
+    FPDFBitmap_GetStride: fn(FPDF_BITMAP) -> c_int;
+    FPDFBitmap_GetFormat: fn(FPDF_BITMAP) -> c_int;
+    // An image object rendered as shown (its matrix, masks and colour keys
+    // applied) into a bitmap of PDFium's, to be destroyed by the caller.
+    FPDFImageObj_GetRenderedBitmap: fn(FPDF_DOCUMENT, FPDF_PAGE, FPDF_PAGEOBJECT) -> FPDF_BITMAP;
     FPDF_RenderPageBitmap: fn(FPDF_BITMAP, FPDF_PAGE, c_int, c_int, c_int, c_int, c_int, c_int);
     FPDF_RenderPageBitmapWithMatrix: fn(FPDF_BITMAP, FPDF_PAGE, *const FS_MATRIX, *const FS_RECTF, c_int);
     FPDF_PageToDevice: fn(FPDF_PAGE, c_int, c_int, c_int, c_int, c_int, c_double, c_double, *mut c_int, *mut c_int) -> FPDF_BOOL;

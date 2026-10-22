@@ -95,6 +95,8 @@ pub struct ViewOutput {
     pub image_menu: Option<(usize, usize, [f32; 4], bool)>,
     pub toggle_edit: bool,
     pub set_tool: Option<Tool>,
+    /// Copy the picture (page, object) to the clipboard.
+    pub copy_image: Option<(usize, usize)>,
     /// The renders wanted, most urgent first: `(key, tier)`.
     pub wanted: Vec<(RenderKey, u8)>,
     /// The pages in view.
@@ -346,6 +348,18 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                         }
                     }
                 }
+                // The picture under the right button, in any mode: the menu
+                // copies it.
+                if menu_opened
+                    && let (Some(objects), Some(text), Some(pt)) = (tab.doc.objects.get(&i), text, pointer)
+                {
+                    for img in objects.images.iter() {
+                        let on_page = text.rect_to_page(img.bounds);
+                        if page_rect_to_screen(on_page, turns, size, rect).contains(pt) {
+                            menu.image = Some((i, img.index, on_page));
+                        }
+                    }
+                }
                 // The images, outlined; the selected one with handles to move
                 // and resize it, and its buttons.
                 if editing
@@ -536,13 +550,19 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                     ui.separator();
                 }
                 if let Some((page, object, rect)) = menu.image {
-                    if item(ui, true, tr!("Replace the picture…", "Заменить картинку…"), "") {
-                        out.image_menu = Some((page, object, rect, true));
+                    if item(ui, true, tr!("Copy the picture", "Копировать картинку"), "") {
+                        out.copy_image = Some((page, object));
                         ui.close();
                     }
-                    if item(ui, true, tr!("Delete the picture", "Удалить картинку"), "Del") {
-                        out.image_menu = Some((page, object, rect, false));
-                        ui.close();
+                    if editing {
+                        if item(ui, true, tr!("Replace the picture…", "Заменить картинку…"), "") {
+                            out.image_menu = Some((page, object, rect, true));
+                            ui.close();
+                        }
+                        if item(ui, true, tr!("Delete the picture", "Удалить картинку"), "Del") {
+                            out.image_menu = Some((page, object, rect, false));
+                            ui.close();
+                        }
                     }
                     ui.separator();
                 }

@@ -107,6 +107,8 @@ pub enum Request {
     StopSearch(DocId),
     /// The text and image objects of a page, for the editing.
     Objects { id: DocId, page: usize },
+    /// The pixels of an image object as shown (`Event::ImagePixels`).
+    ImagePixels { id: DocId, page: usize, object: usize },
     /// An edit of a page's object.
     Edit { id: DocId, edit: Edit },
     /// Take the last edit back.
@@ -133,6 +135,8 @@ pub enum Event {
     /// when they do not (`Request::DetectNumbering`).
     Numbering { id: DocId, shift: Option<i32> },
     Objects { id: DocId, page: usize, objects: Arc<PageObjects> },
+    /// An image object's picture: width, height, RGBA; or why not.
+    ImagePixels { id: DocId, picture: Result<(u32, u32, Vec<u8>), String> },
     /// `page` changed (an edit, or one taken back); `edits` is how many
     /// remain.
     Edited { id: DocId, page: usize, edits: usize },
@@ -562,6 +566,13 @@ impl Worker {
                     o.stand_in = self.fonts.stand_in_name(&o.font, o.flags);
                 }
                 self.send(Event::Objects { id, page, objects: Arc::new(objects) });
+            }
+            Request::ImagePixels { id, page, object } => {
+                let picture = match self.page(id, page) {
+                    Some(p) => p.image_pixels(object),
+                    None => Err("the page could not be loaded".to_owned()),
+                };
+                self.send(Event::ImagePixels { id, picture });
             }
             Request::Edit { id, edit } => match self.edit(id, edit.clone()) {
                 Ok(edits) => {
