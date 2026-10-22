@@ -24,6 +24,8 @@ pub struct AboutDialog {
     /// Interface language (kept in the settings).
     pub lang: LangChoice,
     icon: Option<TextureHandle>,
+    /// The Licenses window, shown in place of About.
+    licenses: Option<super::licenses::LicensesView>,
 }
 
 impl AboutDialog {
@@ -40,6 +42,13 @@ impl AboutDialog {
             return;
         }
         let fresh = std::mem::take(&mut self.fresh);
+        if let Some(licenses) = self.licenses.as_mut() {
+            if licenses.show(ctx) {
+                self.licenses = None;
+            }
+            return;
+        }
+        let mut open_licenses = false;
         let icon = super::app_icon(ctx, ICON, &mut self.icon);
         let modal = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
             ui.set_width(340.0);
@@ -74,9 +83,21 @@ impl AboutDialog {
                 {
                     log::warn!("could not open {REPOSITORY}");
                 }
-                if !LICENSE.is_empty() {
-                    ui.weak(tr!(format!("{LICENSE} License"), format!("Лицензия {LICENSE}")));
-                }
+                ui.horizontal(|ui| {
+                    // The licence line, with the texts behind a link; centred
+                    // by hand (a horizontal row ignores `vertical_centered`).
+                    let text = tr!(format!("{LICENSE} License"), format!("Лицензия {LICENSE}"));
+                    let link = tr!("Licenses…", "Лицензии…");
+                    let width = ui.fonts_mut(|f| {
+                        f.layout_no_wrap(format!("{text} · {link}"), egui::FontId::proportional(14.0), egui::Color32::WHITE).size().x
+                    });
+                    ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                    ui.weak(text);
+                    ui.weak("·");
+                    if ui.link(link).on_hover_text(tr!("PDFium, the libraries and the fonts", "PDFium, библиотеки и шрифты")).clicked() {
+                        open_licenses = true;
+                    }
+                });
                 let stored = crate::settings::location();
                 let place = ui.weak(if stored.portable {
                     tr!("Settings: next to the program (portable)", "Настройки: рядом с программой (портативно)")
@@ -119,6 +140,10 @@ impl AboutDialog {
             });
             closed
         });
+        if open_licenses {
+            self.licenses = Some(super::licenses::LicensesView::default());
+            return;
+        }
         let closed = modal.inner
             || (!fresh
                 && (ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))

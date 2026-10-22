@@ -55,6 +55,11 @@ pub const MIN_SIZE: [f32; 2] = [480.0, 320.0];
 /// frame).
 pub static MAXIMIZE_WHEN_SHOWN: AtomicBool = AtomicBool::new(false);
 
+/// `--screenshot FILE.png`: the window's picture is written there after a
+/// few frames and the program ends (the README's screenshot; on an NVIDIA
+/// machine the OpenGL area cannot be captured from outside).
+pub static SCREENSHOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 /// Time since `main` began, for the trace marks.
@@ -103,6 +108,7 @@ fn main() -> eframe::Result {
                 println!("  --new-instance              a window of its own instead of a tab in the running one");
                 println!("  --bench FILE.pdf            the engine's timings for one file, no window");
                 println!("  --export-icon FILE.ico|png  the app icon");
+                println!("  --screenshot FILE.png       the window's picture after a few frames, then exit");
                 println!("  --version, --help");
                 return Ok(());
             }
@@ -129,6 +135,14 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
             Some("--new-instance") => new_instance = true,
+            Some("--screenshot") => {
+                let Some(file) = args.next() else {
+                    eprintln!("--screenshot needs a PNG file name");
+                    std::process::exit(2);
+                };
+                let _ = SCREENSHOT.set(PathBuf::from(file));
+                new_instance = true;
+            }
             Some(flag) if flag.starts_with("--") => log::warn!("unknown option {flag}"),
             _ => files.push(normalize(Path::new(&arg))),
         }

@@ -22,8 +22,6 @@ pub struct Texture {
     gl: Arc<glow::Context>,
     native: glow::Texture,
     id: egui::TextureId,
-    pub width: u32,
-    pub height: u32,
     /// Bytes of every level, for the cache's budget.
     pub bytes: usize,
 }
@@ -83,7 +81,7 @@ impl Texture {
             started.elapsed().as_secs_f64() * 1e3
         );
         let id = register(native);
-        Ok(Self { gl, native, id, width: pixels.width, height: pixels.height, bytes: pixels.bytes() })
+        Ok(Self { gl, native, id, bytes: pixels.bytes() })
     }
 
     pub fn id(&self) -> egui::TextureId {

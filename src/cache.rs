@@ -109,10 +109,12 @@ impl<T> Pool<T> {
         }
     }
 
+    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.bytes
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }

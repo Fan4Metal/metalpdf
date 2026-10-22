@@ -278,10 +278,6 @@ impl Settings {
         self.recent.truncate(MAX_RECENT);
     }
 
-    pub fn remove_recent(&mut self, path: &Path) {
-        self.recent.retain(|p| !same_path(p, path));
-    }
-
     /// Where the document at `path` was left.
     pub fn position(&self, path: &Path) -> Option<&FilePosition> {
         self.positions.iter().find(|p| same_path(&p.path, path))

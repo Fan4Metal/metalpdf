@@ -104,16 +104,8 @@ pub fn pick_files(dialog: rfd::FileDialog) -> Vec<PathBuf> {
     dialog.pick_files().unwrap_or_default()
 }
 
-pub fn pick_file(dialog: rfd::FileDialog) -> Vec<PathBuf> {
-    dialog.pick_file().into_iter().collect()
-}
-
 pub fn save_file(dialog: rfd::FileDialog) -> Vec<PathBuf> {
     dialog.save_file().into_iter().collect()
-}
-
-pub fn pick_folder(dialog: rfd::FileDialog) -> Vec<PathBuf> {
-    dialog.pick_folder().into_iter().collect()
 }
 
 /// The app's window as a dialog's owner, from another thread.

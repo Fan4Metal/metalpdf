@@ -1951,6 +1951,34 @@ impl App {
         }
     }
 
+    /// `--screenshot`: ask for the window's picture once the pages have
+    /// been rendered and uploaded, write it and end.
+    fn screenshot(&mut self, ctx: &egui::Context) {
+        let Some(path) = crate::SCREENSHOT.get() else { return };
+        if self.frame == 60 {
+            ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        if self.frame < 120 {
+            ctx.request_repaint();
+        }
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let [w, h] = image.size;
+            let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+            match crate::bench::write_rgba_png(path, &rgba, w as u32, h as u32) {
+                Ok(()) => log::info!("screenshot written to {}", path.display()),
+                Err(e) => log::error!("screenshot: {e}"),
+            }
+            self.quitting = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+    }
+
     /// Remember the root window's place, a second after it last changed.
     fn track_window(&mut self, ctx: &egui::Context) {
         if self.cloak.is_some() {
@@ -2095,6 +2123,7 @@ impl eframe::App for App {
         self.about.show(&ctx, &mut self.updates);
         self.confirm_dialog(&ctx);
         self.follow_theme(&ctx);
+        self.screenshot(&ctx);
         // The renders every window wants, the most urgent first.
         let mut wanted = std::mem::take(&mut self.wanted);
         wanted.sort_by_key(|(_, tier)| *tier);

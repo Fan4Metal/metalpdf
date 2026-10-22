@@ -5,7 +5,8 @@
 //! render (while zooming out, in the sidebar) does not shimmer.
 
 /// An image with its mip levels: level 0 first, each next one half the
-/// size (rounded up), down to 1 × 1. Every level is BGRx, 4 bytes a pixel,
+/// size (rounded down, as OpenGL sizes a mipmap chain: a level of another
+/// size makes the texture incomplete, which samples black), down to 1 × 1. Every level is BGRx, 4 bytes a pixel,
 /// rows packed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pixels {
@@ -22,7 +23,7 @@ impl Pixels {
         let mut levels = vec![bgrx];
         let (mut w, mut h) = (width, height);
         while w > 1 || h > 1 {
-            let (nw, nh) = (w.div_ceil(2), h.div_ceil(2));
+            let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
             let next = half(levels.last().expect("level 0"), w, h, nw, nh);
             levels.push(next);
             (w, h) = (nw, nh);
@@ -36,13 +37,9 @@ impl Pixels {
     }
 
     /// The size of level `level` (each level halves the one above, rounded
-    /// up).
+    /// down, as OpenGL does).
     pub fn level_size(&self, level: usize) -> (u32, u32) {
-        let (mut w, mut h) = (self.width, self.height);
-        for _ in 0..level {
-            (w, h) = (w.div_ceil(2), h.div_ceil(2));
-        }
-        (w.max(1), h.max(1))
+        ((self.width >> level).max(1), (self.height >> level).max(1))
     }
 
     /// The pixels of the first level no wider than `max_width` (the last
@@ -61,7 +58,7 @@ impl Pixels {
 }
 
 /// `src` (`w` × `h`) halved into `nw` × `nh` by averaging 2×2 blocks (an
-/// odd last row or column is averaged with itself).
+/// odd last row or column is left out, as the sizes round down).
 fn half(src: &[u8], w: u32, h: u32, nw: u32, nh: u32) -> Vec<u8> {
     let (w, h, nw, nh) = (w as usize, h as usize, nw as usize, nh as usize);
     let mut out = vec![0u8; nw * nh * 4];
@@ -86,21 +83,26 @@ mod tests {
 
     #[test]
     fn levels_halve_down_to_one_pixel() {
-        // 3 × 2: an odd width.
+        // 3 × 2: an odd width, its last column left out of the levels.
         let row0 = [0u8, 0, 0, 255, 100, 100, 100, 255, 200, 200, 200, 255];
         let row1 = [50u8, 50, 50, 255, 150, 150, 150, 255, 250, 250, 250, 255];
         let mut bgrx = row0.to_vec();
         bgrx.extend_from_slice(&row1);
         let p = Pixels::with_levels(3, 2, bgrx);
-        assert_eq!(p.levels.len(), 3);
-        assert_eq!(p.level_size(1), (2, 1));
-        assert_eq!(p.level_size(2), (1, 1));
-        // The first block averages 0, 100, 50, 150 = 75; the odd column
-        // averages 200 and 250 with themselves = 225.
+        assert_eq!(p.levels.len(), 2);
+        assert_eq!(p.level_size(1), (1, 1));
+        // The one block averages 0, 100, 50, 150 = 75.
         assert_eq!(&p.levels[1][..4], &[75, 75, 75, 255]);
-        assert_eq!(&p.levels[1][4..8], &[225, 225, 225, 255]);
-        assert_eq!(p.level_at_most(2).width, 2);
+        assert_eq!(p.levels[1].len(), 4);
+        assert_eq!(p.level_at_most(1).width, 1);
         assert_eq!(p.level_at_most(1).levels.len(), 1);
-        assert_eq!(p.bytes(), 24 + 8 + 4);
+        assert_eq!(p.bytes(), 24 + 4);
+        // Every level is exactly the size OpenGL expects of it.
+        let q = Pixels::with_levels(1626, 2104, vec![0; 1626 * 2104 * 4]);
+        for (l, data) in q.levels.iter().enumerate() {
+            let (w, h) = q.level_size(l);
+            assert_eq!(data.len(), (w * h * 4) as usize, "level {l}");
+            assert_eq!((w, h), ((1626u32 >> l).max(1), (2104u32 >> l).max(1)));
+        }
     }
 }

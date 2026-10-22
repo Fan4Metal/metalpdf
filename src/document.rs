@@ -267,6 +267,7 @@ impl DocState {
     }
 
     /// The page with `label` (a document's own numbering), or a number.
+    #[cfg(test)]
     pub fn page_by_label(&self, text: &str) -> Option<usize> {
         let text = text.trim();
         if text.is_empty() {

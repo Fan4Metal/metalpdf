@@ -209,11 +209,6 @@ impl Engine {
         Some(event)
     }
 
-    /// Whether `key` is being rendered or is on its way.
-    pub fn in_flight(&self, key: &RenderKey) -> bool {
-        let q = self.shared.queue.lock().unwrap();
-        q.busy == Some(*key) || q.done.contains(key)
-    }
 }
 
 impl Drop for Engine {
@@ -248,7 +243,6 @@ struct EditEntry {
 /// the viewed one staying as it is; undo rebuilds it from the log.
 struct EditState {
     doc: Document,
-    path: PathBuf,
     log: Vec<EditEntry>,
     /// The pages rendered from the edited copy.
     edited: HashSet<usize>,
@@ -465,7 +459,7 @@ impl Worker {
             if !obstacles.is_empty() {
                 return Err(format!("the document is {}", obstacles.join(" and ")));
             }
-            self.edits.insert(id, EditState { doc, path, log: Vec::new(), edited: HashSet::new() });
+            self.edits.insert(id, EditState { doc, log: Vec::new(), edited: HashSet::new() });
         }
         if self.fallback_font.is_none() {
             let fonts = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
@@ -493,7 +487,7 @@ impl Worker {
             return Ok(0);
         }
         let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
-        self.edits.insert(id, EditState { doc, path, log: Vec::new(), edited: HashSet::new() });
+        self.edits.insert(id, EditState { doc, log: Vec::new(), edited: HashSet::new() });
         let count = log.len();
         for entry in log {
             self.edit_text(id, entry.page, entry.object, entry.text)?;

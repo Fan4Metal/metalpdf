@@ -204,7 +204,7 @@ impl Document {
         if !self.inner.form.is_null() {
             unsafe { (self.api().FORM_OnAfterLoadPage)(handle, self.inner.form) };
         }
-        Some(Page { doc: Rc::clone(&self.inner), handle, index, text: RefCell::new(None), rendering: Cell::new(false) })
+        Some(Page { doc: Rc::clone(&self.inner), handle, text: RefCell::new(None), rendering: Cell::new(false) })
     }
 
     /// A document information field: `Title`, `Author`, `Subject`,
@@ -393,7 +393,6 @@ unsafe extern "C" fn need_to_pause(this: *mut sys::IFSDK_PAUSE) -> sys::FPDF_BOO
 pub struct Page {
     doc: Rc<DocumentInner>,
     handle: sys::FPDF_PAGE,
-    pub index: usize,
     text: RefCell<Option<sys::FPDF_TEXTPAGE>>,
     /// A progressive render is under way: `render_close` is owed.
     rendering: Cell<bool>,
@@ -540,11 +539,6 @@ impl Page {
         *text
     }
 
-    /// How many characters the page's text has.
-    pub fn char_count(&self) -> usize {
-        self.text_page().map_or(0, |t| unsafe { (self.api().FPDFText_CountChars)(t) }.max(0) as usize)
-    }
-
     /// Every character with its box (page space, points).
     pub fn text_layout(&self) -> TextLayout {
         let api = self.api();
@@ -571,6 +565,7 @@ impl Page {
     }
 
     /// The text of characters `start..start + count`.
+    #[cfg(test)]
     pub fn text(&self, start: usize, count: usize) -> String {
         let api = self.api();
         let Some(text) = self.text_page() else {
@@ -897,7 +892,10 @@ pub struct Bitmap {
     api: &'static Api,
     handle: sys::FPDF_BITMAP,
     pixels: Box<[u8]>,
+    /// Read by the tests and `fill`.
+    #[allow(dead_code)]
     pub width: u32,
+    #[allow(dead_code)]
     pub height: u32,
 }
 
@@ -927,6 +925,7 @@ impl Bitmap {
     }
 
     /// Fill the whole bitmap with `argb` (0xFFFFFFFF: white).
+    #[cfg(test)]
     pub fn fill(&mut self, argb: u32) {
         unsafe {
             (self.api.FPDFBitmap_FillRect)(self.handle, 0, 0, self.width as c_int, self.height as c_int, argb);
@@ -1247,6 +1246,40 @@ pub mod tests {
             }
         }
         assert!(tried > 0, "no page with text objects among the first 20");
+    }
+
+    /// On a real document (`METALPDF_SAMPLE`): the first page rendered
+    /// plainly, progressively without a pause and progressively pausing at
+    /// every chance, all three alike; prints how dark each came out.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_real_page_renders_alike_progressively() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let api = api();
+        let doc = Document::open(api, Path::new(&sample), None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let [w, h] = page.size();
+        let (bw, bh) = ((w * 1.5) as u32, (h * 1.5) as u32);
+        let at = Placement { start_x: 0, start_y: 0, size_x: bw as i32, size_y: bh as i32, rotate: 0 };
+        let dark = |b: &Bitmap| b.pixels().chunks(4).filter(|p| p[0] < 64 && p[1] < 64 && p[2] < 64).count();
+        let mut plain = Bitmap::new(api, bw, bh).unwrap();
+        page.render(&mut plain, at, sys::FPDF_ANNOT);
+        let mut never = Bitmap::new(api, bw, bh).unwrap();
+        let mut no_pause = Pause::new(|| false);
+        let status = page.render_start(&mut never, at, sys::FPDF_ANNOT, None, &mut no_pause);
+        assert_eq!(status, RenderStatus::Done);
+        let mut always = Bitmap::new(api, bw, bh).unwrap();
+        let mut pause = Pause::new(|| true);
+        let mut status = page.render_start(&mut always, at, sys::FPDF_ANNOT, None, &mut pause);
+        let mut rounds = 0;
+        while status == RenderStatus::Paused {
+            status = page.render_continue(&mut always, at, sys::FPDF_ANNOT, &mut pause);
+            rounds += 1;
+        }
+        println!("plain dark {}, progressive dark {}, paused ({rounds} rounds) dark {}", dark(&plain), dark(&never), dark(&always));
+        assert_eq!(status, RenderStatus::Done);
+        assert_same_picture(plain.pixels(), never.pixels(), "progressive without pauses");
+        assert_same_picture(plain.pixels(), always.pixels(), "progressive with pauses");
     }
 
     #[test]
