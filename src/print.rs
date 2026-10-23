@@ -371,13 +371,18 @@ impl Job {
             SetStretchBltMode(self.dc, HALFTONE);
             StretchDIBits(self.dc, rect[0], rect[1], rect[2], rect[3], 0, 0, width as i32, height as i32, pixels.as_ptr().cast(), &info, DIB_RGB_COLORS, SRCCOPY)
         };
-        if lines == 0 { Err("the printer did not take the picture".into()) } else { Ok(()) }
+        // No rows copied, or GDI_ERROR (-1).
+        if lines <= 0 { Err("the printer did not take the picture".into()) } else { Ok(()) }
     }
 
     /// The document ended: the spooler prints it.
     pub fn finish(mut self) -> Result<(), String> {
+        if unsafe { EndDoc(self.dc) } <= 0 {
+            // Still open: `drop` aborts it.
+            return Err("the printer did not finish the document".into());
+        }
         self.open = false;
-        if unsafe { EndDoc(self.dc) } <= 0 { Err("the printer did not finish the document".into()) } else { Ok(()) }
+        Ok(())
     }
 }
 

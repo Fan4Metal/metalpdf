@@ -282,7 +282,7 @@ fn lead(before: &str, max: usize) -> String {
     let tail: String = before.chars().skip(count - max).collect();
     // A word's start within the tail, unless that leaves too little.
     let tail = match tail.find(' ') {
-        Some(i) if tail.len() - i > max / 2 => tail[i + 1..].to_owned(),
+        Some(i) if tail[i..].chars().count() > max / 2 => tail[i + 1..].to_owned(),
         _ => tail,
     };
     format!("…{tail}")

@@ -5,7 +5,7 @@
 //! family has (theme switch, About, update check, dark caption, settings).
 //! The model of windows and tabs is MetalMD's.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -371,6 +371,10 @@ pub struct App {
     uploads: VecDeque<(RenderKey, Pixels)>,
     /// The renders every window wants this frame.
     wanted: Vec<(RenderKey, u8)>,
+    /// Renders the engine could not make (a page of no size, a broken
+    /// page object): not asked for again, or the two sides would spin
+    /// asking and failing every frame.
+    failed_renders: HashSet<RenderKey>,
     theme: ThemePreference,
     about: AboutDialog,
     updates: Updates,
@@ -567,6 +571,7 @@ impl App {
             textures: Textures::default(),
             uploads: VecDeque::new(),
             wanted: Vec::new(),
+            failed_renders: HashSet::new(),
             about,
             updates,
             dialogs: Dialogs::default(),
@@ -779,6 +784,7 @@ impl App {
             if let Some(t) = window.tabs.iter_mut().find(|t| t.doc.id == doc) {
                 self.textures.remove_doc(doc);
                 self.uploads.retain(|(k, _)| k.doc != doc);
+                self.failed_renders.retain(|k| k.doc != doc);
                 self.engine.request(Request::Close(doc));
                 self.engine.request(Request::Open { id: new_id, path: t.path.clone(), password: None, first: None });
                 let page_shift = t.doc.page_shift;
@@ -1012,6 +1018,7 @@ impl App {
         }
         self.textures.remove_doc(tab.doc.id);
         self.uploads.retain(|(k, _)| k.doc != tab.doc.id);
+        self.failed_renders.retain(|k| k.doc != tab.doc.id);
         self.engine.request(Request::Close(tab.doc.id));
     }
 
@@ -1046,7 +1053,11 @@ impl App {
                         self.uploads.push_back((key, pixels));
                     }
                 }
-                Event::RenderFailed(key) => log::warn!("page {} could not be rendered", key.page + 1),
+                Event::RenderFailed(key) => {
+                    if self.failed_renders.insert(key) {
+                        log::warn!("page {} could not be rendered", key.page + 1);
+                    }
+                }
                 Event::PrintProgress { id, done, total } => self.printing = Some((id, done, total)),
                 Event::Printed { id, outcome } => {
                     self.printing = None;
@@ -1144,6 +1155,7 @@ impl App {
                         // everything read of the pages go.
                         self.textures.remove_doc(doc);
                         self.uploads.retain(|(k, _)| k.doc != doc);
+                        self.failed_renders.retain(|k| k.doc != doc);
                         let engine = &self.engine;
                         if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
                             tab.doc.restructure(engine, *page_count);
@@ -2814,6 +2826,7 @@ impl eframe::App for App {
         self.screenshot(&ctx);
         // The renders every window wants, the most urgent first.
         let mut wanted = std::mem::take(&mut self.wanted);
+        wanted.retain(|(k, _)| !self.failed_renders.contains(k));
         wanted.sort_by_key(|(_, tier)| *tier);
         wanted.dedup_by_key(|(k, _)| *k);
         self.engine.want(wanted);

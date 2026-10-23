@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 /// Compared with the release tag; not `main::VERSION`, which carries the
-/// commit of a `-dev` build. `X.Y.Z-dev` comes before release `X.Y.Z`,
-/// so a development build is offered its own release.
+/// commit of a `-dev` build. The `-dev` is dropped (`parse_version`): a
+/// development build counts as the release it leads to.
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const API_HOST: &str = "api.github.com";
 /// Automatic checks are at least this far apart, in seconds.

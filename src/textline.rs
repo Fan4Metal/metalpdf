@@ -49,6 +49,10 @@ const WORD_GAP: f32 = 0.18;
 /// Objects further apart than this share of the font size are on separate
 /// lines (table columns), even on one baseline.
 const LINE_GAP: f32 = 1.5;
+/// An object that starts further back than this share of the font size
+/// before the last one's ink ends is drawn over it (a fake bold, a
+/// shadow), not after it: kerned pairs overlap by a fraction of a point.
+const OVERLAP: f32 = 0.3;
 
 /// Where an object lies: along its direction (the ink's start and end)
 /// and across it (the baseline).
@@ -79,7 +83,11 @@ fn continues(prev: &Placed, next: &Placed) -> bool {
     let size = prev.object.font_size.max(next.object.font_size).max(0.1);
     let same_direction = (prev.direction[0] - next.direction[0]).abs() < 0.01 && (prev.direction[1] - next.direction[1]).abs() < 0.01;
     let ratio = prev.object.font_size.max(0.1) / next.object.font_size.max(0.1);
-    same_direction && (prev.baseline - next.baseline).abs() < 0.2 * size && (0.8..=1.25).contains(&ratio) && next.start - prev.end < LINE_GAP * size
+    let gap = next.start - prev.end;
+    // Kerned pairs overlap by a fraction of a point; an object that starts
+    // well inside the one before is drawn over it (a fake bold, a shadow:
+    // the same text again), not after it.
+    same_direction && (prev.baseline - next.baseline).abs() < 0.2 * size && (0.8..=1.25).contains(&ratio) && gap < LINE_GAP * size && gap > -OVERLAP * size
 }
 
 /// The page's lines, every text object in one.
@@ -256,6 +264,17 @@ mod tests {
         assert_eq!(lines[0].text, "Answers to even");
         assert_eq!(lines[0].fragments.iter().map(|f| f.object).collect::<Vec<_>>(), [4, 5, 6, 7, 8]);
         assert_eq!(lines[0].fragments[1], Fragment { object: 5, start: 4, end: 9 });
+    }
+
+    #[test]
+    fn a_run_drawn_over_another_is_not_its_continuation() {
+        // A fake bold: the same text again, a fifth of a point along.
+        let mut objects = vec![run(0, 10.0, 100.0, "Heading"), run(1, 10.2, 100.0, "Heading")];
+        let texts = |objects: &[TextObject]| lines(objects).iter().map(|l| l.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&objects), ["Heading", "Heading"]);
+        // A kerned pair, overlapping by a fraction of a point, is one line.
+        objects[1] = run(1, 10.0 + 7.0 * 4.5 - 0.4, 100.0, "s");
+        assert_eq!(texts(&objects), ["Headings"]);
     }
 
     #[test]

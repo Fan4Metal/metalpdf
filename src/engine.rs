@@ -1202,6 +1202,7 @@ mod tests {
             drop(printed);
             std::fs::remove_file(&out).ok();
         }
+        std::fs::remove_file(&source).ok();
     }
 
     #[test]

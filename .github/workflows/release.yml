@@ -36,6 +36,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # get_pdfium.py unpacks with tarfile's `filter="data"` (3.12).
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Install Inno Setup
         shell: pwsh
         run: |

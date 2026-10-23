@@ -126,6 +126,8 @@ fn main() -> eframe::Result {
             }
             Some("--register" | "--unregister") => {
                 let register = arg.to_str() == Some("--register");
+                // The ProgID's names in the chosen language.
+                i18n::set_lang(settings::Settings::load().language.resolve());
                 let result = match std::env::current_exe() {
                     Ok(exe) if register => assoc::register(&exe),
                     Ok(_) => assoc::unregister(),
@@ -140,6 +142,7 @@ fn main() -> eframe::Result {
             Some("--new-instance") => new_instance = true,
             Some("--screenshot") => {
                 let Some(file) = args.next() else {
+                    win::attach_parent_console();
                     eprintln!("--screenshot needs a PNG file name");
                     std::process::exit(2);
                 };
@@ -150,7 +153,14 @@ fn main() -> eframe::Result {
             _ => files.push(normalize(Path::new(&arg))),
         }
     }
-    files.dedup_by(|a, b| settings::same_path(a, b));
+    // Each file once (`a b a` as well as `a a`).
+    let mut once: Vec<PathBuf> = Vec::new();
+    for file in files {
+        if !once.iter().any(|f| settings::same_path(f, &file)) {
+            once.push(file);
+        }
+    }
+    let files = once;
 
     // A running copy takes the files (a few milliseconds instead of a
     // second window); without one, this copy becomes the one that listens.
@@ -158,7 +168,23 @@ fn main() -> eframe::Result {
         log::debug!("handed over to the running instance");
         return Ok(());
     }
-    let server = if new_instance { None } else { single_instance::Server::bind() };
+    let mut server = if new_instance { None } else { single_instance::Server::bind() };
+    if !new_instance && server.is_none() {
+        // Another copy bound the pipe between the hand-off and the bind
+        // (Explorer starts one process per file selected): it takes the
+        // files, once it listens.
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if single_instance::hand_off(&files) {
+                log::debug!("handed over to the copy that bound first");
+                return Ok(());
+            }
+            server = single_instance::Server::bind();
+            if server.is_some() {
+                break;
+            }
+        }
+    }
 
     let settings = settings::Settings::load();
     // The language before anything is shown (About may change it later).
@@ -167,7 +193,10 @@ fn main() -> eframe::Result {
 
     // Without files, the last session's tabs (those still there).
     let (tabs, active, restored) = if files.is_empty() {
-        let session: Vec<PathBuf> = settings.session.iter().filter(|p| p.is_file()).cloned().collect();
+        // A network share that is away blocks `is_file` for its timeout,
+        // before the window: a UNC path is taken on trust (a file gone
+        // makes a tab with the error).
+        let session: Vec<PathBuf> = settings.session.iter().filter(|p| p.starts_with(r"\\") || p.is_file()).cloned().collect();
         let active = settings.session_active.min(session.len().saturating_sub(1));
         (session, active, true)
     } else {

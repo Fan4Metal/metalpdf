@@ -5,7 +5,7 @@
 //! settings, the sheet's size) is asked on a thread of its own, as it can
 //! take a while for a network printer.
 
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Align, Color32, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
@@ -148,15 +148,23 @@ impl PrintDialog {
     }
 
     fn take_answers(&mut self, ctx: &egui::Context) {
-        if let Some(answer) = self.pending.as_ref().and_then(|r| r.try_recv().ok()) {
-            self.pending = None;
-            if let Some((names, _)) = answer.printers {
-                self.printers = names;
+        match self.pending.as_ref().map(|r| r.try_recv()) {
+            Some(Ok(answer)) => {
+                self.pending = None;
+                if let Some((names, _)) = answer.printers {
+                    self.printers = names;
+                    self.listed = true;
+                }
+                if answer.state.is_some() {
+                    self.state = answer.state;
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                // The thread died without an answer: not waited for.
+                self.pending = None;
                 self.listed = true;
             }
-            if answer.state.is_some() {
-                self.state = answer.state;
-            }
+            _ => {}
         }
         if let Some(answer) = self.properties.as_ref().and_then(|r| r.try_recv().ok()) {
             self.properties = None;
