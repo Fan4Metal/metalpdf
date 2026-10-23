@@ -54,7 +54,7 @@ Windows SmartScreen may warn about an unsigned program on the first start: "More
 
 A PDF is opened with `Ctrl+O`, by dropping it on the window, from the recent files on the start page, from Explorer (double click once MetalPDF is chosen for PDF files, or "Open with"), or from the command line: `metalpdf.exe file.pdf`. Each file opens in a tab; a file already open is brought to the front instead.
 
-The toolbar under the tabs holds the page field (a page number or a label such as `iv` typed there goes to that page; `Ctrl+G` focuses it), the zoom with its menu, the three zoom presets (fit width, fit page, actual size; the one in force is lit, and a preset chosen is the zoom new documents open at), the two turn buttons, the view mode (continuous pages, or one page at a time, where the scroll bar still spans the document and dragging it turns the pages) the pencil of the editing mode and the printer, which opens the print dialog; a note on the right says when an edit was refused or a file saved. The tab bar holds Open, the sidebar toggle, the tabs, and on the right the theme switch, the update button when a newer version exists, and About.
+The toolbar under the tabs holds the page field (a page number or a label such as `iv` typed there goes to that page; `Ctrl+G` focuses it), the zoom with its menu, the three zoom presets (actual size, fit width, fit page: keys `1`, `2`, `3`; the one in force is lit, and a preset chosen is the zoom new documents open at), the two turn buttons, the view mode (continuous pages, or one page at a time, where the scroll bar still spans the document and dragging it turns the pages) the pencil of the editing mode and the printer, which opens the print dialog; a note on the right says when an edit was refused or a file saved. The tab bar holds Open, the sidebar toggle, the tabs, and on the right the theme switch, the update button when a newer version exists, and About.
 
 Where each document was left (page, zoom, turns) is remembered, as is the last session: started without files, MetalPDF opens the tabs it was closed with.
 
@@ -112,7 +112,8 @@ The pages go to the printer as vectors, drawn by PDFium, with form fields as fil
 | `Home`, `End` | First, last page |
 | `←` `↑` `→` `↓` | Scroll (in single-page mode, `←` `→` turn pages) |
 | `Ctrl+G` | The page field |
-| `Ctrl+0`, `Ctrl+1`, `Ctrl+2` | Fit width, 100 %, fit page |
+| `1`, `2`, `3` | 100 %, fit width, fit page |
+| `4`, `5` | Continuous pages, one page at a time |
 | `Ctrl++`, `Ctrl+−`, `Ctrl+wheel` | Zoom in, zoom out (round the pointer with the wheel) |
 | `R`, `Shift+R` | Turn the pages right, left |
 | `V`, `H` | The text tool (dragging selects), the hand (dragging scrolls) |

@@ -1481,10 +1481,19 @@ impl App {
                 view.scroll_x = (view.scroll_x - 60.0).max(0.0);
             }
         }
-        for (key, zoom) in [(Key::Num0, ZoomSetting::FitWidth), (Key::Num1, ZoomSetting::Scale(1.0)), (Key::Num2, ZoomSetting::FitPage)] {
-            if consume(Modifiers::COMMAND, key) {
+        // The presets and the modes by their place on the toolbar: 1 100 %,
+        // 2 fit width, 3 fit page, 4 continuous, 5 single.
+        for (key, zoom) in [(Key::Num1, ZoomSetting::Scale(1.0)), (Key::Num2, ZoomSetting::FitWidth), (Key::Num3, ZoomSetting::FitPage)] {
+            if consume(Modifiers::NONE, key) {
                 view.set_zoom(zoom, None, &sizes, fallback);
                 chosen = Some(zoom);
+            }
+        }
+        let mut mode = None;
+        for (key, m) in [(Key::Num4, ViewMode::Continuous), (Key::Num5, ViewMode::Single)] {
+            if consume(Modifiers::NONE, key) {
+                view.set_mode(m);
+                mode = Some(m);
             }
         }
         if consume(Modifiers::COMMAND, Key::Plus)
@@ -1504,6 +1513,12 @@ impl App {
         }
         if let Some(zoom) = chosen {
             self.remember_zoom(zoom);
+        }
+        if let Some(mode) = mode
+            && self.settings.view_mode != mode
+        {
+            self.settings.view_mode = mode;
+            self.settings_dirty = true;
         }
     }
 
@@ -1581,7 +1596,7 @@ impl App {
         }
     }
 
-    /// A zoom chosen by name (a preset, the menu, `Ctrl+0/1/2`) is the
+    /// A zoom chosen by name (a preset, the menu, `1`/`2`/`3`) is the
     /// zoom new documents open at; the steps of the wheel and the keys
     /// are not.
     fn remember_zoom(&mut self, zoom: ZoomSetting) {

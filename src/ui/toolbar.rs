@@ -169,18 +169,18 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
             let fit = |ui: &mut Ui, setting: ZoomSetting, text: String, on: bool| {
                 ui.selectable_label(on, text).clicked().then_some(ToolbarAction::Zoom(setting))
             };
-            if let Some(a) = fit(ui, ZoomSetting::FitWidth, tr!("Fit width\tCtrl+0", "По ширине\tCtrl+0").to_owned(), info.zoom == ZoomSetting::FitWidth) {
+            if let Some(a) = fit(ui, ZoomSetting::FitWidth, tr!("Fit width\t2", "По ширине\t2").to_owned(), info.zoom == ZoomSetting::FitWidth) {
                 actions.push(a);
                 ui.close();
             }
-            if let Some(a) = fit(ui, ZoomSetting::FitPage, tr!("Fit page\tCtrl+2", "Страница целиком\tCtrl+2").to_owned(), info.zoom == ZoomSetting::FitPage) {
+            if let Some(a) = fit(ui, ZoomSetting::FitPage, tr!("Fit page\t3", "Страница целиком\t3").to_owned(), info.zoom == ZoomSetting::FitPage) {
                 actions.push(a);
                 ui.close();
             }
             ui.separator();
             for z in ZOOM_CHOICES {
                 let on = matches!(info.zoom, ZoomSetting::Scale(s) if (s - z).abs() < 0.001);
-                let text = if z == 1.0 { "100 %\tCtrl+1".to_owned() } else { format!("{:.0} %", z * 100.0) };
+                let text = if z == 1.0 { "100 %\t1".to_owned() } else { format!("{:.0} %", z * 100.0) };
                 if ui.selectable_label(on, text).clicked() {
                     actions.push(ToolbarAction::Zoom(ZoomSetting::Scale(z)));
                     ui.close();
@@ -193,9 +193,9 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         ui.separator();
         // The presets: the one in force is lit; a choice is remembered.
         let presets = [
-            (Icon::FitWidth, ZoomSetting::FitWidth, info.zoom == ZoomSetting::FitWidth, tr!("Fit width (Ctrl+0)", "По ширине (Ctrl+0)")),
-            (Icon::FitPage, ZoomSetting::FitPage, info.zoom == ZoomSetting::FitPage, tr!("Fit page (Ctrl+2)", "Страница целиком (Ctrl+2)")),
-            (Icon::ActualSize, ZoomSetting::Scale(1.0), is_actual_size(info.zoom), tr!("Actual size, 100 % (Ctrl+1)", "Истинный размер, 100 % (Ctrl+1)")),
+            (Icon::ActualSize, ZoomSetting::Scale(1.0), is_actual_size(info.zoom), tr!("Actual size, 100 % (1)", "Истинный размер, 100 % (1)")),
+            (Icon::FitWidth, ZoomSetting::FitWidth, info.zoom == ZoomSetting::FitWidth, tr!("Fit width (2)", "По ширине (2)")),
+            (Icon::FitPage, ZoomSetting::FitPage, info.zoom == ZoomSetting::FitPage, tr!("Fit page (3)", "Страница целиком (3)")),
         ];
         for (icon, setting, on, tip) in presets {
             if super::icon_button(ui, icon, on, tip).clicked() {
@@ -211,10 +211,10 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         }
         ui.separator();
         let continuous = info.mode == ViewMode::Continuous;
-        if super::icon_button(ui, Icon::Continuous, continuous, tr!("Continuous pages", "Непрерывная прокрутка")).clicked() {
+        if super::icon_button(ui, Icon::Continuous, continuous, tr!("Continuous pages (4)", "Непрерывная прокрутка (4)")).clicked() {
             actions.push(ToolbarAction::Mode(ViewMode::Continuous));
         }
-        if super::icon_button(ui, Icon::SinglePage, !continuous, tr!("One page at a time", "По одной странице")).clicked() {
+        if super::icon_button(ui, Icon::SinglePage, !continuous, tr!("One page at a time (5)", "По одной странице (5)")).clicked() {
             actions.push(ToolbarAction::Mode(ViewMode::Single));
         }
         ui.separator();
