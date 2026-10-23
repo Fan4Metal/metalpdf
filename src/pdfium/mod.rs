@@ -761,6 +761,11 @@ pub struct TextObject {
     /// (`fonts::Fonts::stand_in_name`, filled by the engine); `None` when
     /// only a generic family would.
     pub stand_in: Option<String>,
+    /// Where its text starts (the matrix's translation), in page space.
+    pub origin: [f32; 2],
+    /// The direction its text runs in, a unit vector (the matrix's first
+    /// column): the lines are gathered by it.
+    pub direction: [f32; 2],
 }
 
 /// Gives the stand-in font's bytes for a base font's name and descriptor
@@ -798,6 +803,9 @@ pub struct ImageObject {
 pub struct PageObjects {
     pub text: Vec<TextObject>,
     pub images: Vec<ImageObject>,
+    /// The text objects gathered in lines (`textline::lines`, filled by
+    /// the engine).
+    pub lines: Vec<crate::textline::Line>,
 }
 
 /// Reads of a file held in memory, as PDFium asks for them (a JPEG loaded
@@ -816,7 +824,7 @@ unsafe extern "C" fn get_block_memory(param: *mut c_void, position: c_ulong, buf
 impl Page {
     /// The page's text and image objects, top level only.
     pub fn objects(&self) -> PageObjects {
-        PageObjects { text: self.text_objects(), images: self.image_objects() }
+        PageObjects { text: self.text_objects(), images: self.image_objects(), lines: Vec::new() }
     }
 
     /// The page's image objects, top level only.
@@ -975,13 +983,11 @@ impl Page {
             };
             // The size as drawn: the object's matrix scales the font (a
             // 1 pt font under a 24× matrix is how some generators write).
-            let mut matrix = sys::FS_MATRIX::default();
-            let drawn = if unsafe { (api.FPDFPageObj_GetMatrix)(object, &mut matrix) } != 0 {
-                size * (matrix.a * matrix.a + matrix.b * matrix.b).sqrt().max(0.01)
-            } else {
-                size
-            };
-            out.push(TextObject { index: index as usize, bounds: [l, b, r, t], text, font: name, font_size: drawn, subset, flags, stand_in: None });
+            let mut matrix = sys::FS_MATRIX { a: 1.0, ..Default::default() };
+            let scale = if unsafe { (api.FPDFPageObj_GetMatrix)(object, &mut matrix) } != 0 { (matrix.a * matrix.a + matrix.b * matrix.b).sqrt().max(0.01) } else { 1.0 };
+            let drawn = size * scale;
+            let direction = [matrix.a / scale, matrix.b / scale];
+            out.push(TextObject { index: index as usize, bounds: [l, b, r, t], text, font: name, font_size: drawn, subset, flags, stand_in: None, origin: [matrix.e, matrix.f], direction });
         }
         out
     }
@@ -993,7 +999,71 @@ impl Page {
     /// base font's name and descriptor flags, so that the style (bold,
     /// italic, serif) is kept. The page's content is regenerated; the
     /// text page is reloaded.
+    #[cfg(test)]
     pub fn set_text(&self, index: usize, text: &str, fallback: FontLookup<'_>) -> Result<Replaced, String> {
+        self.set_line(&[index], text, &[], fallback)
+    }
+
+    /// Objects `objects` of a line made one, the first, with `text` (as
+    /// `set_text` sets it); the others removed, and `followers`, the
+    /// objects after them on the line, moved along it by the change in
+    /// width, so the new text has its room and the gap after it stays.
+    /// The width is measured on the ink: the edge of the last object's
+    /// last glyph before, of the new object's after.
+    pub fn set_line(&self, objects: &[usize], text: &str, followers: &[usize], fallback: FontLookup<'_>) -> Result<Replaced, String> {
+        let api = self.api();
+        let handle = |index: usize| {
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index as c_int) };
+            (!object.is_null() && unsafe { (api.FPDFPageObj_GetType)(object) } == sys::FPDF_PAGEOBJ_TEXT).then_some(object).ok_or("not a text object")
+        };
+        // The handles first: the indices change as objects go.
+        let merged = objects.iter().map(|&i| handle(i)).collect::<Result<Vec<_>, _>>()?;
+        let moved = followers.iter().map(|&i| handle(i)).collect::<Result<Vec<_>, _>>()?;
+        let Some((&first, rest)) = merged.split_first() else { return Err("no object".into()) };
+        let mut matrix = sys::FS_MATRIX { a: 1.0, ..Default::default() };
+        unsafe { (api.FPDFPageObj_GetMatrix)(first, &mut matrix) };
+        let scale = (matrix.a * matrix.a + matrix.b * matrix.b).sqrt().max(0.01);
+        let (dx, dy) = (matrix.a / scale, matrix.b / scale);
+        // How far the object's ink reaches along the line.
+        let reach = |object: sys::FPDF_PAGEOBJECT| {
+            let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+            unsafe { (api.FPDFPageObj_GetBounds)(object, &mut l, &mut b, &mut r, &mut t) };
+            [(l, b), (l, t), (r, b), (r, t)].iter().map(|&(x, y)| x * dx + y * dy).fold(f32::NEG_INFINITY, f32::max)
+        };
+        let old_reach = merged.iter().map(|&o| reach(o)).fold(f32::NEG_INFINITY, f32::max);
+        // A stand-in fits its width a character to the objects merged.
+        let span = (merged.len() > 1).then(|| {
+            let chars = merged.iter().map(|&o| self.object_text(o).trim().chars().count()).sum::<usize>();
+            let (mut left, mut right) = (f32::INFINITY, f32::NEG_INFINITY);
+            for &o in &merged {
+                let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+                unsafe { (api.FPDFPageObj_GetBounds)(o, &mut l, &mut b, &mut r, &mut t) };
+                (left, right) = (left.min(l), right.max(r));
+            }
+            (chars, right - left)
+        });
+        // The first set first: what fails there leaves the page as it was.
+        let (replaced, new) = self.replace_text(objects[0], text, span, fallback)?;
+        for &object in rest {
+            unsafe {
+                if (api.FPDFPage_RemoveObject)(self.handle, object) != 0 {
+                    (api.FPDFPageObj_Destroy)(object);
+                }
+            }
+        }
+        let delta = reach(new) - old_reach;
+        if delta.abs() > 0.01 {
+            for &object in &moved {
+                unsafe { (api.FPDFPageObj_Transform)(object, 1.0, 0.0, 0.0, 1.0, f64::from(dx * delta), f64::from(dy * delta)) };
+            }
+        }
+        self.regenerate()?;
+        Ok(replaced)
+    }
+
+    /// Object `index`'s text replaced, as `set_text` describes, the page's
+    /// content not yet regenerated; the object that shows the text then.
+    fn replace_text(&self, index: usize, text: &str, span: Option<(usize, f32)>, fallback: FontLookup<'_>) -> Result<(Replaced, sys::FPDF_PAGEOBJECT), String> {
         let api = self.api();
         let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index as c_int) };
         if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
@@ -1035,16 +1105,17 @@ impl Page {
                     return Err("the text could not be set".into());
                 }
                 if same_text(&self.object_text(object), text) {
-                    self.regenerate()?;
-                    return Ok(Replaced::SameFont);
+                    return Ok((Replaced::SameFont, object));
                 }
             }
             let old_wide: Vec<u16> = old_text.encode_utf16().chain(std::iter::once(0)).collect();
             unsafe { (api.FPDFText_SetText)(object, old_wide.as_ptr()) };
         }
         let bytes = fallback(&base_name, flags).ok_or("the font cannot show the text, and there is no stand-in font")?;
-        let old_len = old_text.trim().chars().count();
-        let replaced = {
+        // The width a character to fit to: the old text's, or the span's
+        // the text replaces (a line's merged objects).
+        let (old_len, old_width) = span.unwrap_or((old_text.trim().chars().count(), or - ol));
+        let new = {
             {
                 // The same place, size, colour and mode in a font that has
                 // every glyph.
@@ -1073,7 +1144,7 @@ impl Page {
                     let (mut nl, mut nb, mut nr, mut nt) = (0f32, 0f32, 0f32, 0f32);
                     let new_len = text.trim().chars().count();
                     if old_len > 0 && new_len > 0 && (api.FPDFPageObj_GetBounds)(new, &mut nl, &mut nb, &mut nr, &mut nt) != 0 {
-                        let target = (or - ol) * new_len as f32 / old_len as f32;
+                        let target = old_width * new_len as f32 / old_len as f32;
                         let sx = (target / (nr - nl).max(0.01)).clamp(0.5, 1.5);
                         if (sx - 1.0).abs() > 0.01 {
                             let fitted = sys::FS_MATRIX { a: matrix.a * sx, b: matrix.b * sx, c: matrix.c, d: matrix.d, e: matrix.e, f: matrix.f };
@@ -1096,11 +1167,10 @@ impl Page {
                     }
                     (api.FPDFFont_Close)(new_font);
                 }
-                Replaced::FallbackFont
+                new
             }
         };
-        self.regenerate()?;
-        Ok(replaced)
+        Ok((Replaced::FallbackFont, new))
     }
 
     /// The object's text as the text page reads it, the text page loaded
@@ -1971,6 +2041,41 @@ pub mod tests {
         drop(page);
         drop(saved);
         std::fs::remove_file(&out).ok();
+    }
+
+    /// On the OpenStax book (`METALPDF_SAMPLE`): the preface's lines, cut
+    /// at every kerned pair, read as lines; one made longer in its own
+    /// font, another set in a stand-in (Cyrillic), each read back as typed
+    /// with the objects after the change moved, none overlapping.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_real_line_takes_an_edit() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let api = api();
+        let doc = Document::open(api, Path::new(&sample), None).unwrap();
+        let Some(page) = (0..doc.page_count().min(40)).filter_map(|i| doc.load_page(i)).find(|p| p.text(0, p.char_count()).contains("Students are provided answers")) else {
+            println!("not the OpenStax book");
+            return;
+        };
+        let mut fonts = crate::fonts::Fonts::default();
+        let line_from = |page: &Page, start: &str| crate::textline::lines(&page.text_objects()).into_iter().find(|l| l.text.starts_with(start)).unwrap();
+        for (start, from, to) in [("Students are provided", "odd-numbered", "odd-numbered and more"), ("Manual on the Student", "Manual", "Руководство")] {
+            let line = line_from(&page, start);
+            println!("{} objects: {:?}", line.fragments.len(), line.text);
+            let wanted = line.text.replacen(from, to, 1);
+            let edit = line.edit(&wanted).unwrap();
+            println!("  merging {:?} into {:?}, {} after", edit.objects, edit.text, edit.followers.len());
+            let how = page.set_line(&edit.objects, &edit.text, &edit.followers, &mut |name, flags| fonts.get(name, flags)).unwrap();
+            let after = line_from(&page, &wanted[..8]);
+            println!("  {how:?}: {} objects: {:?}", after.fragments.len(), after.text);
+            assert_eq!(after.text, wanted);
+            assert_eq!(after.fragments.len(), line.fragments.len() - edit.objects.len() + 1);
+            let objects = page.text_objects();
+            let boxes: Vec<[f32; 4]> = after.fragments.iter().map(|f| objects.iter().find(|o| o.index == f.object).unwrap().bounds).collect();
+            for pair in boxes.windows(2) {
+                assert!(pair[1][0] > pair[0][2] - 0.5, "objects overlap: {pair:?}");
+            }
+        }
     }
 
     /// On a real document (`METALPDF_SAMPLE`): the page numbering read off

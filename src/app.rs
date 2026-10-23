@@ -87,12 +87,12 @@ pub struct Tab {
     pub notice: Option<(String, Instant)>,
 }
 
-/// A text object being edited in place.
+/// A line of text objects being edited in place.
 pub struct InlineEditor {
     pub page: usize,
-    pub object: usize,
+    pub line: crate::textline::Line,
     pub text: String,
-    /// The object's box on the unrotated page, in points.
+    /// The line's box on the unrotated page, in points.
     pub rect: [f32; 4],
     pub font_size: f32,
     /// Just opened: takes the focus.
@@ -2018,25 +2018,30 @@ impl App {
                     // under the pointer in any mode.
                     tab.doc.need_objects(engine, page);
                 }
+                // The line the object is on is edited: what the change
+                // touches is merged on commit, the rest left alone.
                 if let Some((page, object)) = out.edit_click
                     && let (Some(objects), Some(text)) = (tab.doc.objects.get(&page), tab.doc.text.get(&page))
-                    && let Some(o) = objects.text.iter().find(|o| o.index == object)
+                    && let Some(line) = objects.lines.iter().find(|l| l.contains(object))
                 {
                     tab.image = None;
                     tab.editor = Some(InlineEditor {
                         page,
-                        object,
-                        text: o.text.clone(),
-                        rect: text.rect_to_page(o.bounds),
-                        font_size: o.font_size.max(1.0),
+                        text: line.text.clone(),
+                        rect: text.rect_to_page(line.bounds),
+                        font_size: line.font_size.max(1.0),
+                        line: line.clone(),
                         fresh: true,
                     });
                 }
-                if let Some((page, object, text)) = out.edit_commit {
-                    tab.editor = None;
-                    let unchanged = tab.doc.objects.get(&page).and_then(|os| os.text.iter().find(|o| o.index == object)).is_some_and(|o| o.text == text);
-                    if !unchanged && !text.trim().is_empty() {
-                        engine.request(Request::Edit { id: tab.doc.id, edit: Edit::Text { page, object, text } });
+                if let Some(text) = out.edit_commit {
+                    if let Some(editor) = tab.editor.take()
+                        && let Some(edit) = editor.line.edit(&text)
+                    {
+                        engine.request(Request::Edit {
+                            id: tab.doc.id,
+                            edit: Edit::Text { page: editor.page, objects: edit.objects, text: edit.text, followers: edit.followers },
+                        });
                     }
                 } else if out.edit_cancel {
                     tab.editor = None;

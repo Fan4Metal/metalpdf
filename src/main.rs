@@ -27,6 +27,7 @@ mod selection;
 mod settings;
 mod single_instance;
 mod style;
+mod textline;
 mod textures;
 mod ui;
 mod update;

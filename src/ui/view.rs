@@ -113,7 +113,7 @@ pub struct ViewOutput {
     /// In the editing mode, a text object clicked: page and object.
     pub edit_click: Option<(usize, usize)>,
     /// The inline editor was confirmed with this text.
-    pub edit_commit: Option<(usize, usize, String)>,
+    pub edit_commit: Option<String>,
     pub edit_cancel: bool,
     /// In the editing mode, an image clicked: page, object and its box on
     /// the unrotated page.
@@ -308,15 +308,18 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                         painter.rect_filled(screen, 1.0, palette.selection);
                     }
                 }
-                // The editing mode: the text objects outlined, the one under
-                // the pointer stronger, a click opens the inline editor.
+                // The editing mode: the lines of text outlined (a line is
+                // often many objects, cut at kerned pairs), the one under
+                // the pointer stronger, a click opens the inline editor on
+                // it; the tooltip names the font of the object under the
+                // pointer.
                 if editing
                     && let (Some(objects), Some(text)) = (tab.doc.objects.get(&i), text)
                 {
-                    for object in objects.text.iter() {
-                        let screen = page_rect_to_screen(text.rect_to_page(object.bounds), turns, size, rect).expand(1.0);
+                    for line in objects.lines.iter() {
+                        let screen = page_rect_to_screen(text.rect_to_page(line.bounds), turns, size, rect).expand(1.0);
                         let under = pointer.is_some_and(|pt| screen.contains(pt));
-                        let being_edited = editor.as_ref().is_some_and(|e| e.page == i && e.object == object.index);
+                        let being_edited = editor.as_ref().is_some_and(|e| e.page == i && e.line == *line);
                         if being_edited {
                             continue;
                         }
@@ -324,15 +327,32 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                         painter.rect_stroke(screen, 1.0, Stroke::new(1.0, color), StrokeKind::Outside);
                         if under {
                             ui.ctx().set_cursor_icon(CursorIcon::Text);
+                            let first = line.fragments[0].object;
                             if response.clicked() {
-                                out.edit_click = Some((i, object.index));
+                                out.edit_click = Some((i, first));
                             }
                             if menu_opened {
-                                menu.text = Some((i, object.index));
+                                menu.text = Some((i, first));
                             }
+                            // The object under the pointer, else the nearest
+                            // along the line.
+                            let object = pointer.and_then(|pt| {
+                                let on_page = screen_to_page_point(pt, turns, size, rect);
+                                line.fragments
+                                    .iter()
+                                    .filter_map(|f| objects.text.iter().find(|o| o.index == f.object))
+                                    .min_by(|a, b| {
+                                        let d = |o: &&crate::pdfium::TextObject| {
+                                            let r = text.rect_to_page(o.bounds);
+                                            (r[0] - on_page[0]).max(on_page[0] - r[0] - r[2]).max(0.0)
+                                        };
+                                        d(a).total_cmp(&d(b))
+                                    })
+                            });
                             // The run's font, and what would stand in for it.
                             if editor.is_none()
                                 && let Some(pos) = pointer
+                                && let Some(object) = object
                             {
                                 let font = crate::fonts::untagged(&object.font);
                                 let mut tip = format!("{font}, {:.1} pt", object.font_size);
@@ -496,7 +516,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                     let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
                     if edit.lost_focus() || enter || escape {
                         if enter && !escape {
-                            out.edit_commit = Some((e.page, e.object, e.text.clone()));
+                            out.edit_commit = Some(e.text.clone());
                         } else {
                             out.edit_cancel = true;
                         }

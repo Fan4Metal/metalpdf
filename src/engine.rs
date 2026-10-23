@@ -289,8 +289,10 @@ struct SearchState {
 /// stay right.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
-    /// A text object's text replaced.
-    Text { page: usize, object: usize, text: String },
+    /// Text objects of a line made one, the first, with `text`; the
+    /// objects after them on the line moved by the change in width
+    /// (`textline::LineEdit`, `Page::set_line`).
+    Text { page: usize, objects: Vec<usize>, text: String, followers: Vec<usize> },
     /// An image removed.
     Remove { page: usize, object: usize },
     /// An image's picture replaced by the one in `path` (JPEG or PNG).
@@ -560,6 +562,7 @@ impl Worker {
                 for o in &mut objects.text {
                     o.stand_in = self.fonts.stand_in_name(&o.font, o.flags);
                 }
+                objects.lines = crate::textline::lines(&objects.text);
                 self.send(Event::Objects { id, page, objects: Arc::new(objects) });
             }
             Request::ImagePixels { id, page, object } => {
@@ -663,7 +666,7 @@ impl Worker {
         let applied = match self.page(id, page) {
             None => Err("the page could not be loaded".to_owned()),
             Some(p) => match &edit {
-                Edit::Text { object, text, .. } => p.set_text(*object, text, &mut |name, flags| fonts.get(name, flags)).map(|_| ()),
+                Edit::Text { objects, text, followers, .. } => p.set_line(objects, text, followers, &mut |name, flags| fonts.get(name, flags)).map(|_| ()),
                 Edit::Remove { object, .. } => p.remove_object(*object),
                 Edit::ReplaceImage { object, path, .. } => p.replace_image(*object, path),
                 Edit::Place { object, bounds, .. } => p.place_object(*object, *bounds),
