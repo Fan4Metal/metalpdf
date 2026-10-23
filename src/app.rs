@@ -1833,7 +1833,11 @@ impl App {
             return;
         };
         let Some(rect) = hit.rects.first().copied() else {
+            // A match with no box (generated characters): its page, at least.
             tab.find.jump = false;
+            let count = tab.doc.page_count;
+            tab.remember();
+            tab.view.go_to_page(page, count);
             return;
         };
         match tab.doc.text.get(&page) {

@@ -159,6 +159,9 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let mut char_under_pointer: Option<selection::CharPos> = None;
     let mut selection = tab.selection;
     let mut selecting = tab.selecting;
+    // The selected picture was let go of this frame (a drag, or a plain
+    // click on it, which must not deselect it).
+    let mut image_released = false;
     let find = &tab.find;
     let editing = tab.editing;
     // The hand tool drags the pages; the editing mode's drags are its own.
@@ -473,9 +476,13 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                         }
                         if response.drag_stopped()
                             && let Some(drag) = sel.drag.take()
-                            && sel.rect != drag.start_rect
                         {
-                            out.image_place = Some((sel.page, sel.object, sel.rect));
+                            // Let go on the picture: the click this frame
+                            // is not one off it.
+                            image_released = true;
+                            if sel.rect != drag.start_rect {
+                                out.image_place = Some((sel.page, sel.object, sel.rect));
+                            }
                         }
                         if sel.drag.is_none()
                             && let Some(pt) = pointer
@@ -666,7 +673,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                     out.edit_cancel = true;
                 }
                 // A click off the selected image lets go of it (not a drag's end).
-                if image.as_ref().is_some_and(|s| s.drag.is_none()) {
+                if !image_released && image.as_ref().is_some_and(|s| s.drag.is_none()) {
                     *image = None;
                 }
             }
