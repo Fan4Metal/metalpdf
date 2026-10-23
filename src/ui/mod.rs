@@ -8,6 +8,7 @@ pub mod home;
 pub mod icons;
 pub mod licenses;
 pub mod menu;
+pub mod print;
 pub mod sidebar;
 pub mod toolbar;
 pub mod view;

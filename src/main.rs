@@ -22,6 +22,7 @@ mod layout;
 mod pdfium;
 mod pixels;
 mod placement;
+mod print;
 mod search;
 mod selection;
 mod settings;

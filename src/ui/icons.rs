@@ -141,6 +141,9 @@ pub enum Icon {
     Move,
     /// An I-beam, the text cursor: the text selection tool (MetalPDF).
     SelectText,
+    /// A printer, its paper going in at the top and coming out at the
+    /// front (MetalMD's print button).
+    Print,
 }
 
 impl Icon {
@@ -210,6 +213,7 @@ impl Icon {
         Icon::ActualSize,
         Icon::Move,
         Icon::SelectText,
+        Icon::Print,
     ];
 }
 
@@ -442,6 +446,16 @@ pub fn paint(painter: &Painter, icon: Icon, c: Pos2, size: f32, color: Color32, 
                 painter.line_segment([p(-2.6, y), p(-0.8, y)], line);
                 painter.line_segment([p(0.8, y), p(2.6, y)], line);
             }
+        }
+        Icon::Print => {
+            // The paper going in, behind the body; the body; the printed
+            // sheet over its front; the light.
+            painter.rect_stroke(rect(-4.0, -6.5, 8.0, 5.5), 1.0 * k, line, StrokeKind::Middle);
+            painter.rect_filled(rect(-6.5, -2.5, 13.0, 6.0), 2.0 * k, fill);
+            painter.rect_stroke(rect(-6.5, -2.5, 13.0, 6.0), 2.0 * k, line, StrokeKind::Middle);
+            painter.rect_filled(rect(-4.0, 1.0, 8.0, 5.5), 1.0 * k, fill);
+            painter.rect_stroke(rect(-4.0, 1.0, 8.0, 5.5), 1.0 * k, line, StrokeKind::Middle);
+            painter.circle_filled(p(4.3, -0.5), 0.8 * k, color);
         }
         Icon::Sidebar => {
             // A window with a panel on its left.

@@ -26,6 +26,10 @@ pub enum ToolbarAction {
     DetectNumbering,
     ThisPageIs { page: usize, number: i64 },
     FileNumbering,
+    /// The print dialog.
+    Print,
+    /// The print job under way abandoned.
+    CancelPrint,
 }
 
 /// What the bar shows of the document.
@@ -46,6 +50,8 @@ pub struct ToolbarInfo {
     /// Text on the right: what is going on.
     pub note: String,
     pub note_is_error: bool,
+    /// A print job under way: sheets sent, sheets in all.
+    pub printing: Option<(usize, usize)>,
 }
 
 /// The page field's text between frames, and whether it is to take the
@@ -224,7 +230,17 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         if ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Edit, info.editing, edit_tip)).inner.clicked() {
             actions.push(ToolbarAction::ToggleEdit);
         }
+        if ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Print, false, tr!("Print (Ctrl+P)", "Печать (Ctrl+P)"))).inner.clicked() {
+            actions.push(ToolbarAction::Print);
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if let Some((done, total)) = info.printing {
+                if super::icon_button(ui, Icon::Close, false, tr!("Cancel printing", "Отменить печать")).clicked() {
+                    actions.push(ToolbarAction::CancelPrint);
+                }
+                ui.label(RichText::new(tr!(format!("Printing: {done} of {total}"), format!("Печать: {done} из {total}"))).size(12.0));
+                ui.add_space(8.0);
+            }
             if !info.note.is_empty() {
                 let color = if info.note_is_error { crate::style::Palette::of(ui.ctx()).error } else { ui.visuals().weak_text_color() };
                 ui.add(egui::Label::new(RichText::new(&info.note).size(12.0).color(color)).truncate()).on_hover_text(&info.note);

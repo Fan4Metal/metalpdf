@@ -89,6 +89,8 @@ pub struct DocState {
     /// The first page's size: what unknown pages are laid out as.
     pub fallback: [f32; 2],
     pub title: Option<String>,
+    /// The document lets a printer scale its pages (`/PrintScaling`).
+    pub print_scaling: bool,
     /// The next size batch to ask for; past `page_count` when all are there.
     sizes_next: usize,
     sizes_waiting: bool,
@@ -122,6 +124,7 @@ impl DocState {
             page_shift: 0,
             fallback: DEFAULT_PAGE,
             title: None,
+            print_scaling: true,
             sizes_next: 0,
             sizes_waiting: false,
             outline: None,
@@ -146,7 +149,7 @@ impl DocState {
         match event {
             Event::Opened { id, result } if *id == self.id => {
                 match result {
-                    Ok(DocInfo { page_count, first_size, title }) => {
+                    Ok(DocInfo { page_count, first_size, title, print_scaling }) => {
                         self.status = Status::Ready;
                         self.page_count = *page_count;
                         self.sizes = vec![None; *page_count];
@@ -158,6 +161,7 @@ impl DocState {
                             }
                         }
                         self.title = title.clone();
+                        self.print_scaling = *print_scaling;
                         self.ask_sizes(engine, 0);
                     }
                     Err(OpenError::Password) => {

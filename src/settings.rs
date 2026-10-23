@@ -82,6 +82,40 @@ pub enum Tool {
     Hand,
 }
 
+/// How a page is sized on the sheet when printed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrintScale {
+    /// Pages larger than the printable area are fitted into it; the
+    /// others print at their size.
+    #[default]
+    Shrink,
+    /// Every page fills the printable area.
+    Fit,
+    /// Every page at its size, cut off where the sheet ends.
+    Actual,
+}
+
+/// The print dialog's choices kept between runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrintSettings {
+    /// The printer last printed on; `None` is Windows' default.
+    pub printer: Option<String>,
+    pub scale: PrintScale,
+    /// A landscape page turned on a portrait sheet, and the reverse.
+    pub auto_rotate: bool,
+    /// Pages sent as pictures, for printers that print the vector output
+    /// wrong.
+    pub as_image: bool,
+}
+
+impl Default for PrintSettings {
+    fn default() -> Self {
+        PrintSettings { printer: None, scale: PrintScale::Shrink, auto_rotate: true, as_image: false }
+    }
+}
+
 /// Which list the sidebar shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -161,6 +195,7 @@ pub struct Settings {
     pub find_case: bool,
     /// Find matches whole words only.
     pub find_words: bool,
+    pub print: PrintSettings,
 }
 
 impl Default for Settings {
@@ -183,6 +218,7 @@ impl Default for Settings {
             sidebar_tab: SidebarTab::Thumbnails,
             find_case: false,
             find_words: false,
+            print: PrintSettings::default(),
         }
     }
 }

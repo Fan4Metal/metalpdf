@@ -97,6 +97,8 @@ pub struct ViewOutput {
     pub set_tool: Option<Tool>,
     /// Copy the picture (page, object) to the clipboard.
     pub copy_image: Option<(usize, usize)>,
+    /// The print dialog asked for.
+    pub print: bool,
     /// The renders wanted, most urgent first: `(key, tier)`.
     pub wanted: Vec<(RenderKey, u8)>,
     /// The pages in view.
@@ -629,6 +631,11 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 ui.separator();
                 if ui.add(egui::Button::selectable(editing, tr!("Edit text and pictures", "Правка текста и картинок")).shortcut_text("E")).clicked() {
                     out.toggle_edit = true;
+                    ui.close();
+                }
+                ui.separator();
+                if item(ui, true, tr!("Print…", "Печать…"), "Ctrl+P") {
+                    out.print = true;
                     ui.close();
                 }
             });

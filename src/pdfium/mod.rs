@@ -291,6 +291,12 @@ impl Document {
         Some(Target::Page { index: page as usize, x: point.and_then(|p| p[0]), y: point.and_then(|p| p[1]) })
     }
 
+    /// Whether the document lets a printer scale its pages
+    /// (`/ViewerPreferences /PrintScaling`, not `/None`).
+    pub fn print_scaling(&self) -> bool {
+        unsafe { (self.api().FPDF_VIEWERREF_GetPrintScaling)(self.inner.handle) != 0 }
+    }
+
     /// Whether the document is signed or encrypted: the editing refuses
     /// those. A tagged one is edited: `FPDFPage_GenerateContent` writes
     /// the marked content back, and a stand-in run takes the old one's
@@ -477,6 +483,21 @@ impl Page {
             );
         }
         self.draw_forms(bitmap, at, flags);
+    }
+
+    /// Draw the page into a device context (a printer's) as vectors and
+    /// text. Form fields are not drawn: a page printed so is flattened
+    /// first (`flatten_for_print`).
+    pub fn render_dc(&self, dc: *mut c_void, at: Placement, flags: i32) {
+        unsafe { (self.api().FPDF_RenderPage)(dc, self.handle, at.start_x, at.start_y, at.size_x, at.size_y, at.rotate, flags) };
+    }
+
+    /// The page's form fields and printable annotations made part of its
+    /// content, as printed; true when something was, and the page is to be
+    /// loaded again to show it. Only for a copy of the document opened to
+    /// be printed.
+    pub fn flatten_for_print(&self) -> bool {
+        unsafe { (self.api().FPDFPage_Flatten)(self.handle, sys::FLAT_PRINT) == sys::FLATTEN_SUCCESS }
     }
 
     /// Start a render that `pause` may interrupt; `scheme` paints

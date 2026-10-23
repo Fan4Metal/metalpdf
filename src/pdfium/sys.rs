@@ -254,6 +254,10 @@ pub const FPDF_PAGEOBJ_IMAGE: c_int = 3;
 pub const FPDF_PAGEOBJ_SHADING: c_int = 4;
 pub const FPDF_PAGEOBJ_FORM: c_int = 5;
 
+// FPDFPage_Flatten: what for, and what came of it.
+pub const FLAT_PRINT: c_int = 1;
+pub const FLATTEN_SUCCESS: c_int = 1;
+
 // Object types (FPDFPageObjMark_GetParamValueType).
 pub const FPDF_OBJECT_NUMBER: c_int = 2;
 pub const FPDF_OBJECT_STRING: c_int = 3;
@@ -313,6 +317,12 @@ api! {
     FPDF_GetPageCount: fn(FPDF_DOCUMENT) -> c_int;
     FPDF_GetPageSizeByIndexF: fn(FPDF_DOCUMENT, c_int, *mut FS_SIZEF) -> FPDF_BOOL;
     FPDF_LoadPage: fn(FPDF_DOCUMENT, c_int) -> FPDF_PAGE;
+    // Windows only: the page drawn into a device context (a printer's),
+    // as vectors and text.
+    FPDF_RenderPage: fn(*mut c_void, FPDF_PAGE, c_int, c_int, c_int, c_int, c_int, c_int);
+    FPDF_VIEWERREF_GetPrintScaling: fn(FPDF_DOCUMENT) -> FPDF_BOOL;
+    // fpdf_flatten.h: form fields and annotations made page content.
+    FPDFPage_Flatten: fn(FPDF_PAGE, c_int) -> c_int;
     FPDF_ClosePage: fn(FPDF_PAGE);
     FPDF_GetPageWidthF: fn(FPDF_PAGE) -> c_float;
     FPDF_GetPageHeightF: fn(FPDF_PAGE) -> c_float;

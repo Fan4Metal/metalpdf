@@ -31,6 +31,7 @@ MetalPDF is a PDF viewer built around one idea: a document should be on screen t
 - **Find** across the document, with the hits highlighted on the pages; **text selection** by dragging, copied with Ctrl+C.
 - **Links** inside the document and to the web, with a history for going back.
 - **Editing** (experimental): the text of a line changed in place, pictures moved, resized, replaced or removed, pages inserted, replaced or deleted, and the document saved (see [Editing text, pictures and pages](#editing-text-pictures-and-pages)).
+- **Printing** with a preview of each sheet: the printer, its paper, orientation and sides, the pages, copies and scale, the printer's own settings behind Properties (see [Printing](#printing)).
 - **Forms** are drawn with their field contents; **encrypted** documents ask for their password.
 - **Light, dark or system theme.**
 - **English or Russian interface**: it follows the language of Windows and can be changed in the About window (`F1`).
@@ -53,7 +54,7 @@ Windows SmartScreen may warn about an unsigned program on the first start: "More
 
 A PDF is opened with `Ctrl+O`, by dropping it on the window, from the recent files on the start page, from Explorer (double click once MetalPDF is chosen for PDF files, or "Open with"), or from the command line: `metalpdf.exe file.pdf`. Each file opens in a tab; a file already open is brought to the front instead.
 
-The toolbar under the tabs holds the page field (a page number or a label such as `iv` typed there goes to that page; `Ctrl+G` focuses it), the zoom with its menu, the three zoom presets (fit width, fit page, actual size; the one in force is lit, and a preset chosen is the zoom new documents open at), the two turn buttons, the view mode (continuous pages, or one page at a time, where the scroll bar still spans the document and dragging it turns the pages) and the pencil of the editing mode; a note on the right says when an edit was refused or a file saved. The tab bar holds Open, the sidebar toggle, the tabs, and on the right the theme switch, the update button when a newer version exists, and About.
+The toolbar under the tabs holds the page field (a page number or a label such as `iv` typed there goes to that page; `Ctrl+G` focuses it), the zoom with its menu, the three zoom presets (fit width, fit page, actual size; the one in force is lit, and a preset chosen is the zoom new documents open at), the two turn buttons, the view mode (continuous pages, or one page at a time, where the scroll bar still spans the document and dragging it turns the pages) the pencil of the editing mode and the printer, which opens the print dialog; a note on the right says when an edit was refused or a file saved. The tab bar holds Open, the sidebar toggle, the tabs, and on the right the theme switch, the update button when a newer version exists, and About.
 
 Where each document was left (page, zoom, turns) is remembered, as is the last session: started without files, MetalPDF opens the tabs it was closed with.
 
@@ -91,11 +92,18 @@ Pages are handled from the context menu of a thumbnail in the sidebar: a blank p
 
 The changes live in a copy of the document until `Ctrl+S` saves it (a Save As dialog, so the original is replaced only when chosen); closing a tab or quitting with unsaved changes asks first. Signed and encrypted documents are not edited. In a tagged (accessible) document an edited text run keeps the marks its tags point to, also when it is set in a stand-in font; a picture removed leaves its tag empty, and the tag structure is not updated for the pages put in or removed. Text and pictures inside form XObjects, which some generators put every page in, are not reachable. An edit refused is explained in the status bar. This part of the program is experimental; a copy of a valued document is advised.
 
+### Printing
+
+`Ctrl+P`, or Print in the context menu of the pages, opens the print dialog. On the left it shows each sheet as it will print: the paper, the part of it the printer reaches, and the page placed on it; the arrows under it step through the sheets. On the right are the printer (the one last used, else the default one of Windows) and its paper, orientation and two-sided printing when the printer has it; **Properties…** opens the printer's own dialog for the rest (quality, colour, trays). The pages are all of them, the one shown or a list such as `1-5, 8, 11-`, read as the page field reads it, so a book numbered by its printed numbers is printed by them too. Copies are collated when asked. A page larger than the printable area is shrunk to it by default; it may instead be fitted to the sheet or printed at its actual size, and a document that asks not to be scaled starts at its actual size. A landscape page on a portrait sheet is turned, and the reverse, unless this is switched off.
+
+The pages go to the printer as vectors, drawn by PDFium, with form fields as filled in. **Print as an image** sends each page as a picture of 300 dpi instead, for a printer that prints the vector output wrong; it is slower and larger. A document with unsaved edits is printed as shown. Printing goes on in the background, a page at a time, with its progress and a cross to cancel it on the right of the toolbar; quitting while it goes on asks first. Text printed to a PDF printer comes out as outlines, not as text that can be selected.
+
 ## Keyboard shortcuts
 
 | Keys | Action |
 |---|---|
 | `Ctrl+O` | Open a file |
+| `Ctrl+P` | Print |
 | `Ctrl+W`, `Ctrl+Shift+T` | Close the tab, reopen the last closed tab |
 | `Ctrl+Tab`, `Ctrl+Shift+Tab` | Next, previous tab |
 | `Page Down`, `Page Up`, `Space`, `Shift+Space` | A screen down or up (in single-page mode, the next or previous page at the end) |

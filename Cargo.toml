@@ -46,8 +46,11 @@ env_logger = "0.11"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",            # GetUserDefaultUILanguage (i18n)
+    "Win32_Graphics_Gdi",             # printing: CreateDCW, GetDeviceCaps, StretchDIBits, DEVMODEW
+    "Win32_Graphics_Printing",        # printing: EnumPrintersW, DocumentPropertiesW
     "Win32_Networking_WinHttp",       # the update check
     "Win32_Storage_FileSystem",       # CreateFileW: the document mapped into memory
+    "Win32_Storage_Xps",              # printing: StartDocW, StartPage, DeviceCapabilitiesW
     "Win32_System_Console",           # AttachConsole for the command line modes
     "Win32_System_LibraryLoader",     # LoadLibraryExW, GetProcAddress: pdfium.dll
     "Win32_System_Memory",            # CreateFileMappingW, MapViewOfFile

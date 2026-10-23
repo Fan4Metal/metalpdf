@@ -20,7 +20,7 @@ use egui::{
 use crate::cache::Textures;
 use crate::dialog::{Ask, Dialogs};
 use crate::document::{DocState, Status};
-use crate::engine::{DocId, Edit, Engine, Event, RenderKey, Request};
+use crate::engine::{DocId, Edit, Engine, Event, Printed, RenderKey, Request};
 use crate::pdfium::Target;
 use crate::pixels::Pixels;
 use crate::settings::{FilePosition, Settings, ThemeSetting, ViewMode, WindowGeometry, ZoomSetting, same_path};
@@ -395,6 +395,10 @@ pub struct App {
     window_changed_at: Option<Instant>,
     last_geometry: Option<WindowGeometry>,
     confirm: Option<Confirm>,
+    /// The print dialog, over the tab it prints.
+    print: Option<crate::ui::print::PrintDialog>,
+    /// The print job under way: the document, sheets sent, sheets in all.
+    printing: Option<(DocId, usize, usize)>,
     /// The reader chose to quit with unsaved edits: the close goes on.
     quitting: bool,
     /// The sidebar as it was before a search showed its hits in it.
@@ -415,6 +419,39 @@ const WINDOW_SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// What the toolbar's page field resolves a typed label or number with.
 type PageResolver = Box<dyn Fn(&str) -> Option<usize>>;
+
+/// How the page field (and the print dialog's pages) read a typed label or
+/// number in `doc`.
+fn page_resolver(doc: &crate::document::DocState) -> PageResolver {
+    let labels = doc.labels.clone();
+    let count = doc.page_count;
+    let shift = doc.page_shift;
+    Box::new(move |text: &str| -> Option<usize> {
+        let text = text.trim();
+        if let Some(i) = labels.iter().position(|l| l.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(text))) {
+            return Some(i);
+        }
+        // A roman numeral under a page shift: a page of the front matter,
+        // by its place in the file.
+        if shift > 0
+            && let Some(r) = crate::document::parse_roman(text)
+            && r as i64 <= i64::from(shift)
+            && (r as usize) <= count
+        {
+            return Some(r as usize - 1);
+        }
+        let n: i64 = text.parse().ok()?;
+        // Under a page shift the number is the printed one; outside the
+        // printed range, the file's.
+        if shift != 0 {
+            let index = n - 1 + i64::from(shift);
+            if (0..count as i64).contains(&index) {
+                return Some(index as usize);
+            }
+        }
+        (1..=count as i64).contains(&n).then(|| (n - 1) as usize)
+    })
+}
 
 /// The title a detached window is made with, hidden, until it is found
 /// (`App::appear`): unique, as two windows may show the same document.
@@ -536,6 +573,8 @@ impl App {
             window_changed_at: None,
             last_geometry: None,
             confirm: None,
+            print: None,
+            printing: None,
             sidebar_before_search: None,
             quitting: false,
         };
@@ -741,6 +780,48 @@ impl App {
         }
     }
 
+    /// The print dialog for the active tab of the current window.
+    fn open_print(&mut self, ctx: &egui::Context) {
+        if self.print.is_some() {
+            return;
+        }
+        let settings = self.settings.print.clone();
+        let Some(tab) = self.win().active_tab() else { return };
+        if !tab.doc.ready() || tab.doc.page_count == 0 {
+            return;
+        }
+        let dialog = crate::ui::print::PrintDialog::open(ctx, tab.id, tab.title.clone(), tab.view.current, &settings, tab.doc.print_scaling);
+        self.print = Some(dialog);
+    }
+
+    /// The print dialog while it is open; the job it starts goes to the
+    /// engine, its choices to the settings.
+    fn print_dialog(&mut self, ctx: &egui::Context) {
+        use crate::ui::print::PrintAction;
+        let Some(dialog) = self.print.as_mut() else { return };
+        let Some(window) = self.windows.iter_mut().find(|w| w.tabs.iter().any(|t| t.id == dialog.tab)) else {
+            // The tab was closed.
+            self.print = None;
+            return;
+        };
+        let owner = window.hwnd;
+        let tab = window.tabs.iter_mut().find(|t| t.id == dialog.tab).expect("found above");
+        let resolve = page_resolver(&tab.doc);
+        let action = dialog.show(ctx, &mut tab.doc, &self.engine, &*resolve, &mut self.textures, self.frame, &mut self.wanted, owner);
+        let doc = tab.doc.id;
+        match action {
+            Some(PrintAction::Print(job)) => {
+                self.settings.print = dialog.remembered(&self.settings.print);
+                self.settings_dirty = true;
+                self.printing = Some((doc, 0, job.sheets.len()));
+                self.engine.request(Request::Print { id: doc, job });
+                self.print = None;
+            }
+            Some(PrintAction::Close) => self.print = None,
+            None => {}
+        }
+    }
+
     /// The confirmation asked for, as a modal.
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(confirm) = self.confirm else { return };
@@ -756,19 +837,29 @@ impl App {
             Confirm::Quit => self.windows.iter().flat_map(|w| &w.tabs).filter(|t| t.doc.modified).map(|t| t.title.clone()).collect(),
             Confirm::CloseTab { .. } => Vec::new(),
         };
+        // A print job quitting would stop: sheets sent, sheets in all.
+        let printing = match confirm {
+            Confirm::Quit => self.printing.map(|(_, done, total)| (done, total)),
+            Confirm::CloseTab { .. } => None,
+        };
         let danger = crate::style::Palette::of(ctx).error;
         let mut choice = None;
         // As qview's confirmations: a heading, what is at stake, large
         // buttons, the first the one Enter presses.
         let modal = egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
             ui.set_width(420.0);
-            ui.heading(tr!("Unsaved Changes", "Несохранённые изменения"));
+            if unsaved.is_empty() && printing.is_some() {
+                ui.heading(tr!("Printing", "Идёт печать"));
+            } else {
+                ui.heading(tr!("Unsaved Changes", "Несохранённые изменения"));
+            }
             ui.add_space(6.0);
             match confirm {
                 Confirm::CloseTab { .. } => {
                     ui.label(tr!(format!("“{name}” has changes that are not saved. Save them before closing?"), format!("В «{name}» есть несохранённые изменения. Сохранить их перед закрытием?")));
                     ui.weak(tr!("Saving asks where to; the original is replaced only when chosen.", "Сохранение спросит, куда; оригинал заменяется, только если выбрать его."));
                 }
+                Confirm::Quit if unsaved.is_empty() => {}
                 Confirm::Quit => {
                     ui.label(tr!("These documents have changes that are not saved:", "В этих документах есть несохранённые изменения:"));
                     ui.add_space(2.0);
@@ -781,6 +872,15 @@ impl App {
                     ui.add_space(2.0);
                     ui.weak(tr!("Cancel and save them with Ctrl+S, or quit and lose the changes.", "Отмените и сохраните их через Ctrl+S или выйдите, потеряв изменения."));
                 }
+            }
+            if let Some((done, total)) = printing {
+                if !unsaved.is_empty() {
+                    ui.add_space(6.0);
+                }
+                ui.label(tr!(
+                    format!("{done} of {total} sheets have gone to the printer; quitting stops the job and the rest is not printed."),
+                    format!("На принтер отправлено листов: {done} из {total}; выход прервёт задание, и остальное не напечатается.")
+                ));
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -795,7 +895,8 @@ impl App {
                         choice = Some(1);
                     }
                 } else {
-                    let quit = egui::Button::new(text(tr!("Quit without saving", "Выйти без сохранения")).color(egui::Color32::WHITE)).fill(danger).min_size(egui::vec2(160.0, 34.0));
+                    let label = if unsaved.is_empty() { tr!("Stop printing and quit", "Прервать печать и выйти") } else { tr!("Quit without saving", "Выйти без сохранения") };
+                    let quit = egui::Button::new(text(label).color(egui::Color32::WHITE)).fill(danger).min_size(egui::vec2(160.0, 34.0));
                     if ui.add(quit).clicked() {
                         choice = Some(1);
                     }
@@ -819,6 +920,10 @@ impl App {
             (Confirm::CloseTab { window, tab }, 0) => self.save_as(ctx, window, tab),
             (Confirm::CloseTab { window, tab }, 1) => self.force_close_tab(window, tab),
             (Confirm::Quit, 1) => {
+                // The spooler's job abandoned, not left half sent.
+                if self.printing.is_some() {
+                    self.engine.request(Request::CancelPrint);
+                }
                 self.quitting = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
@@ -889,6 +994,18 @@ impl App {
                     }
                 }
                 Event::RenderFailed(key) => log::warn!("page {} could not be rendered", key.page + 1),
+                Event::PrintProgress { id, done, total } => self.printing = Some((id, done, total)),
+                Event::Printed { id, outcome } => {
+                    self.printing = None;
+                    let text = match &outcome {
+                        Printed::Done(n) => tr!(format!("Sent to the printer: {n} sheets"), format!("Отправлено на печать листов: {n}")),
+                        Printed::Cancelled => tr!("Printing cancelled", "Печать отменена").to_owned(),
+                        Printed::Failed(e) => tr!(format!("Could not print: {e}"), format!("Не удалось напечатать: {e}")),
+                    };
+                    if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == id) {
+                        tab.notify(text);
+                    }
+                }
                 other => {
                     let doc = match &other {
                         Event::Opened { id, .. }
@@ -1162,7 +1279,7 @@ impl App {
 
     /// The keys of the current window, when no text field has the focus.
     fn keys(&mut self, ctx: &egui::Context) {
-        if self.about.open {
+        if self.about.open || self.print.is_some() {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input();
@@ -1179,6 +1296,9 @@ impl App {
         }
         if consume(Modifiers::COMMAND, Key::G) {
             self.win().page_field.focus = true;
+        }
+        if consume(Modifiers::COMMAND, Key::P) {
+            self.open_print(ctx);
         }
         if consume(Modifiers::NONE, Key::F4) {
             self.settings.sidebar_visible = !self.settings.sidebar_visible;
@@ -1389,6 +1509,9 @@ impl App {
 
     /// Apply what the toolbar asked.
     fn apply_toolbar(&mut self, actions: Vec<ToolbarAction>) {
+        if actions.iter().any(|a| matches!(a, ToolbarAction::CancelPrint)) {
+            self.engine.request(Request::CancelPrint);
+        }
         let engine = &self.engine;
         let mut mode_change = None;
         let mut zoom_change = None;
@@ -1435,6 +1558,7 @@ impl App {
                         tab.image = None;
                         tab.selection = None;
                     }
+                    ToolbarAction::Print | ToolbarAction::CancelPrint => {}
                 }
             }
         }
@@ -2158,6 +2282,9 @@ impl App {
                 if let Some((tab, page, object)) = replace_image {
                     self.replace_image_dialog(ui.ctx(), tab, page, object);
                 }
+                if out.print {
+                    self.open_print(ui.ctx());
+                }
             }
             Status::Loading => {
                 ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, palette.backdrop);
@@ -2215,11 +2342,9 @@ impl App {
                     (_, true) => tr!("Edited, not saved (Ctrl+S)", "Изменено, не сохранено (Ctrl+S)").to_owned(),
                     _ => String::new(),
                 };
-                let labels = tab.doc.labels.clone();
-                let count = tab.doc.page_count;
                 let shift = tab.doc.page_shift;
                 let info = ToolbarInfo {
-                    page: Some((tab.view.current, count)),
+                    page: Some((tab.view.current, tab.doc.page_count)),
                     label: tab.doc.label(tab.view.current),
                     tool: self.settings.tool,
                     page_shift: shift,
@@ -2229,33 +2354,9 @@ impl App {
                     editing: tab.editing,
                     note,
                     note_is_error: false,
+                    printing: self.printing.map(|(_, done, total)| (done, total)),
                 };
-                let resolve = move |text: &str| -> Option<usize> {
-                    let text = text.trim();
-                    if let Some(i) = labels.iter().position(|l| l.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(text))) {
-                        return Some(i);
-                    }
-                    // A roman numeral under a page shift: a page of the
-                    // front matter, by its place in the file.
-                    if shift > 0
-                        && let Some(r) = crate::document::parse_roman(text)
-                        && r as i64 <= i64::from(shift)
-                        && (r as usize) <= count
-                    {
-                        return Some(r as usize - 1);
-                    }
-                    let n: i64 = text.parse().ok()?;
-                    // Under a page shift the number is the printed one;
-                    // outside the printed range, the file's.
-                    if shift != 0 {
-                        let index = n - 1 + i64::from(shift);
-                        if (0..count as i64).contains(&index) {
-                            return Some(index as usize);
-                        }
-                    }
-                    (1..=count as i64).contains(&n).then(|| (n - 1) as usize)
-                };
-                (info, Box::new(resolve))
+                (info, page_resolver(&tab.doc))
             }
             _ => (
                 ToolbarInfo {
@@ -2269,11 +2370,15 @@ impl App {
                     editing: false,
                     note: String::new(),
                     note_is_error: false,
+                    printing: self.printing.map(|(_, done, total)| (done, total)),
                 },
                 Box::new(|_: &str| None),
             ),
         };
         let actions = crate::ui::toolbar::show(ui, &info, &mut self.windows[cur].page_field, resolve);
+        if actions.iter().any(|a| matches!(a, ToolbarAction::Print)) {
+            self.open_print(ui.ctx());
+        }
         if !actions.is_empty() {
             self.apply_toolbar(actions);
         }
@@ -2311,7 +2416,7 @@ impl App {
         }
         if close_requested {
             if cur == 0 {
-                if !self.quitting && self.all_tabs().any(|t| t.doc.modified) {
+                if !self.quitting && (self.all_tabs().any(|t| t.doc.modified) || self.printing.is_some()) {
                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                     self.confirm = Some(Confirm::Quit);
                 } else if self.windows.len() > 1 {
@@ -2554,6 +2659,7 @@ impl eframe::App for App {
         self.close_windows();
 
         self.about.show(&ctx, &mut self.updates);
+        self.print_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.follow_theme(&ctx);
         self.screenshot(&ctx);

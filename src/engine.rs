@@ -115,6 +115,42 @@ pub enum Request {
     UndoEdit(DocId),
     /// Write the edited document to `path`.
     Save { id: DocId, path: PathBuf },
+    /// Print the document as `job` says (`Event::PrintProgress`, then
+    /// `Event::Printed`); a page per turn of the loop, between renders.
+    Print { id: DocId, job: PrintJob },
+    /// Abandon the print job under way.
+    CancelPrint,
+}
+
+/// A print job as the dialog sets it up.
+pub struct PrintJob {
+    pub printer: String,
+    pub devmode: Option<crate::print::DevMode>,
+    /// The pages, one a sheet, in the order printed (copies included).
+    pub sheets: Vec<usize>,
+    pub scale: crate::settings::PrintScale,
+    pub auto_rotate: bool,
+    /// Each page sent as a picture (`AS_IMAGE_DPI` at most).
+    pub as_image: bool,
+    /// The name the spooler shows.
+    pub title: String,
+    /// The printer's output to this file instead (a test's).
+    pub output: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for PrintJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrintJob").field("printer", &self.printer).field("sheets", &self.sheets.len()).field("as_image", &self.as_image).finish()
+    }
+}
+
+/// How a print job ended.
+#[derive(Debug, PartialEq)]
+pub enum Printed {
+    /// Every sheet went to the spooler: how many.
+    Done(usize),
+    Cancelled,
+    Failed(String),
 }
 
 /// What the engine says back.
@@ -146,6 +182,9 @@ pub enum Event {
     /// has `page_count` pages now, sizes and all to be read again.
     Restructured { id: DocId, page_count: usize },
     Saved { id: DocId, path: PathBuf, result: Result<(), String> },
+    /// `done` sheets of `total` sent to the printer.
+    PrintProgress { id: DocId, done: usize, total: usize },
+    Printed { id: DocId, outcome: Printed },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -170,6 +209,8 @@ pub struct DocInfo {
     /// The first page's size, for the layout until the others arrive.
     pub first_size: Option<[f32; 2]>,
     pub title: Option<String>,
+    /// The document lets a printer scale its pages (`Document::print_scaling`).
+    pub print_scaling: bool,
 }
 
 /// The engine's list of renders, in the order they are wanted.
@@ -363,6 +404,11 @@ struct Worker {
     /// The documents' paths, for the edited copies.
     paths: HashMap<DocId, PathBuf>,
     edits: HashMap<DocId, EditState>,
+    /// The passwords documents were opened with, for the copy a print job
+    /// opens.
+    passwords: HashMap<DocId, String>,
+    /// The print job under way.
+    printing: Option<Printing>,
     /// A TrueType font every character can be set in (Arial), read when
     /// an edit first needs it.
     /// The stand-in fonts for replaced text (`fonts::Fonts`).
@@ -396,6 +442,8 @@ impl Worker {
             search: None,
             paths: HashMap::new(),
             edits: HashMap::new(),
+            passwords: HashMap::new(),
+            printing: None,
             fonts: Default::default(),
         };
         worker.serve();
@@ -435,6 +483,9 @@ impl Worker {
                         q.busy = Some(key);
                         break Work::Render(key);
                     }
+                    if self.printing.is_some() {
+                        break Work::PrintPage;
+                    }
                     if self.search.is_some() {
                         break Work::SearchPage;
                     }
@@ -448,6 +499,7 @@ impl Worker {
                     self.shared.queue.lock().unwrap().busy = None;
                 }
                 Work::SearchPage => self.search_page(),
+                Work::PrintPage => self.print_page(),
             }
         }
     }
@@ -462,10 +514,14 @@ impl Worker {
                         let page_count = doc.page_count();
                         let first_size = doc.page_size(0);
                         let title = doc.meta_text("Title");
+                        let print_scaling = doc.print_scaling();
+                        if let Some(password) = &password {
+                            self.passwords.insert(id, password.clone());
+                        }
                         log::debug!("opened {} ({page_count} pages) in {:.1} ms", path.display(), started.elapsed().as_secs_f64() * 1e3);
                         self.docs.insert(id, doc);
                         self.paths.insert(id, path.clone());
-                        self.send(Event::Opened { id, result: Ok(DocInfo { page_count, first_size, title }) });
+                        self.send(Event::Opened { id, result: Ok(DocInfo { page_count, first_size, title, print_scaling }) });
                         if let (Some(first), Some(size)) = (first, first_size) {
                             let page = first.page.min(page_count.saturating_sub(1));
                             let size = self.docs[&id].page_size(page).unwrap_or(size);
@@ -491,6 +547,7 @@ impl Worker {
                 self.pages.retain(|k, _| k.0 != id);
                 self.edits.remove(&id);
                 self.paths.remove(&id);
+                self.passwords.remove(&id);
                 self.docs.remove(&id);
                 if self.search.as_ref().is_some_and(|s| s.id == id) {
                     self.search = None;
@@ -606,6 +663,27 @@ impl Worker {
                 };
                 self.send(Event::Saved { id, path, result });
             }
+            Request::Print { id, job } => {
+                if let Some(old) = self.printing.take() {
+                    self.send(Event::Printed { id: old.id, outcome: Printed::Cancelled });
+                }
+                match self.start_print(id, job) {
+                    Ok(printing) => {
+                        self.send(Event::PrintProgress { id, done: 0, total: printing.sheets.len() });
+                        self.printing = Some(printing);
+                    }
+                    Err(e) => {
+                        log::warn!("print job not started: {e}");
+                        self.send(Event::Printed { id, outcome: Printed::Failed(e) });
+                    }
+                }
+            }
+            Request::CancelPrint => {
+                if let Some(printing) = self.printing.take() {
+                    log::info!("print job cancelled after {} of {} sheets", printing.next, printing.sheets.len());
+                    self.send(Event::Printed { id: printing.id, outcome: Printed::Cancelled });
+                }
+            }
         }
     }
 
@@ -693,6 +771,58 @@ impl Worker {
         if let Some(doc) = self.view_doc(id) {
             self.send(Event::Restructured { id, page_count: doc.page_count() });
         }
+    }
+
+    /// A print job begun: its own copy of the document (the edited one,
+    /// saved, when there are edits: what is printed is what is shown) and
+    /// the printer's document started.
+    fn start_print(&mut self, id: DocId, job: PrintJob) -> Result<Printing, String> {
+        if job.sheets.is_empty() {
+            return Err("no pages to print".into());
+        }
+        let path = self.paths.get(&id).cloned().ok_or("no such document")?;
+        let (doc, temp) = match self.edits.get(&id) {
+            Some(state) if !state.log.is_empty() => {
+                let temp = TempFile(std::env::temp_dir().join(format!("metalpdf-print-{}-{id}.pdf", std::process::id())));
+                state.doc.save_to(&temp.0)?;
+                (Document::open(self.api, &temp.0, None).map_err(|e| e.to_string())?, Some(temp))
+            }
+            _ => (Document::open(self.api, &path, self.passwords.get(&id).map(String::as_str)).map_err(|e| e.to_string())?, None),
+        };
+        if job.sheets.iter().any(|&p| p >= doc.page_count()) {
+            return Err("a page past the document's end".into());
+        }
+        let printer = crate::print::Job::start(&job.printer, job.devmode.as_ref(), &job.title, job.output.as_deref())?;
+        log::info!("printing {} sheets on {} ({:?})", job.sheets.len(), job.printer, printer.sheet());
+        Ok(Printing { id, doc, job: printer, sheets: job.sheets, next: 0, scale: job.scale, auto_rotate: job.auto_rotate, as_image: job.as_image, _temp: temp })
+    }
+
+    /// The next sheet of the print job; the job finished after the last.
+    fn print_page(&mut self) {
+        let Some(printing) = self.printing.as_mut() else { return };
+        let started = Instant::now();
+        let index = printing.sheets[printing.next];
+        let result = print_sheet(self.api, printing, index);
+        log::debug!("page {} printed in {:.1} ms", index + 1, started.elapsed().as_secs_f64() * 1e3);
+        let (id, total) = (printing.id, printing.sheets.len());
+        if let Err(e) = result {
+            log::warn!("printing page {} failed: {e}", index + 1);
+            self.printing = None;
+            self.send(Event::Printed { id, outcome: Printed::Failed(e) });
+            return;
+        }
+        printing.next += 1;
+        let done = printing.next;
+        if done < total {
+            self.send(Event::PrintProgress { id, done, total });
+            return;
+        }
+        let Some(Printing { job, .. }) = self.printing.take() else { return };
+        let outcome = match job.finish() {
+            Ok(()) => Printed::Done(total),
+            Err(e) => Printed::Failed(e),
+        };
+        self.send(Event::Printed { id, outcome });
     }
 
     /// The edited copy made again from the file with `log` applied.
@@ -895,10 +1025,70 @@ impl Worker {
     }
 }
 
+/// A print job under way: its own copy of the document (its form fields
+/// are flattened into its pages, which the one on screen must not see),
+/// the printer's document, the sheets and how far it got.
+struct Printing {
+    id: DocId,
+    doc: Document,
+    job: crate::print::Job,
+    sheets: Vec<usize>,
+    next: usize,
+    scale: crate::settings::PrintScale,
+    auto_rotate: bool,
+    as_image: bool,
+    /// The edited copy saved for the job.
+    _temp: Option<TempFile>,
+}
+
+/// A file removed when dropped.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Pages sent as pictures are rendered at most this fine, and with at most
+/// this many pixels.
+const AS_IMAGE_DPI: f32 = 300.0;
+const AS_IMAGE_PIXELS: f32 = 64.0e6;
+
+/// Page `index` of the job's copy on a sheet of its own: flattened (form
+/// fields are drawn into bitmaps only, `FPDF_RenderPage` leaves them out),
+/// placed, drawn as vectors or as a picture.
+fn print_sheet(api: &'static pdfium::sys::Api, p: &Printing, index: usize) -> Result<(), String> {
+    let mut page = p.doc.load_page(index).ok_or("the page could not be loaded")?;
+    if page.flatten_for_print() {
+        // A flattened page shows its new content once loaded again.
+        drop(page);
+        page = p.doc.load_page(index).ok_or("the page could not be loaded")?;
+    }
+    let sheet = *p.job.sheet();
+    let placed = crate::print::place(page.size(), &sheet, p.scale, p.auto_rotate);
+    let [x, y, w, h] = placed.rect;
+    let rect = [x.round() as i32, y.round() as i32, w.round().max(1.0) as i32, h.round().max(1.0) as i32];
+    let flags = FLAGS | pdfium::sys::FPDF_PRINTING;
+    p.job.start_page()?;
+    if p.as_image {
+        let k = (AS_IMAGE_DPI / sheet.dpi[0].max(sheet.dpi[1])).min(1.0).min((AS_IMAGE_PIXELS / (w * h).max(1.0)).sqrt());
+        let (bw, bh) = ((w * k).round().max(1.0) as u32, (h * k).round().max(1.0) as u32);
+        // White to start with.
+        let mut bitmap = Bitmap::new(api, bw, bh).ok_or("no memory for the page's picture")?;
+        page.render(&mut bitmap, Placement { start_x: 0, start_y: 0, size_x: bw as i32, size_y: bh as i32, rotate: placed.rotate }, flags);
+        p.job.draw_bgrx(bitmap.pixels(), bw, bh, rect)?;
+    } else {
+        page.render_dc(p.job.dc(), Placement { start_x: rect[0], start_y: rect[1], size_x: rect[2], size_y: rect[3], rotate: placed.rotate }, flags);
+    }
+    p.job.end_page()
+}
+
 enum Work {
     Request(Request),
     Render(RenderKey),
     SearchPage,
+    PrintPage,
 }
 
 /// How many pages the numbering is read from, and how many characters at
@@ -942,6 +1132,59 @@ pub fn first_width(size: [f32; 2], first: FirstRender) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sample printed on Microsoft Print to PDF into a file, as vectors
+    /// and as pictures, as a print job prints it (`print_sheet`): the file
+    /// read back has both pages portrait (page 2, landscape, turned) with
+    /// ink on them. The text comes out as outlines, not text: PDFium draws
+    /// it through GDI only when built with `PDFIUM_PRINT_TEXT_WITH_GDI`.
+    #[test]
+    #[ignore = "needs vendor/pdfium and the Microsoft Print to PDF printer"]
+    fn the_sample_prints_to_pdf() {
+        const PRINTER: &str = "Microsoft Print to PDF";
+        if !crate::print::printers().0.iter().any(|n| n == PRINTER) {
+            println!("no {PRINTER} here");
+            return;
+        }
+        let api = pdfium::init().expect("pdfium.dll from tools/get_pdfium.py");
+        let source = pdfium::tests::sample_file("metalpdf_print_source.pdf");
+        for as_image in [false, true] {
+            let out = std::env::temp_dir().join(format!("metalpdf_printed_{as_image}.pdf"));
+            let _ = std::fs::remove_file(&out);
+            let started = Instant::now();
+            let doc = Document::open(api, &source, None).unwrap();
+            let job = crate::print::Job::start(PRINTER, None, "MetalPDF test", Some(&out)).unwrap();
+            println!("sheet {:?}", job.sheet());
+            let printing = Printing { id: 1, doc, job, sheets: vec![0, 1], next: 0, scale: crate::settings::PrintScale::Shrink, auto_rotate: true, as_image, _temp: None };
+            for &index in &printing.sheets {
+                print_sheet(api, &printing, index).unwrap();
+            }
+            let Printing { job, .. } = printing;
+            job.finish().unwrap();
+            // The spooler writes the file after the document ends.
+            let deadline = Instant::now() + std::time::Duration::from_secs(30);
+            let printed = loop {
+                if let Ok(doc) = Document::open(api, &out, None) {
+                    break doc;
+                }
+                assert!(Instant::now() < deadline, "no file from the printer");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            };
+            println!("as image {as_image}: {} bytes in {:?}", std::fs::metadata(&out).unwrap().len(), started.elapsed());
+            assert_eq!(printed.page_count(), 2);
+            for i in 0..2 {
+                let [w, h] = printed.page_size(i).unwrap();
+                assert!(h > w, "sheet {} is portrait", i + 1);
+                let page = printed.load_page(i).unwrap();
+                let mut bitmap = Bitmap::new(api, 300, 424).unwrap();
+                page.render(&mut bitmap, Placement { start_x: 0, start_y: 0, size_x: 300, size_y: 424, rotate: 0 }, FLAGS);
+                let ink = bitmap.pixels().chunks(4).filter(|p| p[0] < 128).count();
+                assert!(ink > 50, "sheet {} has ink: {ink} dark pixels", i + 1);
+            }
+            drop(printed);
+            std::fs::remove_file(&out).ok();
+        }
+    }
 
     #[test]
     fn the_printed_numbering_is_read_off_the_pages() {
