@@ -35,6 +35,7 @@ pub type FPDF_LINK = *mut c_void;
 pub type FPDF_FORMHANDLE = *mut c_void;
 pub type FPDF_PAGEOBJECT = *mut c_void;
 pub type FPDF_FONT = *mut c_void;
+pub type FPDF_PAGEOBJECTMARK = *mut c_void;
 
 pub type FPDF_BOOL = c_int;
 pub type FPDF_DWORD = c_ulong;
@@ -253,6 +254,11 @@ pub const FPDF_PAGEOBJ_IMAGE: c_int = 3;
 pub const FPDF_PAGEOBJ_SHADING: c_int = 4;
 pub const FPDF_PAGEOBJ_FORM: c_int = 5;
 
+// Object types (FPDFPageObjMark_GetParamValueType).
+pub const FPDF_OBJECT_NUMBER: c_int = 2;
+pub const FPDF_OBJECT_STRING: c_int = 3;
+pub const FPDF_OBJECT_NAME: c_int = 4;
+
 // FPDFText_LoadFont font types.
 pub const FPDF_FONT_TYPE1: c_int = 1;
 pub const FPDF_FONT_TRUETYPE: c_int = 2;
@@ -400,6 +406,24 @@ api! {
     FPDFPageObj_SetMatrix: fn(FPDF_PAGEOBJECT, *const FS_MATRIX) -> FPDF_BOOL;
     FPDFPageObj_GetFillColor: fn(FPDF_PAGEOBJECT, *mut c_uint, *mut c_uint, *mut c_uint, *mut c_uint) -> FPDF_BOOL;
     FPDFPageObj_SetFillColor: fn(FPDF_PAGEOBJECT, c_uint, c_uint, c_uint, c_uint) -> FPDF_BOOL;
+    FPDFPage_InsertObjectAtIndex: fn(FPDF_PAGE, FPDF_PAGEOBJECT, usize) -> FPDF_BOOL;
+    // Marked content: what ties a tagged document's tags to the objects.
+    FPDFPageObj_GetMarkedContentID: fn(FPDF_PAGEOBJECT) -> c_int;
+    FPDFPageObj_CountMarks: fn(FPDF_PAGEOBJECT) -> c_int;
+    FPDFPageObj_GetMark: fn(FPDF_PAGEOBJECT, c_ulong) -> FPDF_PAGEOBJECTMARK;
+    FPDFPageObj_AddMark: fn(FPDF_PAGEOBJECT, FPDF_BYTESTRING) -> FPDF_PAGEOBJECTMARK;
+    FPDFPageObjMark_GetName: fn(FPDF_PAGEOBJECTMARK, *mut FPDF_WCHAR, c_ulong, *mut c_ulong) -> FPDF_BOOL;
+    FPDFPageObjMark_CountParams: fn(FPDF_PAGEOBJECTMARK) -> c_int;
+    FPDFPageObjMark_GetParamKey: fn(FPDF_PAGEOBJECTMARK, c_ulong, *mut FPDF_WCHAR, c_ulong, *mut c_ulong) -> FPDF_BOOL;
+    FPDFPageObjMark_GetParamValueType: fn(FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING) -> c_int;
+    FPDFPageObjMark_GetParamIntValue: fn(FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING, *mut c_int) -> FPDF_BOOL;
+    FPDFPageObjMark_GetParamFloatValue: fn(FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING, *mut c_float) -> FPDF_BOOL;
+    FPDFPageObjMark_GetParamStringValue: fn(FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING, *mut FPDF_WCHAR, c_ulong, *mut c_ulong) -> FPDF_BOOL;
+    FPDFPageObjMark_GetParamBlobValue: fn(FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING, *mut u8, c_ulong, *mut c_ulong) -> FPDF_BOOL;
+    FPDFPageObjMark_SetIntParam: fn(FPDF_DOCUMENT, FPDF_PAGEOBJECT, FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING, c_int) -> FPDF_BOOL;
+    FPDFPageObjMark_SetFloatParam: fn(FPDF_DOCUMENT, FPDF_PAGEOBJECT, FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING, c_float) -> FPDF_BOOL;
+    FPDFPageObjMark_SetStringParam: fn(FPDF_DOCUMENT, FPDF_PAGEOBJECT, FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING, FPDF_BYTESTRING) -> FPDF_BOOL;
+    FPDFPageObjMark_SetBlobParam: fn(FPDF_DOCUMENT, FPDF_PAGEOBJECT, FPDF_PAGEOBJECTMARK, FPDF_BYTESTRING, *const u8, c_ulong) -> FPDF_BOOL;
     FPDFPageObj_NewTextObj: fn(FPDF_DOCUMENT, FPDF_BYTESTRING, c_float) -> FPDF_PAGEOBJECT;
     FPDFPageObj_CreateTextObj: fn(FPDF_DOCUMENT, FPDF_FONT, c_float) -> FPDF_PAGEOBJECT;
     FPDFText_SetText: fn(FPDF_PAGEOBJECT, FPDF_WIDESTRING) -> FPDF_BOOL;

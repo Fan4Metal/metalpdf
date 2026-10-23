@@ -291,17 +291,16 @@ impl Document {
         Some(Target::Page { index: page as usize, x: point.and_then(|p| p[0]), y: point.and_then(|p| p[1]) })
     }
 
-    /// Whether the document is signed, tagged or encrypted: the text
-    /// editing refuses those.
+    /// Whether the document is signed or encrypted: the editing refuses
+    /// those. A tagged one is edited: `FPDFPage_GenerateContent` writes
+    /// the marked content back, and a stand-in run takes the old one's
+    /// marks (`Page::copy_marks`), so the tags keep their content.
     pub fn edit_obstacles(&self) -> Vec<&'static str> {
         let api = self.api();
         let mut out = Vec::new();
         unsafe {
             if (api.FPDF_GetSignatureCount)(self.inner.handle) > 0 {
                 out.push("signed");
-            }
-            if (api.FPDFCatalog_IsTagged)(self.inner.handle) != 0 {
-                out.push("tagged");
             }
             if (api.FPDF_GetSecurityHandlerRevision)(self.inner.handle) != -1 {
                 out.push("encrypted");
@@ -1083,9 +1082,17 @@ impl Page {
                     }
                     (api.FPDFPageObj_SetFillColor)(new, r, g, b, a);
                     (api.FPDFTextObj_SetTextRenderMode)(new, mode);
-                    (api.FPDFPage_InsertObject)(self.handle, new);
+                    self.copy_marks(object, new);
+                    // In the old one's place: the content's order (the
+                    // reading order of an untagged document) and the other
+                    // objects' indices stay.
                     if (api.FPDFPage_RemoveObject)(self.handle, object) != 0 {
                         (api.FPDFPageObj_Destroy)(object);
+                        if (api.FPDFPage_InsertObjectAtIndex)(self.handle, new, index) == 0 {
+                            (api.FPDFPage_InsertObject)(self.handle, new);
+                        }
+                    } else {
+                        (api.FPDFPage_InsertObject)(self.handle, new);
                     }
                     (api.FPDFFont_Close)(new_font);
                 }
@@ -1104,6 +1111,65 @@ impl Page {
             unsafe { (api.FPDFText_ClosePage)(text) };
         }
         self.text_page().and_then(|tp| utf16_text(|buf, len| unsafe { (api.FPDFTextObj_GetText)(object, tp, buf.cast(), len) })).unwrap_or_default()
+    }
+
+    /// The marked content `from` is in, put on `to`: a tagged document's
+    /// tags point at their content through these marks' MCIDs, and a
+    /// stand-in object without them dropped its run out of the structure
+    /// tree. Numbers and strings are copied as they are; a name value
+    /// becomes a string (PDFium sets no names).
+    fn copy_marks(&self, from: sys::FPDF_PAGEOBJECT, to: sys::FPDF_PAGEOBJECT) {
+        let api = self.api();
+        let doc = self.doc.handle;
+        let count = unsafe { (api.FPDFPageObj_CountMarks)(from) };
+        for m in 0..count.max(0) as c_ulong {
+            let mark = unsafe { (api.FPDFPageObj_GetMark)(from, m) };
+            if mark.is_null() {
+                continue;
+            }
+            let Some(name) = out_text(|buf, len, out| unsafe { (api.FPDFPageObjMark_GetName)(mark, buf.cast(), len, out) }) else { continue };
+            let Ok(name) = CString::new(name) else { continue };
+            let copy = unsafe { (api.FPDFPageObj_AddMark)(to, name.as_ptr()) };
+            if copy.is_null() {
+                continue;
+            }
+            let params = unsafe { (api.FPDFPageObjMark_CountParams)(mark) };
+            for p in 0..params.max(0) as c_ulong {
+                let Some(key) = out_text(|buf, len, out| unsafe { (api.FPDFPageObjMark_GetParamKey)(mark, p, buf.cast(), len, out) }) else { continue };
+                let Ok(key) = CString::new(key) else { continue };
+                let key = key.as_ptr();
+                unsafe {
+                    match (api.FPDFPageObjMark_GetParamValueType)(mark, key) {
+                        sys::FPDF_OBJECT_NUMBER => {
+                            let mut value = 0f32;
+                            (api.FPDFPageObjMark_GetParamFloatValue)(mark, key, &mut value);
+                            if value.fract() == 0.0 && value.abs() < i32::MAX as f32 {
+                                (api.FPDFPageObjMark_SetIntParam)(doc, to, copy, key, value as c_int);
+                            } else {
+                                (api.FPDFPageObjMark_SetFloatParam)(doc, to, copy, key, value);
+                            }
+                        }
+                        sys::FPDF_OBJECT_STRING => {
+                            let mut len: c_ulong = 0;
+                            (api.FPDFPageObjMark_GetParamBlobValue)(mark, key, std::ptr::null_mut(), 0, &mut len);
+                            let mut bytes = vec![0u8; len as usize];
+                            if (api.FPDFPageObjMark_GetParamBlobValue)(mark, key, bytes.as_mut_ptr(), len, &mut len) != 0 {
+                                bytes.truncate(len as usize);
+                                (api.FPDFPageObjMark_SetBlobParam)(doc, to, copy, key, bytes.as_ptr(), bytes.len() as c_ulong);
+                            }
+                        }
+                        sys::FPDF_OBJECT_NAME => {
+                            if let Some(value) = out_text(|buf, len, out| (api.FPDFPageObjMark_GetParamStringValue)(mark, key, buf.cast(), len, out))
+                                && let Ok(value) = CString::new(value)
+                            {
+                                (api.FPDFPageObjMark_SetStringParam)(doc, to, copy, key, value.as_ptr());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     /// The page's content stream written anew from its objects; the text
@@ -1378,6 +1444,15 @@ fn utf16_text(get: impl Fn(*mut c_void, c_ulong) -> c_ulong) -> Option<String> {
     let written = get(buf.as_mut_ptr().cast(), bytes);
     let units = (written.min(bytes) as usize / 2).saturating_sub(1);
     Some(String::from_utf16_lossy(&buf[..units]))
+}
+
+/// A UTF-16 string from a PDFium call that takes a buffer, its length in
+/// bytes and where to write the length it needs (with the terminator).
+fn out_text(get: impl Fn(*mut c_void, c_ulong, *mut c_ulong) -> sys::FPDF_BOOL) -> Option<String> {
+    utf16_text(|buf, len| {
+        let mut needed: c_ulong = 0;
+        if get(buf, len, &mut needed) == 0 { 0 } else { needed }
+    })
 }
 
 #[cfg(test)]
@@ -1851,6 +1926,51 @@ pub mod tests {
             }
         }
         assert!(tried > 0, "no page with text objects among the first 20");
+    }
+
+    /// On a real tagged document (`METALPDF_SAMPLE`): page 31's first runs
+    /// replaced, in their own font (a Latin text) and in a stand-in (a
+    /// Cyrillic one a subset has no glyphs for), saved and read back:
+    /// every object keeps the marked content its tags point into.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_tagged_documents_marks_survive_an_edit() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let api = api();
+        let doc = Document::open(api, Path::new(&sample), None).unwrap();
+        let mcids = |page: &Page| {
+            let n = unsafe { (api.FPDFPage_CountObjects)(page.handle) };
+            let ids: Vec<i32> = (0..n).map(|i| unsafe { (api.FPDFPageObj_GetMarkedContentID)((api.FPDFPage_GetObject)(page.handle, i)) }).collect();
+            ids
+        };
+        let tagged = |doc: &Document| unsafe { (api.FPDFCatalog_IsTagged)(doc.inner.handle) } != 0;
+        if !tagged(&doc) || doc.page_count() <= 30 {
+            println!("not a tagged document of more than 30 pages");
+            return;
+        }
+        let mut fonts = crate::fonts::Fonts::default();
+        let index = 30;
+        let page = doc.load_page(index).unwrap();
+        let before = mcids(&page);
+        let objects = page.text_objects();
+        let runs: Vec<usize> = objects.iter().filter(|o| o.text.trim().chars().count() >= 3).take(4).map(|o| o.index).collect();
+        for (n, &i) in runs.iter().enumerate() {
+            let text = if n < 2 { "Replaced by MetalPDF" } else { "Замена текста" };
+            let how = page.set_text(i, text, &mut |name, flags| fonts.get(name, flags)).unwrap();
+            println!("object {i} (MCID {}): {how:?}", before[i]);
+        }
+        assert_eq!(mcids(&page), before, "the edited page");
+        drop(page);
+        let out = std::env::temp_dir().join("metalpdf_tagged_edit.pdf");
+        doc.save_to(&out).unwrap();
+        let saved = Document::open(api, &out, None).unwrap();
+        assert!(tagged(&saved));
+        let page = saved.load_page(index).unwrap();
+        assert_eq!(mcids(&page), before, "the page saved and read back");
+        println!("{} objects, {} marked: kept", before.len(), before.iter().filter(|&&i| i >= 0).count());
+        drop(page);
+        drop(saved);
+        std::fs::remove_file(&out).ok();
     }
 
     /// On a real document (`METALPDF_SAMPLE`): the page numbering read off

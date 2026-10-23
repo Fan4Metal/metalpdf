@@ -330,14 +330,9 @@ impl Edit {
 /// A document's edits: a second copy of the file they are applied to,
 /// the viewed one staying as it is; undo rebuilds it from the log.
 /// Whether the document's `obstacles` (`Document::edit_obstacles`) rule
-/// `edit` out. A signed or encrypted document takes no edit; a tagged
-/// one takes page operations (the page tree changes, the content streams
-/// stay; its structure tree is left as it is), but no change to a page's
-/// content, which `FPDFPage_GenerateContent` would write without the
-/// marked content the tags point into.
-fn refuse(obstacles: &[&'static str], edit: &Edit) -> Result<(), String> {
-    let blocking: Vec<&str> = obstacles.iter().copied().filter(|o| !(edit.restructures() && *o == "tagged")).collect();
-    if blocking.is_empty() { Ok(()) } else { Err(format!("the document is {}", blocking.join(" and "))) }
+/// edits out: a signed or encrypted document takes none.
+fn refuse(obstacles: &[&'static str]) -> Result<(), String> {
+    if obstacles.is_empty() { Ok(()) } else { Err(format!("the document is {}", obstacles.join(" and "))) }
 }
 
 struct EditState {
@@ -621,12 +616,12 @@ impl Worker {
             return Err("the text is empty".into());
         }
         if let Some(state) = self.edits.get(&id) {
-            refuse(&state.obstacles, &edit)?;
+            refuse(&state.obstacles)?;
         } else {
             let path = self.paths.get(&id).cloned().ok_or("no such document")?;
             let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
             let obstacles = doc.edit_obstacles();
-            refuse(&obstacles, &edit)?;
+            refuse(&obstacles)?;
             self.edits.insert(id, EditState { doc, obstacles, log: Vec::new(), edited: HashSet::new(), all_pages: false });
         }
         if edit.restructures() {
@@ -976,15 +971,10 @@ mod tests {
     }
 
     #[test]
-    fn tagged_documents_take_page_operations_only() {
-        let delete = Edit::DeletePage { page: 0 };
-        let text = Edit::Text { page: 0, object: 0, text: "x".into() };
-        assert!(refuse(&[], &text).is_ok());
-        assert!(refuse(&["tagged"], &delete).is_ok());
-        assert_eq!(refuse(&["tagged"], &text).unwrap_err(), "the document is tagged");
-        assert_eq!(refuse(&["signed", "tagged"], &delete).unwrap_err(), "the document is signed");
-        assert_eq!(refuse(&["signed", "tagged"], &text).unwrap_err(), "the document is signed and tagged");
-        assert!(refuse(&["encrypted"], &delete).is_err());
+    fn signed_or_encrypted_documents_take_no_edit() {
+        assert!(refuse(&[]).is_ok());
+        assert_eq!(refuse(&["signed"]).unwrap_err(), "the document is signed");
+        assert_eq!(refuse(&["signed", "encrypted"]).unwrap_err(), "the document is signed and encrypted");
     }
 
     #[test]
