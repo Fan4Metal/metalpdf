@@ -1114,8 +1114,10 @@ impl Page {
         // (a subset has the digits of a date): the run keeps its font and
         // its look. What came out is read back, since a font that cannot
         // encode a character (a subset's space) drops it: then the old
-        // text is put back and the stand-in takes over.
-        let has_glyph = |c: char| !font.is_null() && !unsafe { (api.FPDFFont_GetGlyphPath)(font, u32::from(c), 12.0) }.is_null();
+        // text is put back and the stand-in takes over. A space has no
+        // outline, so no glyph path: it is left to the reading back, or
+        // every edit with a space went to the stand-in.
+        let has_glyph = |c: char| c.is_whitespace() || !font.is_null() && !unsafe { (api.FPDFFont_GetGlyphPath)(font, u32::from(c), 12.0) }.is_null();
         if !subset || text.chars().all(has_glyph) {
             // A subset font written by PDFium maps its space to U+00A0
             // and drops U+0020: the no-break space is tried after.
