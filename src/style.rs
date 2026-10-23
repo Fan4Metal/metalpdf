@@ -124,6 +124,34 @@ pub fn apply_dark_style(ctx: &egui::Context, style: DarkStyle) {
         visuals.widgets.noninteractive.bg_stroke.color = border;
         visuals.window_stroke.color = border;
         visuals.hyperlink_color = palette.link;
+        classic_widgets(&mut visuals);
         s.visuals = visuals;
     });
+}
+
+/// egui 0.36's widgets, which egui 0.37 made roomier and rounder (and,
+/// in the dark theme, darker with brighter text): the family's look, and
+/// the sizes the toolbar and the first page's predicted area were made
+/// with. The spacing is set in `App::new` with the other style values
+/// (`classic_spacing`).
+pub fn classic_widgets(visuals: &mut Visuals) {
+    let w = &mut visuals.widgets;
+    w.noninteractive.corner_radius = egui::CornerRadius::same(2);
+    w.inactive.corner_radius = egui::CornerRadius::same(2);
+    w.hovered.corner_radius = egui::CornerRadius::same(3);
+    w.active.corner_radius = egui::CornerRadius::same(2);
+    w.open.corner_radius = egui::CornerRadius::same(2);
+    if visuals.dark_mode {
+        w.inactive.weak_bg_fill = Color32::from_gray(60);
+        w.inactive.fg_stroke.color = Color32::from_gray(180);
+        w.hovered.weak_bg_fill = Color32::from_gray(70);
+        w.hovered.fg_stroke.color = Color32::from_gray(240);
+        w.active.weak_bg_fill = Color32::from_gray(55);
+    }
+}
+
+/// egui 0.36's button padding and widget height (see `classic_widgets`).
+pub fn classic_spacing(spacing: &mut egui::style::Spacing) {
+    spacing.button_padding = egui::vec2(4.0, 1.0);
+    spacing.interact_size = egui::vec2(40.0, 18.0);
 }

@@ -503,7 +503,11 @@ impl App {
         // invisible on the track. A floating bar as wide at rest as when
         // hovered, allocated its width, with the handle in the text colour
         // at a low opacity, gives what is wanted.
+        // The light theme is egui's own, with 0.36's widgets (the dark
+        // one gets them in `apply_dark_style`).
+        cc.egui_ctx.style_mut_of(egui::Theme::Light, |s| crate::style::classic_widgets(&mut s.visuals));
         cc.egui_ctx.all_styles_mut(|s| {
+            crate::style::classic_spacing(&mut s.spacing);
             s.spacing.scroll = egui::style::ScrollStyle {
                 floating: true,
                 bar_width: 12.0,
