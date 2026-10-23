@@ -93,6 +93,9 @@ pub struct DocState {
     pub print_scaling: bool,
     /// The next size batch to ask for; past `page_count` when all are there.
     sizes_next: usize,
+    /// A page whose sizes were wanted while a batch was on its way (a
+    /// position restored deep in the file, a jump): its batch comes next.
+    sizes_near: Option<usize>,
     sizes_waiting: bool,
     pub outline: Option<Vec<OutlineItem>>,
     outline_asked: bool,
@@ -126,6 +129,7 @@ impl DocState {
             title: None,
             print_scaling: true,
             sizes_next: 0,
+            sizes_near: None,
             sizes_waiting: false,
             outline: None,
             outline_asked: false,
@@ -184,8 +188,10 @@ impl DocState {
                     }
                 }
                 self.sizes_waiting = false;
-                // The next batch, until every size is known.
-                if let Some(next) = (0..self.page_count).step_by(SIZE_BATCH).find(|&s| self.sizes[s].is_none()) {
+                // The next batch, until every size is known: the one round
+                // a page wanted meanwhile first.
+                let near = self.sizes_near.take().filter(|&p| self.sizes.get(p).is_some_and(Option::is_none)).map(|p| p / SIZE_BATCH * SIZE_BATCH);
+                if let Some(next) = near.or_else(|| (0..self.page_count).step_by(SIZE_BATCH).find(|&s| self.sizes[s].is_none())) {
                     self.ask_sizes(engine, next);
                 }
                 true
@@ -236,9 +242,12 @@ impl DocState {
     /// Make sure the sizes round `page` are asked for first (a jump far
     /// into the document).
     pub fn need_sizes_near(&mut self, engine: &Engine, page: usize) {
-        if page < self.page_count && self.sizes.get(page).is_some_and(Option::is_none) && !self.sizes_waiting {
-            let start = page / SIZE_BATCH * SIZE_BATCH;
-            self.ask_sizes(engine, start);
+        if page < self.page_count && self.sizes.get(page).is_some_and(Option::is_none) {
+            if self.sizes_waiting {
+                self.sizes_near = Some(page);
+            } else {
+                self.ask_sizes(engine, page / SIZE_BATCH * SIZE_BATCH);
+            }
         }
     }
 
@@ -264,6 +273,7 @@ impl DocState {
         self.sizes = vec![None; page_count];
         self.labels = vec![None; page_count];
         self.sizes_next = 0;
+        self.sizes_near = None;
         self.sizes_waiting = false;
         self.outline = None;
         self.outline_asked = false;
@@ -373,6 +383,25 @@ pub fn parse_roman(text: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page wanted while a batch is on its way (a position restored deep
+    /// in a book) has its batch asked for next, not after every one before.
+    #[test]
+    fn the_sizes_round_a_wanted_page_come_next() {
+        let engine = Engine::start(None);
+        let mut doc = DocState::new(1);
+        doc.page_count = 1000;
+        doc.sizes = vec![None; 1000];
+        doc.labels = vec![None; 1000];
+        doc.ask_sizes(&engine, 0);
+        doc.need_sizes_near(&engine, 700);
+        let batch = |start: usize| Event::Sizes { id: 1, start, sizes: vec![Some([600.0, 800.0]); SIZE_BATCH], labels: vec![None; SIZE_BATCH] };
+        doc.take(&batch(0), &engine);
+        assert_eq!(doc.sizes_next, 640);
+        // Then the rest in order.
+        doc.take(&batch(640), &engine);
+        assert_eq!(doc.sizes_next, 128);
+    }
 
     #[test]
     fn front_matter_is_numbered_in_roman_numerals() {

@@ -288,7 +288,10 @@ impl Engine {
         {
             q.busy = None;
         }
-        if q.wanted.iter().map(|(k, _)| *k).eq(wanted.iter().map(|(k, _)| *k)) {
+        // Tiers count too: a preview that became urgent (tier 0) is made
+        // in the pause of a render under way, which looks at the list
+        // when the generation moves.
+        if q.wanted == wanted {
             return;
         }
         q.wanted = wanted;
@@ -906,8 +909,7 @@ impl Worker {
     fn page(&mut self, id: DocId, index: usize) -> Option<&Page> {
         let key = (id, index);
         if !self.pages.contains_key(&key) {
-            let edited = self.edits.get(&id).filter(|e| e.all_pages || e.edited.contains(&index)).map(|e| &e.doc);
-            let page = edited.or_else(|| self.docs.get(&id))?.load_page(index)?;
+            let page = self.doc_for_page(id, index)?.load_page(index)?;
             self.pages.insert(key, page);
             self.page_order.push_back(key);
             while self.page_order.len() > PAGE_CACHE {
@@ -920,6 +922,12 @@ impl Worker {
             self.page_order.push_back(key);
         }
         self.pages.get(&key)
+    }
+
+    /// The document page `index` of `id` comes from: the edited copy when
+    /// the page was edited (or pages were put in or removed).
+    fn doc_for_page(&self, id: DocId, index: usize) -> Option<&Document> {
+        self.edits.get(&id).filter(|e| e.all_pages || e.edited.contains(&index)).map(|e| &e.doc).or_else(|| self.docs.get(&id))
     }
 
     /// Whether `key` is still wanted (or busy, which it is while rendering).
@@ -969,7 +977,6 @@ impl Worker {
             }
         });
         let mut status = page.render_start(&mut bitmap, at, FLAGS, None, &mut pause);
-        let mut interleaved: Vec<RenderKey> = Vec::new();
         while status == RenderStatus::Paused {
             if !self.still_wanted(&key) {
                 page.render_close();
@@ -989,7 +996,14 @@ impl Worker {
                 }
             };
             if let Some(k) = urgent {
-                interleaved.push(k);
+                let started = Instant::now();
+                // Its own page handle (the rendering one keeps its
+                // progressive context); the cached one when it is open.
+                let fresh = if self.pages.contains_key(&(k.doc, k.page as usize)) { None } else { self.doc_for_page(k.doc, k.page as usize).and_then(|d| d.load_page(k.page as usize)) };
+                let other = fresh.as_ref().or_else(|| self.pages.get(&(k.doc, k.page as usize)));
+                let pixels = other.and_then(|p| self.preview_pixels(p, k));
+                drop(fresh);
+                self.preview_done(k, pixels, started);
             }
             status = page.render_continue(&mut bitmap, at, FLAGS, &mut pause);
         }
@@ -1016,31 +1030,29 @@ impl Worker {
         } else {
             self.send(Event::RenderFailed(key));
         }
-        // The previews that queued up during the pauses.
-        for k in interleaved {
-            self.render_preview(k);
-        }
     }
 
-    /// A preview in one go, between the pauses of a larger render.
-    fn render_preview(&mut self, key: RenderKey) {
-        let started = Instant::now();
-        let Some(size) = self.view_doc(key.doc).and_then(|d| d.page_size(key.page as usize)) else {
-            self.send(Event::RenderFailed(key));
-            return;
-        };
+    /// Preview `key` rendered in one go on `page`.
+    fn preview_pixels(&self, page: &Page, key: RenderKey) -> Option<Pixels> {
+        let size = self.view_doc(key.doc)?.page_size(key.page as usize)?;
         let turned = crate::layout::turned(size, key.turns);
         let width = key.width.max(1);
         let height = ((width as f32) * turned[1] / turned[0]).round().clamp(1.0, 1.0e5) as u32;
-        let (Some(mut bitmap), Some(page)) = (Bitmap::new(self.api, width, height), self.page(key.doc, key.page as usize)) else {
-            self.send(Event::RenderFailed(key));
-            return;
-        };
+        let mut bitmap = Bitmap::new(self.api, width, height)?;
         let at = Placement { start_x: 0, start_y: 0, size_x: width as i32, size_y: height as i32, rotate: i32::from(key.turns % 4) };
         page.render(&mut bitmap, at, FLAGS);
-        let pixels = Pixels::flat(width, height, bitmap.into_pixels());
-        self.shared.queue.lock().unwrap().done.insert(key);
-        self.send(Event::Rendered { key, pixels, took_ms: started.elapsed().as_secs_f32() * 1e3 });
+        Some(Pixels::flat(width, height, bitmap.into_pixels()))
+    }
+
+    /// A preview's pixels (or its failure) sent to the UI.
+    fn preview_done(&self, key: RenderKey, pixels: Option<Pixels>, started: Instant) {
+        match pixels {
+            Some(pixels) => {
+                self.shared.queue.lock().unwrap().done.insert(key);
+                self.send(Event::Rendered { key, pixels, took_ms: started.elapsed().as_secs_f32() * 1e3 });
+            }
+            None => self.send(Event::RenderFailed(key)),
+        }
     }
 }
 
