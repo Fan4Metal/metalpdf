@@ -36,7 +36,7 @@ pub fn app_icon(ctx: &egui::Context, points: f32, cache: &mut Option<TextureHand
 /// A toolbar button with `icon` (`icons::SIZE` points) in the button's
 /// text colour; `selected` gives it the look of a toggle that is on.
 pub fn icon_button(ui: &mut Ui, icon: Icon, selected: bool, tip: &str) -> Response {
-    let id = ui.id().with(("icon", icon));
+    let id = egui::IdSalt::new(("icon", icon));
     let resp = egui::Button::new(egui::Atom::custom(id, egui::Vec2::splat(icons::SIZE)))
         .selected(selected)
         .atom_ui(ui);
@@ -123,7 +123,7 @@ pub fn sidebar_side_menu(response: &Response, side: &mut SidebarSide) -> bool {
 /// toolbar's right end) only while `Updates::newer` is `Some`.
 pub fn update_button(ui: &mut Ui, tag: &str) -> Response {
     let version = crate::update::version_of(tag);
-    let id = ui.id().with("update_icon");
+    let id = egui::IdSalt::new("update_icon");
     let resp = egui::Button::new((egui::Atom::custom(id, egui::Vec2::splat(icons::SIZE)), version)).atom_ui(ui);
     let response = resp.response.clone().on_hover_text(tr!(
         format!("Version {version} is available: open its release page"),

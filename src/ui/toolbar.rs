@@ -90,7 +90,7 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
             field.shown = info.label.clone();
         }
         let width = (field.text.chars().count().max(2) as f32 * 8.0 + 12.0).clamp(36.0, 90.0);
-        let edit = egui::TextEdit::singleline(&mut field.text).desired_width(width).horizontal_align(Align::Center);
+        let edit = egui::TextEdit::singleline(&mut field.text).desired_width(width).align(egui::Align2::CENTER_TOP);
         let response = ui.add_enabled(enabled, edit);
         if std::mem::take(&mut field.focus) {
             response.request_focus();
@@ -134,7 +134,7 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
                 ui.horizontal(|ui| {
                     ui.add_space(pad);
                     ui.label(tr!("This page is number", "Эта страница — номер"));
-                    let entry = ui.add(egui::TextEdit::singleline(&mut field.number_entry).hint_text(info.label.as_str()).desired_width(44.0).horizontal_align(egui::Align::Center));
+                    let entry = ui.add(egui::TextEdit::singleline(&mut field.number_entry).hint_text(info.label.as_str()).desired_width(44.0).align(egui::Align2::CENTER_TOP));
                     let number = field.number_entry.trim().parse::<i64>().ok();
                     let ok = ui.add_enabled(number.is_some(), egui::Button::new(tr!("OK", "ОК")));
                     if let Some(number) = number

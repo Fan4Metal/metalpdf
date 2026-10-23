@@ -214,7 +214,7 @@ impl PrintDialog {
         }
         let mut action = None;
         let mut print = false;
-        let modal = egui::Modal::new(egui::Id::new("print")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("print")).show(ctx, |ui| {
             ui.set_width(PREVIEW.x + 470.0);
             ui.horizontal(|ui| {
                 ui.heading(tr!("Print", "Печать"));

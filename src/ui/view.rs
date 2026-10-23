@@ -192,7 +192,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
             // its drag-to-scroll before the content, so a drag sense here
             // would take them (it did, and the hand moved nothing).
             let sense = if hand { Sense::click() } else { Sense::click_and_drag() };
-            let response = ui.interact(ui.min_rect(), ui.id().with("pages-sense"), sense);
+            let response = ui.interact(ui.min_rect(), ui.scope_id().with("pages-sense"), sense);
             out.hovered = response.hovered();
             // The right button let go: what it is over is noted for the menu.
             let menu_opened = response.secondary_clicked();
@@ -371,7 +371,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                                         None => tr!(format!("Embedded subset; {font} is not installed, so text it cannot show is set in {}", crate::fonts::generic_name(&object.font, object.flags)), format!("Встроенное подмножество; {font} не установлен, и текст, которого в нём нет, набирается шрифтом {}", crate::fonts::generic_name(&object.font, object.flags))),
                                     }.as_str());
                                 }
-                                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with(("run-tip", i, object.index)), pos + vec2(12.0, 16.0)).show(|ui| {
+                                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.scope_id().with(("run-tip", i, object.index)), pos + vec2(12.0, 16.0)).show(|ui| {
                                     ui.label(RichText::new(tip).size(12.0));
                                 });
                             }
@@ -519,7 +519,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                     let height = font.size * 1.35 + 6.0;
                     let width = (screen.width() + 2.0 * font.size + 8.0).max(120.0);
                     let field = Rect::from_min_size(pos2(screen.min.x - 4.0, screen.center().y - height / 2.0), vec2(width, height));
-                    let widget = egui::TextEdit::singleline(&mut e.text).font(font).margin(vec2(4.0, 3.0)).vertical_align(egui::Align::Center);
+                    let widget = egui::TextEdit::singleline(&mut e.text).font(font).margin(vec2(4.0, 3.0)).align(egui::Align2::LEFT_CENTER);
                     let edit = ui.put(field, widget);
                     if std::mem::take(&mut e.fresh) {
                         edit.request_focus();
@@ -717,7 +717,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     // single-page mode a drag of the pages with the hand turns a page only
     // when pulled well past its edge (`ViewState::drag_single`); a drag of
     // the bar goes where it is dragged, turning pages on the way.
-    let offset = scroll.state.offset;
+    let offset = scroll.state.clamped_offset();
     let on_bar = ui.input(|i| i.pointer.any_down() && i.pointer.press_origin().is_some_and(|p| !scroll.inner_rect.contains(p)));
     if single && hand && !on_bar {
         let dragging = ui.input(|i| i.pointer.primary_down());

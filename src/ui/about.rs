@@ -50,7 +50,7 @@ impl AboutDialog {
         }
         let mut open_licenses = false;
         let icon = super::app_icon(ctx, ICON, &mut self.icon);
-        let modal = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("about")).show(ctx, |ui| {
             ui.set_width(340.0);
             // The cross in the top right corner, over the centred content
             // (a child Ui takes no room in the layout).

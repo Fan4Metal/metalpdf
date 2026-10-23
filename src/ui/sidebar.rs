@@ -129,7 +129,7 @@ fn thumbnails(
     let total = y;
     let current = tab.view.current;
     // Follow the reader: scroll to the current page when it changes.
-    let last_id = ui.id().with("thumbs-last");
+    let last_id = ui.scope_id().with("thumbs-last");
     let changed = ui.data(|d| d.get_temp::<usize>(last_id)) != Some(current);
     if changed {
         ui.data_mut(|d| d.insert_temp(last_id, current));
@@ -149,7 +149,7 @@ fn thumbnails(
             let h = height_of(i);
             let x = origin.x + (ui.available_width() - width) / 2.0;
             let rect = Rect::from_min_size(pos2(x, origin.y + top), vec2(width, h));
-            let response = ui.interact(rect.expand(4.0), ui.id().with(("thumb", i)), Sense::click());
+            let response = ui.interact(rect.expand(4.0), ui.scope_id().with(("thumb", i)), Sense::click());
             if response.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             }
@@ -224,7 +224,7 @@ fn outline(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarA
     }
     let current = tab.view.current;
     let active = active_item(items, current);
-    let last_id = ui.id().with("outline-last");
+    let last_id = ui.scope_id().with("outline-last");
     let changed = ui.data(|d| d.get_temp::<Option<Vec<usize>>>(last_id)) != Some(active.clone());
     if changed {
         ui.data_mut(|d| d.insert_temp(last_id, active.clone()));
@@ -307,7 +307,7 @@ fn search(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarAc
     let current = find.current;
     let spacing = ui.spacing().item_spacing.y;
     // Follow the current hit when it changes.
-    let last_id = ui.id().with("search-last");
+    let last_id = ui.scope_id().with("search-last");
     let changed = ui.data(|d| d.get_temp::<Option<(usize, usize)>>(last_id)) != Some(current);
     if changed {
         ui.data_mut(|d| d.insert_temp(last_id, current));
@@ -442,7 +442,7 @@ fn outline_item(ui: &mut Ui, item: &OutlineItem, path: &mut Vec<usize>, cx: &mut
     if depth == 0 && path[0] > 0 {
         ui.add_space(6.0);
     }
-    let id = ui.id().with(("outline-item", path.clone()));
+    let id = ui.scope_id().with(("outline-item", path.clone()));
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     if on_active_path && has_children && cx.changed && !is_active {
         state.set_open(true);

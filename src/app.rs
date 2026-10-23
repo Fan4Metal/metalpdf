@@ -128,6 +128,9 @@ enum Confirm {
     Quit,
 }
 
+/// The `--screenshot` picture was written (by egui's callback).
+static SCREENSHOT_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Jumps remembered for Alt+Left.
 const MAX_HISTORY: usize = 100;
 
@@ -514,6 +517,11 @@ impl App {
                 dormant_background_opacity: 0.0,
                 active_background_opacity: 0.0,
                 interact_background_opacity: 0.08,
+                // No rubber band (egui 0.37): the page area sets its offset
+                // from the anchor every frame and keeps it within a page in
+                // single-page mode, where a pull past the edge turns the
+                // page; an overscroll springing back fought both.
+                kinetic: egui::style::KineticScrollStyle { rubber_band: false, ..Default::default() },
                 ..egui::style::ScrollStyle::floating()
             };
         });
@@ -887,7 +895,7 @@ impl App {
         let mut choice = None;
         // As qview's confirmations: a heading, what is at stake, large
         // buttons, the first the one Enter presses.
-        let modal = egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
+        let modal = egui::Modal::new(Id::unique("confirm")).show(ctx, |ui| {
             ui.set_width(420.0);
             if unsaved.is_empty() && printing.is_some() {
                 ui.heading(tr!("Printing", "Идёт печать"));
@@ -1757,13 +1765,13 @@ impl App {
         if !tab.find.open {
             return;
         }
-        Panel::top(Id::new(("find-bar", wid)))
+        Panel::top(Id::unique(("find-bar", wid)))
             .frame(egui::Frame::new().fill(ui.visuals().extreme_bg_color).inner_margin(Margin::symmetric(10, 5)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let input = ui.add(
                         egui::TextEdit::singleline(&mut tab.find.query)
-                            .id(Id::new(("find-input", wid)))
+                            .id(Id::unique(("find-input", wid)))
                             .hint_text(tr!("Find in document", "Найти в документе"))
                             .desired_width(280.0),
                     );
@@ -1899,7 +1907,7 @@ impl App {
         let mut actions = Vec::new();
         let min = crate::ui::sidebar::min_width(ui);
         let side = self.settings.sidebar_side;
-        let id = Id::new(("sidebar", wid));
+        let id = Id::unique(("sidebar", wid));
         let panel = match side {
             SidebarSide::Left => Panel::left(id),
             SidebarSide::Right => Panel::right(id),
@@ -1988,7 +1996,7 @@ impl App {
         let (wid, is_root) = (self.windows[cur].id, self.windows[cur].is_root());
         let newer = self.updates.newer().map(str::to_owned);
         let theme = self.theme;
-        Panel::top(Id::new(("tab-bar", wid)))
+        Panel::top(Id::unique(("tab-bar", wid)))
             .frame(egui::Frame::new().fill(ui.visuals().extreme_bg_color).inner_margin(Margin::symmetric(8, 5)))
             .show(ui, |ui| {
                 let bar = ui.max_rect();
@@ -2159,7 +2167,7 @@ impl App {
         }
         let title = self.windows[cur].tabs[from].title.clone();
         let grab = drag.grab;
-        let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new(("tab-drag", cur))));
+        let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::unique(("tab-drag", cur))));
         let galley = painter.layout_no_wrap(title, FontId::proportional(13.5), palette.text);
         let rect = Rect::from_min_size(pointer - grab, galley.size() + vec2(16.0, 8.0));
         painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
@@ -2618,7 +2626,7 @@ impl App {
         // No toolbar on the start page, where it has nothing to act on;
         // a print job under way keeps it for its progress and its cross.
         if self.windows[cur].active_tab().is_some() || self.printing.is_some() {
-            Panel::top(Id::new(("toolbar", wid)))
+            Panel::top(Id::unique(("toolbar", wid)))
                 .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(Margin::symmetric(8, 4)))
                 .show(ui, |ui| self.toolbar(ui));
         }
@@ -2627,7 +2635,7 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.central(ui, &palette));
         self.jump_to_hit();
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
-            let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::new(("drop-overlay", wid))));
+            let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::unique(("drop-overlay", wid))));
             let rect = ctx.content_rect();
             painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(110));
             painter.rect_stroke(rect.shrink(12.0), 8.0, Stroke::new(2.0, palette.accent), StrokeKind::Inside);
@@ -2652,24 +2660,23 @@ impl App {
         // After 60 frames and 2 s: time for the renders, tiles included.
         if self.frame >= 60 && !self.screenshot_asked && crate::since_start() >= Duration::from_secs(2) {
             self.screenshot_asked = true;
-            ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
+            // The picture comes to a callback (egui 0.37), which writes it.
+            let (path, repaint) = (path.clone(), ctx.clone());
+            ctx.request_screenshot(move |image| {
+                let [w, h] = image.size;
+                let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+                match crate::bench::write_rgba_png(&path, &rgba, w as u32, h as u32) {
+                    Ok(()) => log::info!("screenshot written to {}", path.display()),
+                    Err(e) => log::error!("screenshot: {e}"),
+                }
+                SCREENSHOT_TAKEN.store(true, Ordering::Release);
+                repaint.request_repaint();
+            });
         }
         if !self.screenshot_asked || self.frame < 120 {
             ctx.request_repaint();
         }
-        let image = ctx.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
-        if let Some(image) = image {
-            let [w, h] = image.size;
-            let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
-            match crate::bench::write_rgba_png(path, &rgba, w as u32, h as u32) {
-                Ok(()) => log::info!("screenshot written to {}", path.display()),
-                Err(e) => log::error!("screenshot: {e}"),
-            }
+        if SCREENSHOT_TAKEN.load(Ordering::Acquire) && !self.quitting {
             self.quitting = true;
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }

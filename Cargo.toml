@@ -21,9 +21,10 @@ repository = "https://github.com/Fan4Metal/metalpdf"
 # default features are off: no accesskit, no wgpu and no `links` (URLs are
 # opened through win::shell_open instead of ui.hyperlink_to). No
 # `persistence`: the settings (window geometry included) are this app's
-# JSON (settings.rs), as in MetalMD.
-eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
-egui = "0.36"
+# JSON (settings.rs), as in MetalMD. `clipboard` is a feature of its own
+# since 0.37 (Ctrl+C and the copied picture go through arboard).
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "clipboard"] }
+egui = "0.37"
 # The page textures are uploaded with glow directly (textures.rs): egui's
 # texture manager converts the pixels and builds mipmaps on the UI thread.
 glow = "0.17"

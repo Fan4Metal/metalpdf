@@ -31,7 +31,7 @@ pub fn show(
             // middle of the window. Its height comes from the previous
             // pass; an unknown or changed height makes egui lay the frame
             // out again before painting, so the page does not jump.
-            let height_id = ui.id().with("home-height");
+            let height_id = ui.scope_id().with("home-height");
             let known: Option<f32> = ui.data(|d| d.get_temp(height_id));
             let top = known.map_or(16.0, |h| ((ui.available_height() - h) * 0.4).max(16.0));
             ui.add_space(top);

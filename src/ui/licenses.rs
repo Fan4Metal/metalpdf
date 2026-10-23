@@ -65,7 +65,7 @@ impl LicensesView {
     /// Draw the window; whether it is to close (the cross, Esc, a click
     /// outside).
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
-        let modal = egui::Modal::new(egui::Id::new("licenses")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("licenses")).show(ctx, |ui| {
             let screen = ctx.content_rect().size() - vec2(24.0, 24.0);
             let size = vec2(SIZE.x.min(screen.x.max(300.0)), SIZE.y.min(screen.y.max(200.0)));
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
