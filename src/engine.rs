@@ -715,24 +715,26 @@ impl Worker {
             let state = self.edits.get_mut(&id).expect("inserted above");
             state.all_pages = true;
             let doc = &state.doc;
-            match &edit {
-                Edit::InsertBlank { page, size } => doc.insert_blank_page(*page, *size)?,
-                Edit::InsertPdf { page, path } => {
-                    let source = Document::open(self.api, path, None).map_err(|e| e.to_string())?;
-                    doc.import_pages(&source, *page)?;
-                }
-                Edit::ReplacePdf { page, path } => {
-                    let source = Document::open(self.api, path, None).map_err(|e| e.to_string())?;
-                    doc.import_pages(&source, *page + 1)?;
-                    doc.delete_page(*page)?;
-                }
+            let applied = match &edit {
+                Edit::InsertBlank { page, size } => doc.insert_blank_page(*page, *size),
+                Edit::InsertPdf { page, path } => Document::open(self.api, path, None).map_err(|e| e.to_string()).and_then(|source| doc.import_pages(&source, *page)).map(|_| ()),
+                Edit::ReplacePdf { page, path } => Document::open(self.api, path, None)
+                    .map_err(|e| e.to_string())
+                    .and_then(|source| doc.import_pages(&source, *page + 1))
+                    .and_then(|_| doc.delete_page(*page)),
                 Edit::DeletePage { page } => {
-                    if doc.page_count() <= 1 {
-                        return Err("the last page stays".into());
-                    }
-                    doc.delete_page(*page)?;
+                    if doc.page_count() <= 1 { Err("the last page stays".into()) } else { doc.delete_page(*page) }
                 }
                 _ => unreachable!("not a page edit"),
+            };
+            if let Err(reason) = applied {
+                // Half done, maybe (pages imported, the old one kept): the
+                // copy made again from the log.
+                let log = state.log.clone();
+                if let Err(e) = self.rebuild_edits(id, log) {
+                    log::warn!("the edited copy could not be rebuilt after a failed page edit: {e}");
+                }
+                return Err(reason);
             }
             state.log.push(edit);
             return Ok(state.log.len());

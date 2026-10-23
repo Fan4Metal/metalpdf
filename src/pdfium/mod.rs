@@ -1037,7 +1037,9 @@ impl Page {
             let (name, subset, flags) = if font.is_null() {
                 (String::new(), false, 0)
             } else {
-                let mut buf = vec![0u8; 256];
+                // The length (with the terminator) first, then the name.
+                let n = unsafe { (api.FPDFFont_GetBaseFontName)(font, std::ptr::null_mut(), 0) };
+                let mut buf = vec![0u8; n.max(1)];
                 let n = unsafe { (api.FPDFFont_GetBaseFontName)(font, buf.as_mut_ptr().cast(), buf.len()) };
                 let name = String::from_utf8_lossy(&buf[..n.saturating_sub(1).min(buf.len())]).into_owned();
                 let embedded = unsafe { (api.FPDFFont_GetIsEmbedded)(font) } == 1;

@@ -219,7 +219,9 @@ impl PrintDialog {
             ui.horizontal(|ui| {
                 ui.heading(tr!("Print", "Печать"));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if super::close_cross(ui) {
+                    // Not while the driver's dialog is open: its answer
+                    // would go to a dialog that is gone.
+                    if self.properties.is_none() && super::close_cross(ui) {
                         action = Some(PrintAction::Close);
                     }
                 });
@@ -242,7 +244,7 @@ impl PrintDialog {
                 if ui.add_enabled(ready, egui::Button::new(text(tr!("Print", "Печать"))).min_size(vec2(160.0, 34.0))).clicked() {
                     print = true;
                 }
-                if ui.add(egui::Button::new(text(tr!("Cancel", "Отмена"))).min_size(vec2(100.0, 34.0))).clicked() {
+                if ui.add_enabled(self.properties.is_none(), egui::Button::new(text(tr!("Cancel", "Отмена"))).min_size(vec2(100.0, 34.0))).clicked() {
                     action = Some(PrintAction::Close);
                 }
                 ui.add_space(6.0);
