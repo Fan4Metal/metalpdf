@@ -66,7 +66,7 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 
 ### Sidebar
 
-`F4` (or the button left of Open) shows the sidebar with three lists, on the left or on the right of the window as chosen in the context menu of that button or of the lists' tabs. **Pages** shows every page as a thumbnail, the current one framed and kept in view; a click goes to the page. **Outline** shows the document's bookmarks as a tree, the levels set apart by size, weight and indent with guides down them, each with its page number; the chapters are folded but the one the reader is in, whose bookmark is highlighted; a click follows a bookmark, a click on its triangle folds it. **Search** lists the hits of a search. The sidebar's width is kept.
+`F4` (or the button left of Open) shows the sidebar with three lists, on the left or on the right of the window as chosen in the context menu of that button or of the lists' tabs. **Pages** shows every page as a thumbnail, the current one framed and kept in view; a click goes to the page. **Outline** shows the document's bookmarks as a tree, the levels set apart by size, weight and indent with guides down them, each with its page number; the chapters are folded but the one the reader is in, whose bookmark is highlighted; a click follows a bookmark, a click on its triangle folds it. **Search** lists the hits of a search by page, each on one line with the match highlighted as on the page and the current one marked. The sidebar's width is kept.
 
 ### Find
 

@@ -259,9 +259,33 @@ const OUTLINE_INDENT: f32 = 16.0;
 
 /// The most rows the search list lays out.
 const SEARCH_ROWS: usize = 5000;
+/// The height of a row of the search list (a page's or a hit's), the
+/// indent of a hit under its page and the most characters kept before a
+/// match, so that it stays near the start of its line.
+const SEARCH_ROW: f32 = 22.0;
+const SEARCH_INDENT: f32 = 14.0;
+const SEARCH_LEAD: usize = 24;
 
-/// The search's hits by page, each on the line it is on with the match
-/// in the accent colour, the current one selected; a click goes to it.
+/// The end of `before` (the text before a match on its line) kept to
+/// about `max` characters: cut at a word's start when there is one, with
+/// an ellipsis; whole when short enough.
+fn lead(before: &str, max: usize) -> String {
+    let count = before.chars().count();
+    if count <= max {
+        return before.to_owned();
+    }
+    let tail: String = before.chars().skip(count - max).collect();
+    // A word's start within the tail, unless that leaves too little.
+    let tail = match tail.find(' ') {
+        Some(i) if tail.len() - i > max / 2 => tail[i + 1..].to_owned(),
+        _ => tail,
+    };
+    format!("…{tail}")
+}
+
+/// The search's hits by page: a header a page with its hit count, then
+/// each hit on one line with the match highlighted as on the page, the
+/// current one on a bar; a click goes to it.
 fn search(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarAction>) {
     let find = &tab.find;
     ui.add_space(8.0);
@@ -287,7 +311,6 @@ fn search(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarAc
         }
     }
     let current = find.current;
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
     let spacing = ui.spacing().item_spacing.y;
     // Follow the current hit when it changes.
     let last_id = ui.id().with("search-last");
@@ -300,31 +323,69 @@ fn search(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarAc
         && let Some(c) = current
         && let Some(row) = rows.iter().position(|r| matches!(r, Row::Hit(p, i) if (*p, *i) == c))
     {
-        let offset = row as f32 * (row_height + spacing) - ui.available_height() / 2.0;
+        let offset = row as f32 * (SEARCH_ROW + spacing) - ui.available_height() / 2.0;
         area = area.vertical_scroll_offset(offset.max(0.0));
     }
     let text_color = ui.visuals().text_color();
     let font = egui::TextStyle::Body.resolve(ui.style());
-    area.show_rows(ui, row_height, rows.len(), |ui, range| {
-        let width = ui.available_width();
+    area.show_rows(ui, SEARCH_ROW, rows.len(), |ui, range| {
         for row in &rows[range] {
+            let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), SEARCH_ROW), Sense::click());
+            let painter = ui.painter();
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
             match *row {
+                // The page: its number, a rule to the edge, its hit count;
+                // a click goes there.
                 Row::Page(page) => {
+                    let small = egui::FontId::proportional(11.5);
+                    let color = if response.hovered() { palette.text } else { palette.muted };
                     let label = tab.doc.label(page);
-                    ui.label(RichText::new(tr!(format!("Page {label}"), format!("Стр. {label}"))).color(palette.muted).size(12.0));
+                    let name = painter.layout_no_wrap(tr!(format!("Page {label}"), format!("Стр. {label}")), small.clone(), color);
+                    let count = painter.layout_no_wrap(find.hits[&page].len().to_string(), small, palette.muted);
+                    // Low in the row: the room above parts the groups.
+                    let y = rect.bottom() - 3.0 - name.size().y;
+                    let mid = (y + name.size().y / 2.0).round() + 0.5;
+                    let (x0, x1) = (rect.left() + 4.0 + name.size().x + 6.0, rect.right() - 6.0 - count.size().x - 6.0);
+                    if x1 > x0 {
+                        painter.line_segment([pos2(x0, mid), pos2(x1, mid)], Stroke::new(1.0, palette.muted.gamma_multiply(0.3)));
+                    }
+                    painter.galley(pos2(rect.right() - 6.0 - count.size().x, y), count, palette.muted);
+                    painter.galley(pos2(rect.left() + 4.0, y), name, color);
+                    if response.clicked() {
+                        actions.push(SidebarAction::GoToPage(page));
+                    }
                 }
+                // A hit: one line, indented under its page, the match on
+                // the search's own highlight, the line round it cut so the
+                // match stays near the start; the current one on a bar, as
+                // the outline's current bookmark.
                 Row::Hit(page, i) => {
                     let hit = &find.hits[&page][i];
+                    let is_current = current == Some((page, i));
+                    if is_current {
+                        painter.rect_filled(rect.shrink2(vec2(2.0, 1.0)), 3.0, palette.accent.gamma_multiply(0.16));
+                    } else if response.hovered() {
+                        painter.rect_filled(rect.shrink2(vec2(2.0, 1.0)), 3.0, palette.muted.gamma_multiply(0.12));
+                    }
+                    let text_x = rect.left() + SEARCH_INDENT;
+                    let before = lead(&hit.before, SEARCH_LEAD);
+                    let plain = egui::text::TextFormat { font_id: font.clone(), color: text_color, ..Default::default() };
+                    let matched = egui::text::TextFormat { font_id: font.clone(), color: text_color, background: palette.search, ..Default::default() };
                     let mut job = egui::text::LayoutJob::default();
-                    job.wrap.max_width = width - 12.0;
+                    job.append(&before, 0.0, plain.clone());
+                    job.append(&hit.matched, 0.0, matched);
+                    job.append(&hit.after, 0.0, plain);
+                    job.wrap.max_width = (rect.right() - 6.0 - text_x).max(20.0);
                     job.wrap.max_rows = 1;
                     job.wrap.break_anywhere = true;
-                    let plain = egui::text::TextFormat { font_id: font.clone(), color: text_color, ..Default::default() };
-                    let strong = egui::text::TextFormat { font_id: font.clone(), color: palette.accent, ..Default::default() };
-                    job.append(&hit.before, 0.0, plain.clone());
-                    job.append(&hit.matched, 0.0, strong);
-                    job.append(&hit.after, 0.0, plain);
-                    if ui.selectable_label(current == Some((page, i)), job).clicked() {
+                    job.wrap.overflow_character = Some('…');
+                    let galley = painter.layout_job(job);
+                    let cut = galley.elided || before.len() != hit.before.len();
+                    painter.galley(pos2(text_x, rect.center().y - galley.size().y / 2.0), galley, text_color);
+                    let response = if cut { response.on_hover_text(format!("{}{}{}", hit.before, hit.matched, hit.after)) } else { response };
+                    if response.clicked() {
                         actions.push(SidebarAction::GoToHit(page, i));
                     }
                 }
@@ -469,6 +530,14 @@ fn active_item(items: &[OutlineItem], page: usize) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_text_before_a_match_is_cut_at_a_word() {
+        assert_eq!(lead("Short ", 16), "Short ");
+        assert_eq!(lead("10.9 Muscle Tissue and the ", 16), "…Tissue and the ");
+        // No word start that leaves enough: cut mid-word.
+        assert_eq!(lead("Pneumonoultramicroscopic ", 16), "…ltramicroscopic ");
+    }
 
     fn item(title: &str, page: usize, children: Vec<OutlineItem>) -> OutlineItem {
         OutlineItem { title: title.into(), target: Some(Target::Page { index: page, x: None, y: None }), children }
