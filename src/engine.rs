@@ -872,7 +872,7 @@ impl Worker {
                         count: n,
                         rects: p.text_rects(start, n),
                         before: crate::search::line_before(&p.text(from, start - from)),
-                        matched: p.text(start, n).replace('\u{2}', "-"),
+                        matched: crate::selection::unhyphenate(&p.text(start, n)),
                         after: crate::search::line_after(&p.text(start + n, HIT_CONTEXT)),
                     }
                 })

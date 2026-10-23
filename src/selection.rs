@@ -143,15 +143,43 @@ pub fn word_at(layout: &TextLayout, index: usize) -> Option<(usize, usize)> {
     }
 }
 
+/// PDFium's marks of a hyphen at a line's end made plain. The characters'
+/// codes have U+0002 there, `FPDFText_GetText` U+FFFE where it joined the
+/// word itself: a word cut so is joined again (the mark dropped, with the
+/// line break after it), as Acrobat copies it; a mark at the end of the
+/// text, the word's rest not in it, is a hyphen.
+pub fn unhyphenate(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\u{fffe}' => {}
+            '\u{2}' => {
+                let mut next = i + 1;
+                while next < chars.len() && (chars[next] == '\r' || chars[next] == '\n') {
+                    next += 1;
+                }
+                if next < chars.len() && chars[next].is_alphanumeric() {
+                    i = next;
+                    continue;
+                }
+                out.push('-');
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    out
+}
+
 pub fn text_of(layout: &TextLayout, range: std::ops::Range<usize>) -> String {
     let units: Vec<u16> = layout.chars[range.start.min(layout.chars.len())..range.end.min(layout.chars.len())]
         .iter()
         .map(|c| c.code as u16)
         .collect();
     let text: String = char::decode_utf16(units).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)).collect();
-    // PDFium reads a hyphen at a line's end as U+0002: the word it cuts is
-    // joined again, as Acrobat copies it; elsewhere it is a hyphen.
-    text.replace("\u{2}\r\n", "").replace('\u{2}', "-").replace("\r\n", "\n").replace('\r', "\n")
+    unhyphenate(&text).replace("\r\n", "\n").replace('\r', "\n")
 }
 
 #[cfg(test)]
@@ -161,11 +189,22 @@ mod tests {
     #[test]
     fn a_word_cut_at_a_lines_end_is_copied_whole() {
         // PDFium's mark of the hyphen at the line's end, then the break.
-        let text = "элемен\u{2}\r\nтарные 1\u{2}2";
+        let text = "элемен\u{2}\r\nтарные числа";
         let layout = TextLayout {
             chars: text.encode_utf16().map(|u| crate::pdfium::Char { code: u32::from(u), rect: [0.0; 4], origin: [0.0; 2], generated: u == 13 || u == 10 }).collect(),
         };
-        assert_eq!(text_of(&layout, 0..layout.chars.len()), "элементарные 1-2");
+        assert_eq!(text_of(&layout, 0..layout.chars.len()), "элементарные числа");
+    }
+
+    #[test]
+    fn the_marks_of_a_line_end_hyphen_are_made_plain() {
+        // Joined by PDFium (U+FFFE), joined here (U+0002 and the break, or
+        // U+0002 before the word's rest), cut off at the end.
+        assert_eq!(unhyphenate("переклю\u{fffe}чение"), "переключение");
+        assert_eq!(unhyphenate("переклю\u{2}чение"), "переключение");
+        assert_eq!(unhyphenate("переклю\u{2}\r\nчение"), "переключение");
+        assert_eq!(unhyphenate("переклю\u{2}"), "переклю-");
+        assert_eq!(unhyphenate("a\u{2} b"), "a- b");
     }
 
     #[test]

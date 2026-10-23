@@ -11,6 +11,7 @@ use crate::engine::SearchHit;
 /// what a hit's line says before the match (a space before the match
 /// kept, the line's start trimmed).
 pub fn line_before(text: &str) -> String {
+    let text = crate::selection::unhyphenate(text);
     let tail = text.rsplit(['\r', '\n']).next().unwrap_or("");
     collapse(tail, false, true)
 }
@@ -19,16 +20,16 @@ pub fn line_before(text: &str) -> String {
 /// collapsed: what a hit's line says after the match (a space after the
 /// match kept, the line's end trimmed).
 pub fn line_after(text: &str) -> String {
+    let text = crate::selection::unhyphenate(text);
     let head = text.split(['\r', '\n']).next().unwrap_or("");
     collapse(head, true, false)
 }
 
-/// Runs of whitespace as one space, dropped at the ends unless kept;
-/// PDFium's mark of a hyphen at a line's end (U+0002) as the hyphen it is.
+/// Runs of whitespace as one space, dropped at the ends unless kept.
 fn collapse(s: &str, keep_leading: bool, keep_trailing: bool) -> String {
     let mut out = String::with_capacity(s.len());
     let mut pending = false;
-    for c in s.chars().map(|c| if c == '\u{2}' { '-' } else { c }) {
+    for c in s.chars() {
         if c.is_whitespace() {
             pending = true;
             continue;
@@ -207,7 +208,9 @@ mod tests {
     #[test]
     fn a_line_end_hyphen_reads_as_a_hyphen() {
         assert_eq!(line_before("x\r\nэлемен\u{2}"), "элемен-");
-        assert_eq!(line_after(" элемен\u{2}\r\nтарные"), " элемен-");
+        // The word's rest on the next line: joined, the line goes on.
+        assert_eq!(line_after(" элемен\u{2}\r\nтарные числа\r\nдальше"), " элементарные числа");
+        assert_eq!(line_before("с одного переклю\u{fffe}чение "), "с одного переключение ");
     }
 
     use super::*;
