@@ -78,6 +78,24 @@ pub fn double_click_time() -> f64 {
     unsafe { GetDoubleClickTime() as f64 / 1000.0 }
 }
 
+/// The mouse pointer's position in the client area of `hwnd`, in
+/// physical pixels, as the system has it now.
+pub fn cursor_pos(hwnd: isize) -> Option<[f32; 2]> {
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetCursorPos(point: *mut Point) -> i32;
+        fn ScreenToClient(hwnd: isize, point: *mut Point) -> i32;
+    }
+    let mut point = Point { x: 0, y: 0 };
+    let ok = unsafe { GetCursorPos(&mut point) != 0 && ScreenToClient(hwnd, &mut point) != 0 };
+    ok.then_some([point.x as f32, point.y as f32])
+}
+
 /// HTTPS GET of `path` on `host` through WinHTTP, which brings the system's
 /// TLS and proxy settings (no HTTP crate); `headers` are extra request
 /// lines joined with `\r\n`. Returns the status code and the body, refused

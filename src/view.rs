@@ -4,6 +4,7 @@
 //! turning. Pure state with the sums that move it; the drawing is in
 //! `ui/view.rs`.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::layout::{self, Anchor, Layout};
@@ -38,7 +39,36 @@ pub struct ViewState {
     /// Single-page mode: how far a drag of the pages has pulled past the
     /// page's edge, down positive (`drag_single`).
     pub pull: f32,
+    /// The pages held by the hand (`hand_press`, `hand_frame`).
+    pub hand: Option<HandDrag>,
+    /// The pages coasting after the hand let go of them.
+    pub coast: Option<Coast>,
 }
+
+/// A drag of the pages with the hand: where the pointer was in the last
+/// frame and where it was lately, for the speed it lets go at.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HandDrag {
+    last: [f32; 2],
+    samples: VecDeque<(Instant, [f32; 2])>,
+}
+
+/// The pages moving on after the hand let go: the speed in points a
+/// second (the offset's, down and right positive) and the offset they
+/// were left at, so that anything else moving them stops the coast.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Coast {
+    velocity: [f32; 2],
+    at: [f32; 2],
+}
+
+/// The pointer's last stretch the hand's speed is measured over.
+const HAND_SPEED_SPAN: Duration = Duration::from_millis(80);
+/// The coast's speed falls by e in this many seconds (egui's own decay
+/// for the drags it scrolls).
+const COAST_DECAY: f32 = 0.5;
+/// The coast stops when what is left of it is shorter than this, points.
+const COAST_STOP: f32 = 0.5;
 
 /// How far the hand pulls past a page's edge, in points, to turn it in
 /// single-page mode.
@@ -65,6 +95,8 @@ impl ViewState {
             wheel_acc: 0.0,
             pull: 0.0,
             zoom_acc: 0.0,
+            hand: None,
+            coast: None,
         }
     }
 
@@ -153,6 +185,84 @@ impl ViewState {
             let down = self.pull > 0.0;
             self.pull = 0.0;
             self.flip(down, count);
+        }
+    }
+
+    /// The hand pressed on the pages with the pointer at `pointer` (points
+    /// in the window): they follow it from now on (`hand_frame`).
+    pub fn hand_press(&mut self, pointer: [f32; 2], now: Instant) {
+        self.coast = None;
+        self.hand = Some(HandDrag { last: pointer, samples: VecDeque::from([(now, pointer)]) });
+    }
+
+    /// A frame of the hand, before the pages are drawn: while the button
+    /// is `down` the pages move by what the pointer (at `pointer`) moved
+    /// since the last frame, in single-page mode through `drag_single`;
+    /// let go, they coast at the pointer's last speed, slowing down, until
+    /// anything else moves them or a button is `pressed`. Returns whether
+    /// the coast goes on (a frame more is wanted).
+    ///
+    /// egui's own drag-to-scroll took the pointer's moves as egui got
+    /// them: a frame often had none and the next two or three, and the
+    /// pages stood still and jumped; the pointer read from the system each
+    /// frame moves evenly. egui also moved its offset after the content
+    /// was laid out, so the pages were a frame behind the pointer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hand_frame(&mut self, layout: &Layout, pointer: Option<[f32; 2]>, down: bool, pressed: bool, now: Instant, dt: f32, count: usize) -> bool {
+        let at = [self.scroll_x, layout.clamp_scroll(layout.scroll_of(self.anchor), self.anchor.page, self.viewport[1])];
+        if let Some(hand) = &mut self.hand {
+            if down && let Some(p) = pointer {
+                let delta = [p[0] - hand.last[0], p[1] - hand.last[1]];
+                hand.last = p;
+                hand.samples.push_back((now, p));
+                while hand.samples.len() > 2 && hand.samples.front().is_some_and(|(t, _)| now.duration_since(*t) > HAND_SPEED_SPAN) {
+                    hand.samples.pop_front();
+                }
+                self.move_to(layout, [at[0] - delta[0], at[1] - delta[1]], true, count);
+                return false;
+            }
+            if !down {
+                // Let go: the speed over the last stretch, nothing if the
+                // pointer stood still before the button went up.
+                let (t0, p0) = hand.samples.front().copied().unwrap_or((now, hand.last));
+                let span = now.duration_since(t0).as_secs_f32();
+                let velocity = if span > 0.0 { [-(hand.last[0] - p0[0]) / span, -(hand.last[1] - p0[1]) / span] } else { [0.0; 2] };
+                self.hand = None;
+                self.pull = 0.0;
+                self.coast = Some(Coast { velocity, at });
+            }
+        }
+        let Some(coast) = &mut self.coast else { return false };
+        let speed = coast.velocity[0].hypot(coast.velocity[1]);
+        if pressed || (at[0] - coast.at[0]).abs() > 0.5 || (at[1] - coast.at[1]).abs() > 0.5 || speed * COAST_DECAY < COAST_STOP {
+            self.coast = None;
+            return false;
+        }
+        let step = [coast.velocity[0] * dt, coast.velocity[1] * dt];
+        let decay = (-dt / COAST_DECAY).exp();
+        coast.velocity = [coast.velocity[0] * decay, coast.velocity[1] * decay];
+        self.move_to(layout, [at[0] + step[0], at[1] + step[1]], false, count);
+        let moved = [self.scroll_x, layout.clamp_scroll(layout.scroll_of(self.anchor), self.anchor.page, self.viewport[1])];
+        // Stopped by an edge: the coast ends there.
+        let Some(coast) = &mut self.coast else { return false };
+        if (moved[0] - at[0]).abs() < 0.01 && (moved[1] - at[1]).abs() < 0.01 {
+            self.coast = None;
+            return false;
+        }
+        coast.at = moved;
+        true
+    }
+
+    /// The pages moved by the hand to the offset `to` (x, y), kept within
+    /// the document, in single-page mode within the page (a page turned
+    /// past `PULL` while `dragging`).
+    fn move_to(&mut self, layout: &Layout, to: [f32; 2], dragging: bool, count: usize) {
+        self.scroll_x = to[0].clamp(0.0, (layout.size[0] - self.viewport[0]).max(0.0));
+        let y = to[1].clamp(0.0, (layout.size[1] - self.viewport[1]).max(0.0));
+        if self.mode == ViewMode::Single {
+            self.drag_single(layout, y, dragging, count);
+        } else {
+            self.set_scroll(layout, y);
         }
     }
 
@@ -493,5 +603,99 @@ mod tests {
         assert_eq!(view.turns, 0);
         view.rotate(false);
         assert_eq!(view.turns, 3);
+    }
+
+    #[test]
+    fn the_hand_moves_the_pages_with_the_pointer_and_lets_them_coast() {
+        let mut view = ViewState::new(ViewMode::Continuous, ZoomSetting::Scale(1.0));
+        view.viewport = [1000.0, 800.0];
+        let s = sizes(10);
+        let layout = view.layout(&s, A4);
+        let scroll = |view: &ViewState| layout.scroll_of(view.anchor);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        view.anchor = layout.anchor_at(2000.0, 800.0);
+        view.hand_press([500.0, 600.0], at(0));
+        // Up by 10 points a frame: the pages go down the document as much.
+        for frame in 1..=10u64 {
+            assert!(!view.hand_frame(&layout, Some([500.0, 600.0 - 10.0 * frame as f32]), true, false, at(frame * 7), 0.007, 10));
+            assert!((scroll(&view) - (2000.0 + 10.0 * frame as f32)).abs() < 0.01, "{}", scroll(&view));
+        }
+        // Let go: on at about 10 / 7 ms, slowing, until it stops.
+        assert!(view.hand_frame(&layout, Some([500.0, 500.0]), false, false, at(77), 0.007, 10));
+        let first = scroll(&view) - 2100.0;
+        assert!((first - 10.0).abs() < 1.0, "{first}");
+        let mut frames = 0;
+        while view.hand_frame(&layout, Some([500.0, 500.0]), false, false, at(77), 0.007, 10) {
+            frames += 1;
+            assert!(frames < 1000);
+        }
+        let coasted = scroll(&view) - 2100.0;
+        // About the speed times the decay time, 1430 × 0.5.
+        assert!((600.0..800.0).contains(&coasted), "{coasted}");
+
+        // Held still before letting go: no coast.
+        view.hand_press([500.0, 600.0], at(1000));
+        view.hand_frame(&layout, Some([500.0, 550.0]), true, false, at(1007), 0.007, 10);
+        let held = scroll(&view);
+        for frame in 2..20u64 {
+            view.hand_frame(&layout, Some([500.0, 550.0]), true, false, at(1000 + frame * 7), 0.007, 10);
+        }
+        assert!(!view.hand_frame(&layout, Some([500.0, 550.0]), false, false, at(1140), 0.007, 10));
+        assert_eq!(scroll(&view), held);
+    }
+
+    #[test]
+    fn a_coast_stops_at_a_press_and_when_something_else_moves_the_pages() {
+        let mut view = ViewState::new(ViewMode::Continuous, ZoomSetting::Scale(1.0));
+        view.viewport = [1000.0, 800.0];
+        let s = sizes(10);
+        let layout = view.layout(&s, A4);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let fling = |view: &mut ViewState| {
+            view.anchor = layout.anchor_at(2000.0, 800.0);
+            view.hand_press([500.0, 600.0], at(0));
+            view.hand_frame(&layout, Some([500.0, 500.0]), true, false, at(20), 0.007, 10);
+            assert!(view.hand_frame(&layout, Some([500.0, 500.0]), false, false, at(27), 0.007, 10));
+        };
+        fling(&mut view);
+        assert!(!view.hand_frame(&layout, None, false, true, at(34), 0.007, 10));
+        assert!(view.coast.is_none());
+        fling(&mut view);
+        view.scroll_by(&layout, 100.0);
+        assert!(!view.hand_frame(&layout, None, false, false, at(34), 0.007, 10));
+        assert!(view.coast.is_none());
+        // Up against the document's top: stopped there.
+        view.anchor = layout.anchor_at(30.0, 800.0);
+        view.hand_press([500.0, 500.0], at(0));
+        view.hand_frame(&layout, Some([500.0, 600.0]), true, false, at(20), 0.007, 10);
+        let mut frames = 0;
+        while view.hand_frame(&layout, Some([500.0, 600.0]), false, false, at(27), 0.007, 10) {
+            frames += 1;
+            assert!(frames < 5);
+        }
+        assert_eq!(layout.scroll_of(view.anchor), 0.0);
+    }
+
+    #[test]
+    fn the_hand_keeps_to_the_page_in_single_page_mode() {
+        let mut view = ViewState::new(ViewMode::Single, ZoomSetting::Scale(2.0));
+        view.viewport = [1000.0, 800.0];
+        let s = sizes(3);
+        let layout = view.layout(&s, A4);
+        view.go_to_page(1, 3);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let (_, bottom) = layout.page_scroll_range(1, 800.0);
+        view.hand_press([500.0, 700.0], at(0));
+        // Dragged up past the page's bottom by less than `PULL`: kept there.
+        let past = bottom - layout.scroll_of(view.anchor) + PULL / 2.0;
+        view.hand_frame(&layout, Some([500.0, 700.0 - past]), true, false, at(7), 0.007, 3);
+        assert_eq!(view.anchor.page, 1);
+        assert!((layout.scroll_of(view.anchor) - bottom).abs() < 0.01);
+        // Further: the next page.
+        view.hand_frame(&layout, Some([500.0, 700.0 - past - PULL]), true, false, at(14), 0.007, 3);
+        assert_eq!(view.anchor.page, 2);
     }
 }

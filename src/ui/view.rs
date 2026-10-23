@@ -13,6 +13,7 @@ use egui::{Color32, CursorIcon, Event, MouseWheelUnit, PointerButton, Pos2, Rect
 use crate::app::{ImageDrag, ImageSel, InlineEditor, Tab};
 use crate::cache::Textures;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey, pixel_height, too_large};
 use crate::layout;
@@ -128,7 +129,9 @@ pub struct ViewOutput {
 }
 
 /// Draw the pages of `tab` into `ui`.
-pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, palette: &Palette, tool: Tool) -> ViewOutput {
+/// `cursor` is the pointer as the system has it now, in points in the
+/// window (egui's position is often a frame late), for the hand.
+pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, palette: &Palette, tool: Tool, cursor: Option<Pos2>) -> ViewOutput {
     let mut out = ViewOutput::default();
     let area = ui.available_rect_before_wrap();
     ui.painter().rect_filled(area, 0.0, palette.backdrop);
@@ -142,6 +145,18 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     if single && wheel.scroll != 0.0 {
         let layout = tab.view.layout(&tab.doc.sizes, tab.doc.fallback);
         tab.view.wheel_single(&layout, wheel.scroll, tab.doc.page_count);
+    }
+    // The hand tool drags the pages; the editing mode's drags are its own.
+    let hand = tool == Tool::Hand && !tab.editing;
+    // The hand moves the pages before they are laid out, by the pointer
+    // as the system has it (`ViewState::hand_frame`).
+    let (primary_pressed, pointer_now) = ui.input(|i| (i.pointer.primary_pressed(), cursor.or(i.pointer.latest_pos())));
+    if tab.view.hand.is_some() || tab.view.coast.is_some() {
+        let (down, pressed, dt) = ui.input(|i| (i.pointer.primary_down(), i.pointer.any_pressed(), i.stable_dt.min(0.1)));
+        let layout = tab.view.layout(&tab.doc.sizes, tab.doc.fallback);
+        if tab.view.hand_frame(&layout, pointer_now.map(|p| [p.x, p.y]), down, pressed, Instant::now(), dt, tab.doc.page_count) {
+            ui.ctx().request_repaint();
+        }
     }
     let layout = tab.view.layout(&tab.doc.sizes, tab.doc.fallback);
     // Single-page mode: the offset stays within the page shown; the bar
@@ -164,23 +179,20 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let mut image_released = false;
     let find = &tab.find;
     let editing = tab.editing;
-    // The hand tool drags the pages; the editing mode's drags are its own.
-    let hand = tool == Tool::Hand && !editing;
     let editor: &mut Option<InlineEditor> = &mut tab.editor;
     let image: &mut Option<ImageSel> = &mut tab.image;
     let tiles: &mut HashMap<u32, RenderKey> = &mut tab.tiles;
     let menu: &mut MenuContext = &mut tab.menu;
     let max_side = ui.input(|i| i.max_texture_side) as u64;
+    let view = &mut tab.view;
 
     let scroll = egui::ScrollArea::both()
         .id_salt(("pages", tab.id))
         .auto_shrink([false, false])
-        // The mouse drags the selection, not the pages; in single-page
-        // mode the wheel turns pages (above), so it is not the area's.
-        .scroll_source(
-            (if single { ScrollSource::SCROLL_BAR } else { ScrollSource::MOUSE_WHEEL | ScrollSource::SCROLL_BAR })
-                | (if hand { ScrollSource::DRAG } else { ScrollSource::NONE }),
-        )
+        // The mouse drags the selection, or the pages with the hand
+        // (above), not the area; in single-page mode the wheel turns pages
+        // (above), so it is not the area's either.
+        .scroll_source(if single { ScrollSource::SCROLL_BAR } else { ScrollSource::MOUSE_WHEEL | ScrollSource::SCROLL_BAR })
         .vertical_scroll_offset(scroll_y)
         .horizontal_scroll_offset(scroll_x)
         .show_viewport(ui, |ui, viewport| {
@@ -188,12 +200,17 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
             let origin = ui.min_rect().min;
             visible = layout.visible(viewport.min.y, viewport.height());
             let middle = viewport.min.y + viewport.height() / 2.0;
-            // With the hand the drags are the scroll area's: egui registers
-            // its drag-to-scroll before the content, so a drag sense here
-            // would take them (it did, and the hand moved nothing).
+            // With the hand the drags are `ViewState::hand_frame`'s, from
+            // a press on the pages (the scroll bars, drawn later, are over
+            // them and take their own presses).
             let sense = if hand { Sense::click() } else { Sense::click_and_drag() };
             let response = ui.interact(ui.min_rect(), ui.scope_id().with("pages-sense"), sense);
             out.hovered = response.hovered();
+            if hand && primary_pressed && response.hovered()
+                && let Some(p) = pointer_now
+            {
+                view.hand_press([p.x, p.y], Instant::now());
+            }
             // The right button let go: what it is over is noted for the menu.
             let menu_opened = response.secondary_clicked();
             if menu_opened {
@@ -713,18 +730,11 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
         });
     tab.selection = selection;
     tab.selecting = selecting;
-    // Where the scroll area ended up (the wheel, the bar, a drag). In
-    // single-page mode a drag of the pages with the hand turns a page only
-    // when pulled well past its edge (`ViewState::drag_single`); a drag of
-    // the bar goes where it is dragged, turning pages on the way.
+    // Where the scroll area ended up (the wheel, the bar; the hand moved
+    // the pages before). A drag of the bar goes where it is dragged, in
+    // single-page mode turning pages on the way.
     let offset = scroll.state.clamped_offset();
-    let on_bar = ui.input(|i| i.pointer.any_down() && i.pointer.press_origin().is_some_and(|p| !scroll.inner_rect.contains(p)));
-    if single && hand && !on_bar {
-        let dragging = ui.input(|i| i.pointer.primary_down());
-        tab.view.drag_single(&layout, offset.y, dragging, tab.doc.page_count);
-    } else {
-        tab.view.set_scroll(&layout, offset.y);
-    }
+    tab.view.set_scroll(&layout, offset.y);
     tab.view.scroll_x = offset.x;
     tab.view.current = layout.current(offset.y, area.height());
     out.visible = visible.clone();

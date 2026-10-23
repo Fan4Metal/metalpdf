@@ -2322,6 +2322,8 @@ impl App {
         let frame = self.frame;
         let engine = &self.engine;
         let mut replace_image = None;
+        let ppp = ui.ctx().pixels_per_point();
+        let cursor = self.windows[cur].hwnd.and_then(crate::win::cursor_pos).map(|[x, y]| egui::pos2(x / ppp, y / ppp));
         let Some(tab) = self.windows[cur].active_tab_mut() else {
             // The start page on the panel colour (white in the light theme), as MetalMD's.
             ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, ui.visuals().panel_fill);
@@ -2338,7 +2340,7 @@ impl App {
         };
         match tab.doc.status.clone() {
             Status::Ready => {
-                let out = crate::ui::view::show(ui, tab, &mut self.textures, frame, palette, self.settings.tool);
+                let out = crate::ui::view::show(ui, tab, &mut self.textures, frame, palette, self.settings.tool, cursor);
                 // Ctrl+wheel over the pages: a zoom step a notch round the pointer.
                 if out.zoom_notches != 0.0 {
                     let sizes = tab.doc.sizes.clone();
