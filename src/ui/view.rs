@@ -290,14 +290,17 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
                 }
                 painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.page_edge), StrokeKind::Outside);
                 let text = tab.doc.text.get(&i);
-                // The search's hits.
+                // The search's hits, as the selection: the characters' loose
+                // boxes merged line by line. PDFium's own rectangles are one
+                // a text object, each as high as its glyphs, and a word cut
+                // at kerned pairs came out ragged, the overlaps darker.
                 let (hits, current_hit) = find.hits_on(i);
                 if let Some(text) = text {
                     for (h, hit) in hits.iter().enumerate() {
                         let color = if current_hit == Some(h) { palette.search_current } else { palette.search };
-                        for r in &hit.rects {
-                            let screen = page_rect_to_screen(text.rect_to_page(*r), turns, size, rect);
-                            painter.rect_filled(screen.expand(1.0), 2.0, color);
+                        for r in selection::line_rects(text.boxes(), hit.start..hit.start + hit.count) {
+                            let screen = page_rect_to_screen(r, turns, size, rect);
+                            painter.rect_filled(screen, 1.0, color);
                         }
                     }
                 }
