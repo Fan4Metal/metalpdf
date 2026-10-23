@@ -85,6 +85,14 @@ impl FindState {
         self.asked = None;
     }
 
+    /// A page's text changed (an edit): the hits name characters that
+    /// are not there any more, so the search is made again.
+    pub fn text_changed(&mut self) {
+        if self.open {
+            self.asked = None;
+        }
+    }
+
     /// Whether a search for `query` with these options must be started
     /// (the next search number is taken). `false` when the hits at hand
     /// are for them already.

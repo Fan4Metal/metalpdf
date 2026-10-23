@@ -121,6 +121,9 @@ pub struct ImageDrag {
 enum Confirm {
     /// Closing tab `tab` of window `window`, which has unsaved edits.
     CloseTab { window: u64, tab: u64 },
+    /// Closing the tabs of window `window` (all but `keep`), some with
+    /// unsaved edits: the window's close button, or "Close others".
+    CloseTabs { window: u64, keep: Option<u64> },
     /// Quitting with unsaved edits.
     Quit,
 }
@@ -401,6 +404,8 @@ pub struct App {
     printing: Option<(DocId, usize, usize)>,
     /// The reader chose to quit with unsaved edits: the close goes on.
     quitting: bool,
+    /// The tab to close once its Save As (asked when closing it) is done.
+    close_after_save: Option<u64>,
     /// The sidebar as it was before a search showed its hits in it.
     sidebar_before_search: Option<(bool, crate::settings::SidebarTab)>,
 }
@@ -428,7 +433,11 @@ fn page_resolver(doc: &crate::document::DocState) -> PageResolver {
     let shift = doc.page_shift;
     Box::new(move |text: &str| -> Option<usize> {
         let text = text.trim();
-        if let Some(i) = labels.iter().position(|l| l.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(text))) {
+        // The file's own labels, when they are shown (a page shift puts
+        // printed numbers in their place).
+        if shift == 0
+            && let Some(i) = labels.iter().position(|l| l.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(text)))
+        {
             return Some(i);
         }
         // A roman numeral under a page shift: a page of the front matter,
@@ -578,6 +587,7 @@ impl App {
             printing: None,
             sidebar_before_search: None,
             quitting: false,
+            close_after_save: None,
         };
         // The tabs: the active one is being opened by the engine already
         // under `first_id`; the others are asked for now.
@@ -771,7 +781,9 @@ impl App {
                 self.uploads.retain(|(k, _)| k.doc != doc);
                 self.engine.request(Request::Close(doc));
                 self.engine.request(Request::Open { id: new_id, path: t.path.clone(), password: None, first: None });
+                let page_shift = t.doc.page_shift;
                 t.doc = DocState::new(new_id);
+                t.doc.page_shift = page_shift;
                 t.editor = None;
                 t.image = None;
                 t.selection = None;
@@ -831,17 +843,21 @@ impl App {
                 .window_index(window)
                 .and_then(|w| self.windows[w].tab_index(tab).map(|i| self.windows[w].tabs[i].title.clone()))
                 .unwrap_or_default(),
-            Confirm::Quit => String::new(),
+            Confirm::CloseTabs { .. } | Confirm::Quit => String::new(),
         };
-        // The documents quitting would lose.
+        // The documents quitting, or closing the tabs, would lose.
         let unsaved: Vec<String> = match confirm {
             Confirm::Quit => self.windows.iter().flat_map(|w| &w.tabs).filter(|t| t.doc.modified).map(|t| t.title.clone()).collect(),
+            Confirm::CloseTabs { window, keep } => self
+                .window_index(window)
+                .map(|w| self.windows[w].tabs.iter().filter(|t| t.doc.modified && Some(t.id) != keep).map(|t| t.title.clone()).collect())
+                .unwrap_or_default(),
             Confirm::CloseTab { .. } => Vec::new(),
         };
         // A print job quitting would stop: sheets sent, sheets in all.
         let printing = match confirm {
             Confirm::Quit => self.printing.map(|(_, done, total)| (done, total)),
-            Confirm::CloseTab { .. } => None,
+            Confirm::CloseTab { .. } | Confirm::CloseTabs { .. } => None,
         };
         let danger = crate::style::Palette::of(ctx).error;
         let mut choice = None;
@@ -861,7 +877,7 @@ impl App {
                     ui.weak(tr!("Saving asks where to; the original is replaced only when chosen.", "Сохранение спросит, куда; оригинал заменяется, только если выбрать его."));
                 }
                 Confirm::Quit if unsaved.is_empty() => {}
-                Confirm::Quit => {
+                Confirm::Quit | Confirm::CloseTabs { .. } => {
                     ui.label(tr!("These documents have changes that are not saved:", "В этих документах есть несохранённые изменения:"));
                     ui.add_space(2.0);
                     for title in unsaved.iter().take(8) {
@@ -871,7 +887,11 @@ impl App {
                         ui.weak(tr!(format!("and {} more", unsaved.len() - 8), format!("и ещё {}", unsaved.len() - 8)));
                     }
                     ui.add_space(2.0);
-                    ui.weak(tr!("Cancel and save them with Ctrl+S, or quit and lose the changes.", "Отмените и сохраните их через Ctrl+S или выйдите, потеряв изменения."));
+                    if matches!(confirm, Confirm::Quit) {
+                        ui.weak(tr!("Cancel and save them with Ctrl+S, or quit and lose the changes.", "Отмените и сохраните их через Ctrl+S или выйдите, потеряв изменения."));
+                    } else {
+                        ui.weak(tr!("Cancel and save them with Ctrl+S, or close and lose the changes.", "Отмените и сохраните их через Ctrl+S или закройте, потеряв изменения."));
+                    }
                 }
             }
             if let Some((done, total)) = printing {
@@ -896,7 +916,11 @@ impl App {
                         choice = Some(1);
                     }
                 } else {
-                    let label = if unsaved.is_empty() { tr!("Stop printing and quit", "Прервать печать и выйти") } else { tr!("Quit without saving", "Выйти без сохранения") };
+                    let label = match confirm {
+                        Confirm::CloseTabs { .. } => tr!("Close without saving", "Закрыть без сохранения"),
+                        _ if unsaved.is_empty() => tr!("Stop printing and quit", "Прервать печать и выйти"),
+                        _ => tr!("Quit without saving", "Выйти без сохранения"),
+                    };
                     let quit = egui::Button::new(text(label).color(egui::Color32::WHITE)).fill(danger).min_size(egui::vec2(160.0, 34.0));
                     if ui.add(quit).clicked() {
                         choice = Some(1);
@@ -918,8 +942,21 @@ impl App {
         let Some(choice) = choice else { return };
         self.confirm = None;
         match (confirm, choice) {
-            (Confirm::CloseTab { window, tab }, 0) => self.save_as(ctx, window, tab),
+            (Confirm::CloseTab { window, tab }, 0) => {
+                // Closed once saved (not when the dialog is cancelled).
+                self.close_after_save = Some(tab);
+                self.save_as(ctx, window, tab);
+            }
             (Confirm::CloseTab { window, tab }, 1) => self.force_close_tab(window, tab),
+            (Confirm::CloseTabs { window, keep: Some(keep) }, 1) => self.force_close_other_tabs(window, keep),
+            (Confirm::CloseTabs { window, keep: None }, 1) => {
+                if window == self.windows[0].id {
+                    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                    self.adopt_window(ctx, maximized);
+                } else if let Some(w) = self.window_index(window) {
+                    self.windows[w].close_requested = true;
+                }
+            }
             (Confirm::Quit, 1) => {
                 // The spooler's job abandoned, not left half sent.
                 if self.printing.is_some() {
@@ -932,12 +969,27 @@ impl App {
         }
     }
 
-    /// Closes every tab of the current window but tab `index`.
+    /// Closes every tab of the current window but tab `index`, asking
+    /// first when any of them has unsaved edits.
     fn close_other_tabs(&mut self, index: usize) {
         let window = self.win();
-        if index >= window.tabs.len() {
+        let Some(keep) = window.tabs.get(index).map(|t| t.id) else { return };
+        let id = window.id;
+        if window.tabs.iter().any(|t| t.id != keep && t.doc.modified) {
+            if self.confirm.is_none() {
+                self.confirm = Some(Confirm::CloseTabs { window: id, keep: Some(keep) });
+            }
             return;
         }
+        self.force_close_other_tabs(id, keep);
+    }
+
+    /// Closes every tab of window `window` but tab `keep`, whatever their
+    /// edits.
+    fn force_close_other_tabs(&mut self, window: u64, keep: u64) {
+        let Some(w) = self.window_index(window) else { return };
+        let window = &mut self.windows[w];
+        let Some(index) = window.tab_index(keep) else { return };
         let kept = window.tabs.remove(index);
         let closed = std::mem::replace(&mut window.tabs, vec![kept]);
         window.active = 0;
@@ -1032,17 +1084,28 @@ impl App {
                     }
                     if let Event::Saved { path, result, .. } = &other {
                         let mut reopen = false;
-                        if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
+                        // The tab was being closed when it asked to save.
+                        let mut close = None;
+                        let close_after_save = self.close_after_save.take();
+                        if let Some((window, tab)) = self.windows.iter_mut().flat_map(|w| {
+                            let id = w.id;
+                            w.tabs.iter_mut().map(move |t| (id, t))
+                        }).find(|(_, t)| t.doc.id == doc) {
                             match result {
                                 Ok(()) => {
                                     tab.doc.modified = false;
                                     tab.notify(tr!(format!("Saved to {}", path.display()), format!("Сохранено в {}", path.display())));
                                     reopen = same_path(path, &tab.path);
+                                    if close_after_save == Some(tab.id) {
+                                        close = Some((window, tab.id));
+                                    }
                                 }
                                 Err(e) => tab.notify(tr!(format!("Could not save: {e}"), format!("Не удалось сохранить: {e}"))),
                             }
                         }
-                        if reopen {
+                        if let Some((window, tab)) = close {
+                            self.force_close_tab(window, tab);
+                        } else if reopen {
                             self.reopen_tab(doc);
                         }
                         continue;
@@ -1107,6 +1170,12 @@ impl App {
                         if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == doc) {
                             tab.image = None;
                             tab.editor = None;
+                            // The characters are numbered anew: a selection
+                            // or the hits on the page would land elsewhere.
+                            if tab.selection.as_ref().is_some_and(|s| s.touches(page as usize)) {
+                                tab.selection = None;
+                            }
+                            tab.find.text_changed();
                         }
                     }
                     let engine = &self.engine;
@@ -1280,14 +1349,16 @@ impl App {
 
     /// The keys of the current window, when no text field has the focus.
     fn keys(&mut self, ctx: &egui::Context) {
-        if self.about.open || self.print.is_some() {
+        let consume = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
+        if self.print.is_none() && self.confirm.is_none() && consume(Modifiers::NONE, Key::F1) {
+            self.about.toggle();
+        }
+        // A modal takes the keys: About, the print dialog, a confirmation
+        // (Ctrl+W under one closed the very tab it asked about).
+        if self.about.open || self.print.is_some() || self.confirm.is_some() {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input();
-        let consume = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
-        if consume(Modifiers::NONE, Key::F1) {
-            self.about.toggle();
-        }
         if consume(Modifiers::COMMAND, Key::O) {
             self.open_dialog(ctx);
         }
@@ -1322,7 +1393,10 @@ impl App {
         {
             tab.find.step(false);
         }
-        if consume(Modifiers::NONE, Key::Escape)
+        // The page field takes its own Escape (the text put back).
+        let page_field = self.win().page_field.typing;
+        if !page_field
+            && consume(Modifiers::NONE, Key::Escape)
             && let Some(tab) = self.win().active_tab_mut()
         {
             // The key is consumed here, so the inline editor is let go of here too.
@@ -2355,7 +2429,9 @@ impl App {
                     let field = ui.add(egui::TextEdit::singleline(&mut tab.password).password(true).desired_width(220.0));
                     let enter = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if (ui.button(tr!("Open", "Открыть")).clicked() || enter) && !tab.password.is_empty() {
-                        tab.doc.status = Status::Loading;
+                        // Still asking (so a refusal reads as a wrong
+                        // password), the old verdict cleared meanwhile.
+                        tab.doc.status = Status::NeedsPassword { wrong: false };
                         engine.request(Request::Open {
                             id: tab.doc.id,
                             path: tab.path.clone(),
@@ -2468,15 +2544,28 @@ impl App {
             self.focused = self.windows[cur].id;
         }
         if close_requested {
+            let window = self.windows[cur].id;
+            let unsaved = self.windows[cur].tabs.iter().any(|t| t.doc.modified);
             if cur == 0 {
-                if !self.quitting && (self.all_tabs().any(|t| t.doc.modified) || self.printing.is_some()) {
+                // With other windows open, closing the root closes its
+                // own tabs and takes over another window's; alone, it
+                // quits, which asks about every document and a print job.
+                let others = self.windows.len() > 1;
+                if self.quitting {
+                    // Confirmed: the window goes.
+                } else if others && unsaved {
                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                    self.confirm = Some(Confirm::Quit);
-                } else if self.windows.len() > 1 {
+                    self.confirm = Some(Confirm::CloseTabs { window, keep: None });
+                } else if others {
                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                     self.adopt_window(&ctx, maximized);
+                } else if self.all_tabs().any(|t| t.doc.modified) || self.printing.is_some() {
+                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                    self.confirm = Some(Confirm::Quit);
                 }
-            } else {
+            } else if unsaved && self.confirm.is_none() {
+                self.confirm = Some(Confirm::CloseTabs { window, keep: None });
+            } else if !unsaved {
                 self.windows[cur].close_requested = true;
             }
         }
@@ -2671,6 +2760,9 @@ impl eframe::App for App {
                     if let Some(path) = answer.paths.first() {
                         let path = if path.extension().is_none() { path.with_extension("pdf") } else { path.clone() };
                         self.save_to(tab, path);
+                    } else {
+                        // Cancelled: the tab stays open.
+                        self.close_after_save = None;
                     }
                 }
                 Ask::ImportPdf { tab, page, replace } => {

@@ -18,6 +18,12 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Whether the selection takes in characters of `page`.
+    pub fn touches(&self, page: usize) -> bool {
+        let (first, last) = self.ordered();
+        first.0 <= page && page <= last.0
+    }
+
     /// The selected range, first to last.
     pub fn ordered(&self) -> (CharPos, CharPos) {
         if self.anchor <= self.focus { (self.anchor, self.focus) } else { (self.focus, self.anchor) }

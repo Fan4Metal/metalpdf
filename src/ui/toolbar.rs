@@ -59,7 +59,11 @@ pub struct ToolbarInfo {
 #[derive(Default)]
 pub struct PageField {
     pub text: String,
+    /// Focus asked for (Ctrl+G), taken in the next frame.
     pub focus: bool,
+    /// The field had the focus in the last frame: its text is being
+    /// typed, not to be overwritten, and Escape is its own.
+    pub typing: bool,
     /// The number typed in the numbering menu ("This page is number…").
     pub number_entry: String,
     /// The label the text was set from: retyped when the page changes.
@@ -81,7 +85,7 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         let enabled = info.page.is_some();
         // The page field: the label of the current page, editable; Enter
         // goes there.
-        if field.shown != info.label && !field.focus {
+        if field.shown != info.label && !field.typing {
             field.text = info.label.clone();
             field.shown = info.label.clone();
         }
@@ -92,6 +96,7 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
             response.request_focus();
         }
         let typing = response.has_focus();
+        field.typing = typing;
         if response.lost_focus() {
             if ui.input(|i| i.key_pressed(Key::Enter))
                 && let Some(page) = resolve(&field.text)
