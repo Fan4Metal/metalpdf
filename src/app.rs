@@ -751,31 +751,67 @@ impl App {
                 .unwrap_or_default(),
             Confirm::Quit => String::new(),
         };
+        // The documents quitting would lose.
+        let unsaved: Vec<String> = match confirm {
+            Confirm::Quit => self.windows.iter().flat_map(|w| &w.tabs).filter(|t| t.doc.modified).map(|t| t.title.clone()).collect(),
+            Confirm::CloseTab { .. } => Vec::new(),
+        };
+        let danger = crate::style::Palette::of(ctx).error;
         let mut choice = None;
+        // As qview's confirmations: a heading, what is at stake, large
+        // buttons, the first the one Enter presses.
         let modal = egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.add_space(4.0);
-            let text = match confirm {
-                Confirm::CloseTab { .. } => tr!(format!("{name} has unsaved changes."), format!("В {name} есть несохранённые изменения.")),
-                Confirm::Quit => tr!("Some documents have unsaved changes.", "В некоторых документах есть несохранённые изменения.").to_owned(),
-            };
-            ui.label(text);
+            ui.set_width(420.0);
+            ui.heading(tr!("Unsaved Changes", "Несохранённые изменения"));
+            ui.add_space(6.0);
+            match confirm {
+                Confirm::CloseTab { .. } => {
+                    ui.label(tr!(format!("“{name}” has changes that are not saved. Save them before closing?"), format!("В «{name}» есть несохранённые изменения. Сохранить их перед закрытием?")));
+                    ui.weak(tr!("Saving asks where to; the original is replaced only when chosen.", "Сохранение спросит, куда; оригинал заменяется, только если выбрать его."));
+                }
+                Confirm::Quit => {
+                    ui.label(tr!("These documents have changes that are not saved:", "В этих документах есть несохранённые изменения:"));
+                    ui.add_space(2.0);
+                    for title in unsaved.iter().take(8) {
+                        ui.label(RichText::new(format!("• {title}")).strong());
+                    }
+                    if unsaved.len() > 8 {
+                        ui.weak(tr!(format!("and {} more", unsaved.len() - 8), format!("и ещё {}", unsaved.len() - 8)));
+                    }
+                    ui.add_space(2.0);
+                    ui.weak(tr!("Cancel and save them with Ctrl+S, or quit and lose the changes.", "Отмените и сохраните их через Ctrl+S или выйдите, потеряв изменения."));
+                }
+            }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if matches!(confirm, Confirm::CloseTab { .. }) && ui.button(tr!("Save as…", "Сохранить как…")).clicked() {
-                    choice = Some(0);
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let text = |s: &str| RichText::new(s).size(16.0);
+                let size = egui::vec2(100.0, 34.0);
+                if matches!(confirm, Confirm::CloseTab { .. }) {
+                    if ui.add(egui::Button::new(text(tr!("Save as…", "Сохранить как…"))).min_size(egui::vec2(160.0, 34.0))).clicked() {
+                        choice = Some(0);
+                    }
+                    if ui.add(egui::Button::new(text(tr!("Don't save", "Не сохранять"))).min_size(size)).clicked() {
+                        choice = Some(1);
+                    }
+                } else {
+                    let quit = egui::Button::new(text(tr!("Quit without saving", "Выйти без сохранения")).color(egui::Color32::WHITE)).fill(danger).min_size(egui::vec2(160.0, 34.0));
+                    if ui.add(quit).clicked() {
+                        choice = Some(1);
+                    }
                 }
-                if ui.button(tr!("Discard", "Не сохранять")).clicked() {
-                    choice = Some(1);
-                }
-                if ui.button(tr!("Cancel", "Отмена")).clicked() {
+                if ui.add(egui::Button::new(text(tr!("Cancel", "Отмена"))).min_size(size)).clicked() {
                     choice = Some(2);
                 }
             });
-            ui.add_space(4.0);
         });
-        if modal.should_close() {
-            choice = Some(2);
+        if choice.is_none() {
+            // Enter saves; quitting without saving takes a click.
+            if matches!(confirm, Confirm::CloseTab { .. }) && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                choice = Some(0);
+            } else if modal.should_close() {
+                choice = Some(2);
+            }
         }
         let Some(choice) = choice else { return };
         self.confirm = None;
