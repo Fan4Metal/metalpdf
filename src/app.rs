@@ -1867,12 +1867,14 @@ impl App {
                 let bar = ui.max_rect();
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if crate::ui::icon_button(ui, Icon::Open, false, tr!("Open… (Ctrl+O)", "Открыть… (Ctrl+O)")).clicked() {
-                        open_dialog = true;
-                    }
+                    // The sidebar's toggle above the sidebar; Open next to the
+                    // tabs, where a file opened adds its tab (as MetalMD).
                     let sidebar_tip = tr!("Pages and outline (F4)", "Страницы и оглавление (F4)");
                     if crate::ui::icon_button(ui, Icon::Sidebar, sidebar_visible, sidebar_tip).clicked() {
                         sidebar_click = true;
+                    }
+                    if crate::ui::icon_button(ui, Icon::Open, false, tr!("Open… (Ctrl+O)", "Открыть… (Ctrl+O)")).clicked() {
+                        open_dialog = true;
                     }
                     ui.separator();
                     self.windows[cur].tab_lead = ui.cursor().min.x - bar.min.x;
