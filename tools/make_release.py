@@ -58,6 +58,8 @@ ISS_FILE = ROOT / "tools" / "setup.iss"
 DIST_DIR = ROOT / "dist"
 EXE = ROOT / "target" / "release" / f"{EXE_STEM}.exe"
 DLL = EXE.parent / ENGINE_DLL
+# The thumbnail provider Explorer loads (thumbs/, built with the workspace).
+THUMBS_DLL = EXE.parent / "metalpdf_thumbs.dll"
 GET_PDFIUM = ROOT / "tools" / "get_pdfium.py"
 ICON = ROOT / "target" / "app.ico"
 
@@ -259,6 +261,7 @@ def make_portable_zip(version: str) -> Path:
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         z.write(EXE, f"{PORTABLE_DIR}/{EXE.name}")
         z.write(DLL, f"{PORTABLE_DIR}/{DLL.name}")
+        z.write(THUMBS_DLL, f"{PORTABLE_DIR}/{THUMBS_DLL.name}")
         z.writestr(f"{PORTABLE_DIR}/{PORTABLE_SETTINGS}", "")
         for name in PORTABLE_FILES:
             z.write(ROOT / name, f"{PORTABLE_DIR}/{name}")
@@ -300,6 +303,8 @@ def main() -> int:
             raise ReleaseError(f"cargo finished, but {EXE} was not found")
         if not DLL.is_file():
             raise ReleaseError(f"{DLL.name} was not put next to the exe (see build.rs)")
+        if not THUMBS_DLL.is_file():
+            raise ReleaseError(f"cargo finished, but {THUMBS_DLL} was not found (the thumbs crate)")
 
         steps.next("Installer icon")
         ICON.unlink(missing_ok=True)

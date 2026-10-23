@@ -42,7 +42,7 @@ MetalPDF is a PDF viewer built around one idea: a document should be on screen t
 
 The installer and the portable archive are on the [Releases](https://github.com/Fan4Metal/metalpdf/releases) page.
 
-The installer, `MetalPDF_<version>_Setup.exe`, needs no administrator rights: the program is placed in `%LOCALAPPDATA%\Programs\MetalPDF` and offered for PDF files in "Open with" and in Settings → Default apps (it never makes itself the default). The installed program keeps its settings in `%APPDATA%\MetalPDF\config\settings.json`.
+The installer, `MetalPDF_<version>_Setup.exe`, needs no administrator rights: the program is placed in `%LOCALAPPDATA%\Programs\MetalPDF` and offered for PDF files in "Open with" and in Settings → Default apps (it never makes itself the default). While MetalPDF is the default program for PDF files, Explorer shows the files' first pages as their thumbnails instead of icons: `metalpdf_thumbs.dll`, part of the installation, draws them with the same PDFium engine. The installed program keeps its settings in `%APPDATA%\MetalPDF\config\settings.json`.
 
 The portable archive, `MetalPDF_<version>_portable.zip`, holds the program in a `MetalPDF` folder and runs without installation. It also holds an empty `metalpdf.json`. While that file is next to `metalpdf.exe` and the folder is writable, the settings are kept in it, so the program can be carried on a removable drive. Without the file, the program keeps them in `%APPDATA%\MetalPDF`, as the installed program does. The About window shows where the settings are kept.
 

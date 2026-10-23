@@ -1,0 +1,28 @@
+[package]
+# The thumbnail provider Explorer loads for PDF files (metalpdf_thumbs.dll,
+# installed next to metalpdf.exe and registered by `metalpdf --register`).
+# Its version is not shown anywhere; the app's is the root Cargo.toml's.
+name = "metalpdf_thumbs"
+version = "0.0.0"
+authors = ["Fan4_Metal"]
+edition = "2024"
+rust-version = "1.95"
+description = "MetalPDF's thumbnail provider for Explorer"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",             # CreateDIBSection: the thumbnail's HBITMAP
+    "Win32_System_LibraryLoader",     # LoadLibraryExW, GetProcAddress: pdfium.dll next to this DLL
+] }
+
+[dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Com",               # IStream
+    "Win32_UI_Shell",                 # SHCreateMemStream: a document for the provider in the tests
+] }

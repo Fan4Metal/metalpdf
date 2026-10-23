@@ -67,6 +67,8 @@ Name: "assoc"; Description: "{cm:AssocTask}"; GroupDescription: "{cm:AssocGroup}
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; The rendering engine (PDFium), loaded from the program's folder.
 Source: "..\target\release\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion
+; The thumbnail provider Explorer loads for PDF files (registered by --register).
+Source: "..\target\release\metalpdf_thumbs.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\licenses\PDFium-LICENSE.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
@@ -101,3 +103,24 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--unregister"; RunOnceId: "Unreg
 ;   PrepareToInstall and [UninstallRun]) and offering to delete the settings
 ;   on uninstallation (CurUninstallStepChanged): qrec/tools/setup.iss.
 ; - MinVersion=10.0.19041 when an API needs Windows 10 2004: qrec.
+
+[UninstallDelete]
+Type: files; Name: "{app}\metalpdf_thumbs.dll.old"
+
+[Code]
+// Explorer's surrogate (dllhost.exe) keeps the thumbnail provider loaded
+// for a while after drawing thumbnails, and a loaded DLL cannot be
+// overwritten, only renamed: the old one is moved aside before the files
+// are copied and deleted at the next installation.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Dll: String;
+begin
+  if CurStep = ssInstall then
+  begin
+    Dll := ExpandConstant('{app}\metalpdf_thumbs.dll');
+    DeleteFile(Dll + '.old');
+    if FileExists(Dll) and not DeleteFile(Dll) then
+      RenameFile(Dll, Dll + '.old');
+  end;
+end;

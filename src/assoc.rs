@@ -7,7 +7,12 @@
 //!   in "Open with";
 //! - `Applications\metalpdf.exe` and `Capabilities` listed in
 //!   `RegisteredApplications`, so that MetalPDF appears in Settings →
-//!   Default apps.
+//!   Default apps;
+//! - the thumbnail provider (`thumbs/`, `metalpdf_thumbs.dll` next to the
+//!   exe) as a COM class, named on the ProgID: Explorer asks the default
+//!   ProgID for one, and without it the files showed MetalPDF's icon once
+//!   it was the default (Acrobat's extractor, borrowed for a while, gave
+//!   bitmaps Explorer turned black at medium icons).
 //!
 //! Windows does not let a program make itself the default: the choice
 //! (`UserChoice`) is protected and belongs to the user. So `register` only
@@ -37,6 +42,13 @@ impl Roots {
 const PROG_ID: &str = "MetalPDF.pdf";
 const APP_KEY: &str = r"Applications\metalpdf.exe";
 const EXTENSION: &str = ".pdf";
+/// The thumbnail provider's class (`thumbs/src/lib.rs`, the same GUID)
+/// and file.
+const THUMBNAIL_CLSID: &str = "{46B6CBB3-FB97-4C67-9C29-8151C9DAFE44}";
+const THUMBNAIL_DLL: &str = "metalpdf_thumbs.dll";
+/// The ShellEx key Explorer looks a thumbnail provider up under
+/// (`IThumbnailProvider`'s IID).
+const THUMBNAIL_PROVIDER: &str = "{E357FCCD-A995-4576-B01F-234630154E96}";
 
 /// The command Explorer runs to open a file with `exe`.
 fn open_command(exe: &Path) -> String {
@@ -103,11 +115,26 @@ fn register_in(r: &Roots, exe: &Path) -> Result<(), String> {
     reg::set(&capabilities, Some("ApplicationIcon"), &icon)?;
     reg::set(&format!(r"{capabilities}\FileAssociations"), Some(EXTENSION), PROG_ID)?;
     reg::set(&r.registered_apps, Some(crate::APP_NAME), &capabilities)?;
+    // The thumbnail provider, when its DLL is there (a portable copy has
+    // it too); Explorer runs it in its surrogate, dllhost.exe.
+    let dll = exe.with_file_name(THUMBNAIL_DLL);
+    let class = format!(r"{}\CLSID\{THUMBNAIL_CLSID}", r.classes);
+    let shellex = format!(r"{key}\ShellEx\{THUMBNAIL_PROVIDER}");
+    if dll.is_file() {
+        reg::set(&class, None, if ru { "Миниатюры PDF MetalPDF" } else { "MetalPDF PDF thumbnails" })?;
+        reg::set(&format!(r"{class}\InprocServer32"), None, &dll.display().to_string())?;
+        reg::set(&format!(r"{class}\InprocServer32"), Some("ThreadingModel"), "Apartment")?;
+        reg::set(&shellex, None, THUMBNAIL_CLSID)?;
+    } else {
+        reg::delete_tree(&shellex)?;
+        reg::delete_tree(&class)?;
+    }
     Ok(())
 }
 
 fn unregister_in(r: &Roots) -> Result<(), String> {
     reg::delete_tree(&format!(r"{}\{PROG_ID}", r.classes))?;
+    reg::delete_tree(&format!(r"{}\CLSID\{THUMBNAIL_CLSID}", r.classes))?;
     reg::delete_value(&format!(r"{}\{EXTENSION}\OpenWithProgids", r.classes), PROG_ID)?;
     // The extension's default, if it was ever set to ours.
     let key = format!(r"{}\{EXTENSION}", r.classes);
@@ -252,5 +279,40 @@ mod tests {
         // Unregistering twice is fine.
         unregister_in(&r).unwrap();
         reg::delete_tree(&root).unwrap();
+    }
+
+    /// The thumbnail provider is registered when its DLL is next to the
+    /// exe, dropped when it is not, removed on unregistering.
+    #[test]
+    fn thumbnail_provider() {
+        let root = format!(r"Software\metalpdf_test_thumbs_{}", std::process::id());
+        let r = Roots {
+            classes: format!(r"{root}\Classes"),
+            software: format!(r"{root}\Software\MetalPDF"),
+            registered_apps: format!(r"{root}\RegisteredApplications"),
+        };
+        let dir = std::env::temp_dir().join(format!("metalpdf_test_thumbs_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("metalpdf.exe");
+        let dll = dir.join(THUMBNAIL_DLL);
+        std::fs::write(&dll, b"").unwrap();
+        let get = |key: &str, name: Option<&str>| reg::get(&format!(r"{}\{key}", r.classes), name);
+        let shellex = format!(r"MetalPDF.pdf\ShellEx\{THUMBNAIL_PROVIDER}");
+        let server = format!(r"CLSID\{THUMBNAIL_CLSID}\InprocServer32");
+        register_in(&r, &exe).unwrap();
+        assert_eq!(get(&shellex, None).unwrap(), THUMBNAIL_CLSID);
+        assert_eq!(get(&server, None).unwrap(), dll.display().to_string());
+        assert_eq!(get(&server, Some("ThreadingModel")).unwrap(), "Apartment");
+        // A copy without the DLL takes it away again.
+        std::fs::remove_file(&dll).unwrap();
+        register_in(&r, &exe).unwrap();
+        assert_eq!(get(&shellex, None), None);
+        assert_eq!(get(&server, None), None);
+        std::fs::write(&dll, b"").unwrap();
+        register_in(&r, &exe).unwrap();
+        unregister_in(&r).unwrap();
+        assert_eq!(get(&format!(r"CLSID\{THUMBNAIL_CLSID}"), None), None);
+        reg::delete_tree(&root).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -64,6 +64,12 @@ windows-sys = { version = "0.61", features = [
 # Embeds the icon and the version information into the exe.
 winresource = "0.1"
 
+# The thumbnail provider Explorer loads (thumbs/, metalpdf_thumbs.dll) is
+# built with the app: `cargo build`, `cargo test` and clippy cover both.
+[workspace]
+members = ["thumbs"]
+default-members = [".", "thumbs"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"
