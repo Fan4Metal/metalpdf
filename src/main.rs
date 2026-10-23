@@ -173,7 +173,9 @@ fn main() -> eframe::Result {
         // Another copy bound the pipe between the hand-off and the bind
         // (Explorer starts one process per file selected): it takes the
         // files, once it listens.
-        for _ in 0..20 {
+        // For a second at most (a running copy whose pipe stays busy).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(50));
             if single_instance::hand_off(&files) {
                 log::debug!("handed over to the copy that bound first");
@@ -229,7 +231,7 @@ fn main() -> eframe::Result {
         .with_icon(window_icon());
     if let Some(w) = settings.window {
         viewport = viewport
-            .with_position([w.x as f32, w.y as f32])
+            .with_position(w.corner_points())
             .with_inner_size([w.width.max(MIN_SIZE[0] as i32) as f32, w.height.max(MIN_SIZE[1] as i32) as f32]);
         if w.maximized {
             MAXIMIZE_WHEN_SHOWN.store(true, std::sync::atomic::Ordering::Relaxed);

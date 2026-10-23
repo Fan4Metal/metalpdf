@@ -86,6 +86,24 @@ pub fn keep_on_screen(hwnd: isize) {
 #[cfg(not(windows))]
 pub fn keep_on_screen(_hwnd: isize) {}
 
+/// Moves window `hwnd`'s outer corner to `x`, `y`, physical pixels of the
+/// screen, its size kept (Windows rescales it if the monitor's DPI is
+/// another, as for a window dragged there).
+#[cfg(windows)]
+pub fn move_to(hwnd: isize, x: i32, y: i32) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, width: i32, height: i32, flags: u32) -> i32;
+    }
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    unsafe { SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+}
+
+#[cfg(not(windows))]
+pub fn move_to(_hwnd: isize, _x: i32, _y: i32) {}
+
 /// Maximizes window `hwnd`, made at its restored place, which it keeps for
 /// the restore button. winit shows a window made maximized at once, before
 /// its first frame (`SW_MAXIMIZE` before it hides it again), white, so

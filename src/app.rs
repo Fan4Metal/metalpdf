@@ -410,6 +410,10 @@ pub struct App {
     quitting: bool,
     /// The tab to close once its Save As (asked when closing it) is done.
     close_after_save: Option<u64>,
+    /// The window About, the print dialog and the confirmations are drawn
+    /// in: the one in use when the first of them opened (a modal drawn in
+    /// the root was out of sight behind a detached window).
+    modal_window: Option<u64>,
     /// The sidebar as it was before a search showed its hits in it.
     sidebar_before_search: Option<(bool, crate::settings::SidebarTab)>,
 }
@@ -522,6 +526,11 @@ impl App {
         let mut cloak = None;
         if let Some(hwnd) = hwnd {
             crate::caption::cloak(hwnd, true);
+            // The saved corner in pixels, wherever winit put it.
+            if let Some(w) = settings.window {
+                let [x, y] = w.corner_pixels();
+                crate::placement::move_to(hwnd, x, y);
+            }
             crate::placement::keep_on_screen(hwnd);
             if crate::MAXIMIZE_WHEN_SHOWN.swap(false, Ordering::Relaxed) {
                 crate::placement::show_maximized(hwnd);
@@ -593,6 +602,7 @@ impl App {
             sidebar_before_search: None,
             quitting: false,
             close_after_save: None,
+            modal_window: None,
         };
         // The tabs: the active one is being opened by the engine already
         // under `first_id`; the others are asked for now.
@@ -799,6 +809,14 @@ impl App {
         }
     }
 
+    /// About, the print dialog and the confirmation, in the viewport of
+    /// `ctx` (the window `modal_window` names).
+    fn modals(&mut self, ctx: &egui::Context) {
+        self.about.show(ctx, &mut self.updates);
+        self.print_dialog(ctx);
+        self.confirm_dialog(ctx);
+    }
+
     /// The print dialog for the active tab of the current window.
     fn open_print(&mut self, ctx: &egui::Context) {
         if self.print.is_some() {
@@ -957,7 +975,7 @@ impl App {
             (Confirm::CloseTabs { window, keep: Some(keep) }, 1) => self.force_close_other_tabs(window, keep),
             (Confirm::CloseTabs { window, keep: None }, 1) => {
                 if window == self.windows[0].id {
-                    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                    let maximized = ctx.input_for(ViewportId::ROOT, |i| i.viewport().maximized.unwrap_or(false));
                     self.adopt_window(ctx, maximized);
                 } else if let Some(w) = self.window_index(window) {
                     self.windows[w].close_requested = true;
@@ -969,7 +987,8 @@ impl App {
                     self.engine.request(Request::CancelPrint);
                 }
                 self.quitting = true;
-                ctx.send_viewport_cmd(ViewportCommand::Close);
+                // The root's close quits, whichever window the dialog is in.
+                ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
             }
             _ => {}
         }
@@ -2252,13 +2271,13 @@ impl App {
         root.active = active;
         self.focused = root.id;
         if root_maximized {
-            ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Maximized(false));
         }
         if let Some(outer) = outer {
-            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min));
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::OuterPosition(outer.min));
         }
         if let Some(inner) = inner {
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(inner.size()));
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::InnerSize(inner.size()));
         }
     }
 
@@ -2670,8 +2689,10 @@ impl App {
             let maximized = v.maximized.unwrap_or(false);
             let fullscreen = v.fullscreen.unwrap_or(false);
             v.outer_rect.map(|r| WindowGeometry {
-                x: r.min.x.round() as i32,
-                y: r.min.y.round() as i32,
+                // The corner in pixels: points belong to one monitor.
+                x: (r.min.x * scale_factor).round() as i32,
+                y: (r.min.y * scale_factor).round() as i32,
+                physical: true,
                 width: v.inner_rect.map_or(r.width(), |ir| ir.width()).round() as i32,
                 height: v.inner_rect.map_or(r.height(), |ir| ir.height()).round() as i32,
                 maximized: maximized || fullscreen,
@@ -2808,8 +2829,19 @@ impl eframe::App for App {
         }
         self.wanted.clear();
 
+        // The window the modals go into: kept while any is open, the
+        // focused one when the first opens, the root when that one is gone.
+        if !(self.about.open || self.print.is_some() || self.confirm.is_some()) {
+            self.modal_window = None;
+        } else if self.modal_window.is_none_or(|w| self.window_index(w).is_none()) {
+            self.modal_window = Some(self.window_index(self.focused).map_or(self.windows[0].id, |i| self.windows[i].id));
+        }
+
         self.current = 0;
         self.window_ui(root_ui);
+        if self.modal_window == Some(self.windows[0].id) {
+            self.modals(&ctx);
+        }
         // The detached windows, each in a viewport of its own. A window
         // made during this frame (a tab dragged out) is shown at once.
         let mut i = 1;
@@ -2817,20 +2849,27 @@ impl eframe::App for App {
             self.current = i;
             let viewport = self.windows[i].viewport;
             let builder = self.windows[i].builder.clone().unwrap_or_default();
-            ctx.show_viewport_immediate(viewport, builder, |ui, _class| self.window_ui(ui));
+            let hosts = self.modal_window == Some(self.windows[i].id);
+            ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
+                self.window_ui(ui);
+                if hosts {
+                    let ctx = ui.ctx().clone();
+                    self.modals(&ctx);
+                }
+            });
             i += 1;
         }
         self.current = 0;
         self.close_windows();
 
-        self.about.show(&ctx, &mut self.updates);
-        self.print_dialog(&ctx);
-        self.confirm_dialog(&ctx);
         self.follow_theme(&ctx);
         self.screenshot(&ctx);
         // The renders every window wants, the most urgent first.
         let mut wanted = std::mem::take(&mut self.wanted);
-        wanted.retain(|(k, _)| !self.failed_renders.contains(k));
+        // Not what failed, nor what came and waits for its upload (one
+        // large render a frame): asked again, it was rendered again.
+        let waiting: HashSet<RenderKey> = self.uploads.iter().map(|(k, _)| *k).collect();
+        wanted.retain(|(k, _)| !self.failed_renders.contains(k) && !waiting.contains(k));
         wanted.sort_by_key(|(_, tier)| *tier);
         wanted.dedup_by_key(|(k, _)| *k);
         self.engine.want(wanted);

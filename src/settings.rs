@@ -158,9 +158,14 @@ pub enum SidebarTab {
     Search,
 }
 
-/// The main window's place, in physical pixels of the screen, and the
-/// monitor's scale factor it was last shown at (to predict the first
-/// page's pixel size before the window exists).
+/// The main window's place: its outer corner in physical pixels of the
+/// screen (`physical`; before 0.1.0 in points of its monitor), its inner
+/// size in points, and the monitor's scale factor it was last shown at
+/// (to predict the first page's pixel size before the window exists).
+/// The corner is put back with Win32 (`placement::move_to`): a position in
+/// points was turned into pixels by the scale of the monitor winit made
+/// the window on, so with monitors at different scales the window landed
+/// elsewhere every start.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeometry {
     pub x: i32,
@@ -170,6 +175,29 @@ pub struct WindowGeometry {
     pub maximized: bool,
     #[serde(default = "one")]
     pub scale_factor: f32,
+    #[serde(default)]
+    pub physical: bool,
+}
+
+impl WindowGeometry {
+    /// The outer corner in physical pixels.
+    pub fn corner_pixels(&self) -> [i32; 2] {
+        if self.physical {
+            [self.x, self.y]
+        } else {
+            [(self.x as f32 * self.scale_factor).round() as i32, (self.y as f32 * self.scale_factor).round() as i32]
+        }
+    }
+
+    /// The outer corner in points of the monitor it was on.
+    pub fn corner_points(&self) -> [f32; 2] {
+        if self.physical {
+            let k = self.scale_factor.max(0.5);
+            [self.x as f32 / k, self.y as f32 / k]
+        } else {
+            [self.x as f32, self.y as f32]
+        }
+    }
 }
 
 fn one() -> f32 {
@@ -459,7 +487,7 @@ mod tests {
             sidebar_tab: SidebarTab::Outline,
             sidebar_side: SidebarSide::Right,
             dark_style: DarkStyle::Black,
-            window: Some(WindowGeometry { x: 10, y: 20, width: 900, height: 700, maximized: false, scale_factor: 1.5 }),
+            window: Some(WindowGeometry { x: 10, y: 20, width: 900, height: 700, maximized: false, scale_factor: 1.5, physical: true }),
             ..Settings::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
@@ -491,6 +519,12 @@ mod tests {
         assert_eq!(settings.positions[0].zoom, ZoomSetting::FitPage);
         assert_eq!(settings.positions[0].rotation, 0);
         assert_eq!(settings.window.unwrap().scale_factor, 1.0);
+        // Its corner in points, read as such.
+        assert!(!settings.window.unwrap().physical);
+        assert_eq!(settings.window.unwrap().corner_pixels(), [10, 20]);
+        let later = WindowGeometry { x: 3000, y: 150, width: 900, height: 700, maximized: false, scale_factor: 1.5, physical: true };
+        assert_eq!(later.corner_pixels(), [3000, 150]);
+        assert_eq!(later.corner_points(), [2000.0, 100.0]);
         assert!(!settings.check_updates);
         assert_eq!(settings.sidebar_width, 220.0);
         assert_eq!(settings.sidebar_side, SidebarSide::Left);

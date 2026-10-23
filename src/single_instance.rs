@@ -11,7 +11,7 @@
 //! other's files.
 
 use interprocess::local_socket::{
-    GenericFilePath, GenericNamespaced, ListenerOptions, Name, Stream, prelude::*,
+    GenericFilePath, GenericNamespaced, ListenerOptions, Name, prelude::*,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -72,7 +72,14 @@ pub fn hand_off(paths: &[PathBuf]) -> bool {
     let Ok(name) = socket_name() else {
         return false;
     };
-    let Ok(mut stream) = Stream::connect(name) else {
+    // Not `Stream::connect`: on a busy pipe (every instance taken, the
+    // running copy not accepting) it waits with `WaitNamedPipeW` forever,
+    // and this launch would hang with no window. A timeout makes a busy
+    // pipe an error at once; `main` tries again for a moment.
+    let options = interprocess::local_socket::ConnectOptions::new()
+        .name(name)
+        .wait_mode(interprocess::ConnectWaitMode::Timeout(std::time::Duration::from_secs(1)));
+    let Ok(mut stream) = options.connect_sync() else {
         return false;
     };
     #[cfg(windows)]
