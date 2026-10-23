@@ -1,8 +1,18 @@
 //! Colours that depend on the theme, in one place: the area round the
 //! pages, the page's edge and shadow, the highlights of the search and the
-//! selection. The interface's own colours are egui's.
+//! selection. The interface's own colours are egui's, in the dark theme
+//! with the panels and bars of the dark style chosen (`apply_dark_style`):
+//! MetalMD's greys or GitHub's near black.
 
-use egui::Color32;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use egui::{Color32, Theme, Visuals};
+
+use crate::settings::DarkStyle;
+
+/// The dark theme is the black one: `Palette::of` reads it, where only
+/// the context is at hand.
+static BLACK: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
@@ -29,9 +39,28 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn new(dark: bool) -> Palette {
+    pub fn new(dark: bool, style: DarkStyle) -> Palette {
         let rgb = Color32::from_rgb;
-        if dark {
+        if dark && style == DarkStyle::Black {
+            // GitHub's: the pages on a backdrop a shade lighter than the
+            // panels, as in the grey one.
+            let blue = rgb(0x44, 0x93, 0xf8);
+            Palette {
+                dark,
+                backdrop: rgb(0x16, 0x1b, 0x22),
+                page_edge: rgb(0x01, 0x04, 0x09),
+                shadow: Color32::from_black_alpha(120),
+                paper: rgb(0xf4, 0xf4, 0xf4),
+                text: rgb(0xe6, 0xed, 0xf3),
+                muted: rgb(0x91, 0x98, 0xa1),
+                link: blue,
+                search: Color32::from_rgba_unmultiplied(0xff, 0xd7, 0x00, 0x60),
+                search_current: Color32::from_rgba_unmultiplied(0xff, 0x8c, 0x00, 0x90),
+                selection: Color32::from_rgba_unmultiplied(0x38, 0x8b, 0xfd, 0x66),
+                error: rgb(0xf8, 0x51, 0x49),
+                accent: blue,
+            }
+        } else if dark {
             Palette {
                 dark,
                 backdrop: rgb(0x2a, 0x2c, 0x31),
@@ -67,6 +96,34 @@ impl Palette {
     }
 
     pub fn of(ctx: &egui::Context) -> Palette {
-        Palette::new(ctx.theme() == egui::Theme::Dark)
+        let style = if BLACK.load(Ordering::Relaxed) { DarkStyle::Black } else { DarkStyle::Grey };
+        Palette::new(ctx.theme() == Theme::Dark, style)
     }
+}
+
+/// The dark theme in `style`: egui's dark visuals with the panels, the
+/// bars (and text fields) and the lines of MetalMD's palette, grey or
+/// black; the page area follows through `Palette::of`. The light theme is
+/// egui's own.
+pub fn apply_dark_style(ctx: &egui::Context, style: DarkStyle) {
+    BLACK.store(style == DarkStyle::Black, Ordering::Relaxed);
+    let rgb = Color32::from_rgb;
+    // The panels, the bars (a shade darker), the faint rows, the lines.
+    let (panel, chrome, faint, border) = match style {
+        DarkStyle::Grey => (rgb(0x20, 0x22, 0x27), rgb(0x1c, 0x1e, 0x22), rgb(0x29, 0x2c, 0x32), rgb(0x3a, 0x3e, 0x46)),
+        DarkStyle::Black => (rgb(0x0d, 0x11, 0x17), rgb(0x01, 0x04, 0x09), rgb(0x15, 0x1b, 0x23), rgb(0x3d, 0x44, 0x4d)),
+    };
+    let palette = Palette::new(true, style);
+    ctx.style_mut_of(Theme::Dark, |s| {
+        let mut visuals = Visuals::dark();
+        visuals.panel_fill = panel;
+        visuals.window_fill = panel;
+        visuals.extreme_bg_color = chrome;
+        visuals.faint_bg_color = faint;
+        visuals.widgets.noninteractive.fg_stroke.color = palette.text;
+        visuals.widgets.noninteractive.bg_stroke.color = border;
+        visuals.window_stroke.color = border;
+        visuals.hyperlink_color = palette.link;
+        s.visuals = visuals;
+    });
 }

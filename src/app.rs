@@ -36,7 +36,7 @@ use crate::update::Updates;
 use crate::layout::Anchor;
 use crate::search::FindState;
 use crate::selection::{self, Selection};
-use crate::settings::SidebarTab;
+use crate::settings::{SidebarSide, SidebarTab};
 use crate::ui::sidebar::SidebarAction;
 use crate::view::ViewState;
 
@@ -465,6 +465,7 @@ impl App {
         // Before any text is made.
         crate::i18n::set_lang(settings.language.resolve());
         cc.egui_ctx.set_theme(settings.theme.preference());
+        crate::style::apply_dark_style(&cc.egui_ctx, settings.dark_style);
         cc.egui_ctx.options_mut(|o| {
             // Ctrl+plus and Ctrl+minus are the app's, not egui's zoom.
             o.zoom_with_keyboard = false;
@@ -1784,12 +1785,18 @@ impl App {
         }
         let mut actions = Vec::new();
         let min = crate::ui::sidebar::min_width(ui);
-        let response = Panel::left(Id::new(("sidebar", wid)))
+        let side = self.settings.sidebar_side;
+        let id = Id::new(("sidebar", wid));
+        let panel = match side {
+            SidebarSide::Left => Panel::left(id),
+            SidebarSide::Right => Panel::right(id),
+        };
+        let response = panel
             .resizable(true)
             .default_size(self.settings.sidebar_width.max(min))
             .size_range(min..=800.0_f32.max(min))
             .show(ui, |ui| {
-                actions = crate::ui::sidebar::show(ui, tab, which, &mut self.textures, frame, palette, &mut self.wanted);
+                actions = crate::ui::sidebar::show(ui, tab, which, side, &mut self.textures, frame, palette, &mut self.wanted);
             });
         let width = response.response.rect.width();
         if (width - self.settings.sidebar_width).abs() > 0.5 && !ui.input(|i| i.pointer.any_down()) {
@@ -1841,6 +1848,10 @@ impl App {
                         self.engine.request(Request::Edit { id: tab.doc.id, edit: Edit::DeletePage { page } });
                     }
                 }
+                SidebarAction::Side(side) => {
+                    self.settings.sidebar_side = side;
+                    self.settings_dirty = true;
+                }
             }
         }
     }
@@ -1855,6 +1866,9 @@ impl App {
         let mut theme_click = false;
         let mut sidebar_click = false;
         let sidebar_visible = self.settings.sidebar_visible;
+        // Chosen in the context menus of the sidebar's and the theme's buttons.
+        let mut sidebar_side = self.settings.sidebar_side;
+        let mut dark_style = self.settings.dark_style;
         let mut about_click = false;
         let mut update_tag = None;
         let cur = self.current;
@@ -1869,10 +1883,15 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     // The sidebar's toggle above the sidebar; Open next to the
                     // tabs, where a file opened adds its tab (as MetalMD).
-                    let sidebar_tip = tr!("Pages and outline (F4)", "Страницы и оглавление (F4)");
-                    if crate::ui::icon_button(ui, Icon::Sidebar, sidebar_visible, sidebar_tip).clicked() {
+                    let sidebar_tip = tr!(
+                        "Pages and outline (F4)\nRight-click: left or right side",
+                        "Страницы и оглавление (F4)\nПравый щелчок: слева или справа"
+                    );
+                    let sidebar_button = crate::ui::icon_button(ui, Icon::Sidebar, sidebar_visible, sidebar_tip);
+                    if sidebar_button.clicked() {
                         sidebar_click = true;
                     }
+                    crate::ui::sidebar_side_menu(&sidebar_button, &mut sidebar_side);
                     if crate::ui::icon_button(ui, Icon::Open, false, tr!("Open… (Ctrl+O)", "Открыть… (Ctrl+O)")).clicked() {
                         open_dialog = true;
                     }
@@ -1949,7 +1968,9 @@ impl App {
                         {
                             update_tag = Some(tag.to_owned());
                         }
-                        theme_click = crate::ui::theme_button(ui, theme).clicked();
+                        let theme_button = crate::ui::theme_button(ui, theme);
+                        theme_click = theme_button.clicked();
+                        crate::ui::dark_style_menu(&theme_button, &mut dark_style);
                     });
                 });
             });
@@ -1980,6 +2001,17 @@ impl App {
         }
         if sidebar_click {
             self.settings.sidebar_visible = !self.settings.sidebar_visible;
+            self.settings_dirty = true;
+        }
+        if sidebar_side != self.settings.sidebar_side {
+            // Choosing a side shows the sidebar there.
+            self.settings.sidebar_side = sidebar_side;
+            self.settings.sidebar_visible = true;
+            self.settings_dirty = true;
+        }
+        if dark_style != self.settings.dark_style {
+            self.settings.dark_style = dark_style;
+            crate::style::apply_dark_style(ui.ctx(), dark_style);
             self.settings_dirty = true;
         }
         if let Some(tag) = update_tag {

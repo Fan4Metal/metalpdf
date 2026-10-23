@@ -116,6 +116,28 @@ impl Default for PrintSettings {
     }
 }
 
+/// Which of the two dark themes the dark one is, chosen in the context menu
+/// of the theme button (as MetalMD).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DarkStyle {
+    /// Neutral greys, as MetalMD and metalmpv.
+    #[default]
+    Grey,
+    /// GitHub's, nearly black.
+    Black,
+}
+
+/// The side of the window the sidebar is on, chosen in the context menu
+/// of its button and of its tabs (as MetalMD's table of contents).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarSide {
+    #[default]
+    Left,
+    Right,
+}
+
 /// Which list the sidebar shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -191,6 +213,9 @@ pub struct Settings {
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
     pub sidebar_tab: SidebarTab,
+    pub sidebar_side: SidebarSide,
+    /// The dark theme's look: grey or black.
+    pub dark_style: DarkStyle,
     /// Find matches case.
     pub find_case: bool,
     /// Find matches whole words only.
@@ -216,6 +241,8 @@ impl Default for Settings {
             sidebar_visible: false,
             sidebar_width: 220.0,
             sidebar_tab: SidebarTab::Thumbnails,
+            sidebar_side: SidebarSide::Left,
+            dark_style: DarkStyle::Grey,
             find_case: false,
             find_words: false,
             print: PrintSettings::default(),
@@ -421,11 +448,14 @@ mod tests {
             zoom: ZoomSetting::Scale(1.25),
             view_mode: ViewMode::Single,
             sidebar_tab: SidebarTab::Outline,
+            sidebar_side: SidebarSide::Right,
+            dark_style: DarkStyle::Black,
             window: Some(WindowGeometry { x: 10, y: 20, width: 900, height: 700, maximized: false, scale_factor: 1.5 }),
             ..Settings::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains(r#""zoom":{"scale":1.25}"#), "{json}");
+        assert!(json.contains(r#""sidebar_side":"right""#) && json.contains(r#""dark_style":"black""#), "{json}");
         assert!(json.contains(r#""language":"ru""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
         let partial: Settings = serde_json::from_str(r#"{"theme":"light","future":1}"#).unwrap();
@@ -454,5 +484,7 @@ mod tests {
         assert_eq!(settings.window.unwrap().scale_factor, 1.0);
         assert!(!settings.check_updates);
         assert_eq!(settings.sidebar_width, 220.0);
+        assert_eq!(settings.sidebar_side, SidebarSide::Left);
+        assert_eq!(settings.dark_style, DarkStyle::Grey);
     }
 }

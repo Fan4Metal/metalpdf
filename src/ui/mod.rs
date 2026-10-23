@@ -16,6 +16,8 @@ pub mod view;
 use egui::{Response, TextureHandle, TextureOptions, ThemePreference, Ui};
 use icons::Icon;
 
+use crate::settings::{DarkStyle, SidebarSide};
+
 /// The app icon as a texture for `points` wide, from the smallest embedded
 /// size (64, 128, 256 px) that covers it at the display's pixel density;
 /// kept in `cache` and replaced when that density changes.
@@ -66,13 +68,18 @@ pub fn next_theme(theme: ThemePreference) -> ThemePreference {
 /// next of the three (`next_theme`).
 pub fn theme_button(ui: &mut Ui, theme: ThemePreference) -> Response {
     let tip = match theme {
-        ThemePreference::System => {
-            tr!("Theme: as in Windows (click: light)", "Тема: как в Windows (щелчок: светлая)")
-        }
-        ThemePreference::Light => tr!("Theme: light (click: dark)", "Тема: светлая (щелчок: тёмная)"),
-        ThemePreference::Dark => {
-            tr!("Theme: dark (click: as in Windows)", "Тема: тёмная (щелчок: как в Windows)")
-        }
+        ThemePreference::System => tr!(
+            "Theme: as in Windows (click: light)\nRight-click: grey or black dark theme",
+            "Тема: как в Windows (щелчок: светлая)\nПравый щелчок: серая или чёрная тёмная тема"
+        ),
+        ThemePreference::Light => tr!(
+            "Theme: light (click: dark)\nRight-click: grey or black dark theme",
+            "Тема: светлая (щелчок: тёмная)\nПравый щелчок: серая или чёрная тёмная тема"
+        ),
+        ThemePreference::Dark => tr!(
+            "Theme: dark (click: as in Windows)\nRight-click: grey or black dark theme",
+            "Тема: тёмная (щелчок: как в Windows)\nПравый щелчок: серая или чёрная тёмная тема"
+        ),
     };
     let icon = match theme {
         ThemePreference::System => Icon::ThemeSystem,
@@ -80,6 +87,35 @@ pub fn theme_button(ui: &mut Ui, theme: ThemePreference) -> Response {
         ThemePreference::Dark => Icon::ThemeDark,
     };
     icon_button(ui, icon, false, tip)
+}
+
+/// The context menu of the theme button: which of the two dark themes the
+/// dark one is (as MetalMD). Returns `true` when it changed.
+pub fn dark_style_menu(response: &Response, style: &mut DarkStyle) -> bool {
+    let before = *style;
+    menu::context_menu(response, |ui| {
+        for (value, label) in [(DarkStyle::Grey, tr!("Dark theme: grey", "Тёмная тема: серая")), (DarkStyle::Black, tr!("Dark theme: black", "Тёмная тема: чёрная"))] {
+            if ui.radio_value(style, value, label).clicked() {
+                ui.close();
+            }
+        }
+    });
+    *style != before
+}
+
+/// The context menu of the sidebar's button and of its tabs: the side of
+/// the window it is on (as MetalMD's table of contents). Returns `true`
+/// when the side changed.
+pub fn sidebar_side_menu(response: &Response, side: &mut SidebarSide) -> bool {
+    let before = *side;
+    menu::context_menu(response, |ui| {
+        for (value, label) in [(SidebarSide::Left, tr!("Sidebar on the left", "Боковая панель слева")), (SidebarSide::Right, tr!("Sidebar on the right", "Боковая панель справа"))] {
+            if ui.radio_value(side, value, label).clicked() {
+                ui.close();
+            }
+        }
+    });
+    *side != before
 }
 
 /// A newer release: its version with a download arrow in the link colour;

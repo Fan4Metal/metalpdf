@@ -33,7 +33,7 @@ MetalPDF is a PDF viewer built around one idea: a document should be on screen t
 - **Editing** (experimental): the text of a line changed in place, pictures moved, resized, replaced or removed, pages inserted, replaced or deleted, and the document saved (see [Editing text, pictures and pages](#editing-text-pictures-and-pages)).
 - **Printing** with a preview of each sheet: the printer, its paper, orientation and sides, the pages, copies and scale, the printer's own settings behind Properties (see [Printing](#printing)).
 - **Forms** are drawn with their field contents; **encrypted** documents ask for their password.
-- **Light, dark or system theme.**
+- **Light, dark or system theme**; the dark theme grey or near black.
 - **English or Russian interface**: it follows the language of Windows and can be changed in the About window (`F1`).
 - **Portable**: the [portable archive](#installation) keeps its settings next to the program.
 - **Privacy**: no network access beyond the optional update check (see [Update check and privacy](#update-check-and-privacy)).
@@ -54,7 +54,7 @@ Windows SmartScreen may warn about an unsigned program on the first start: "More
 
 A PDF is opened with `Ctrl+O`, by dropping it on the window, from the recent files on the start page, from Explorer (double click once MetalPDF is chosen for PDF files, or "Open with"), or from the command line: `metalpdf.exe file.pdf`. Each file opens in a tab; a file already open is brought to the front instead.
 
-The toolbar under the tabs holds the page field (a page number or a label such as `iv` typed there goes to that page; `Ctrl+G` focuses it), the zoom with its menu, the three zoom presets (actual size, fit width, fit page: keys `1`, `2`, `3`; the one in force is lit, and a preset chosen is the zoom new documents open at), the two turn buttons, the view mode (continuous pages, or one page at a time, where the scroll bar still spans the document and dragging it turns the pages) the pencil of the editing mode and the printer, which opens the print dialog; a note on the right says when an edit was refused or a file saved. The tab bar holds the sidebar toggle, Open, the tabs, and on the right the theme switch, the update button when a newer version exists, and About.
+The toolbar under the tabs holds the page field (a page number or a label such as `iv` typed there goes to that page; `Ctrl+G` focuses it), the zoom with its menu, the three zoom presets (actual size, fit width, fit page: keys `1`, `2`, `3`; the one in force is lit, and a preset chosen is the zoom new documents open at), the two turn buttons, the view mode (continuous pages, or one page at a time, where the scroll bar still spans the document and dragging it turns the pages) the pencil of the editing mode and the printer, which opens the print dialog; a note on the right says when an edit was refused or a file saved. The tab bar holds the sidebar toggle, Open, the tabs, and on the right the theme switch (its context menu chooses between a grey and a near-black dark theme), the update button when a newer version exists, and About.
 
 Where each document was left (page, zoom, turns) is remembered, as is the last session: started without files, MetalPDF opens the tabs it was closed with.
 
@@ -66,7 +66,7 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 
 ### Sidebar
 
-`F4` (or the button beside Open) shows the sidebar with three lists. **Pages** shows every page as a thumbnail, the current one framed and kept in view; a click goes to the page. **Outline** shows the document's bookmarks as a tree, the levels set apart by size, weight and indent with guides down them, each with its page number; the chapters are folded but the one the reader is in, whose bookmark is highlighted; a click follows a bookmark, a click on its triangle folds it. **Search** lists the hits of a search. The sidebar's width is kept.
+`F4` (or the button left of Open) shows the sidebar with three lists, on the left or on the right of the window as chosen in the context menu of that button or of the lists' tabs. **Pages** shows every page as a thumbnail, the current one framed and kept in view; a click goes to the page. **Outline** shows the document's bookmarks as a tree, the levels set apart by size, weight and indent with guides down them, each with its page number; the chapters are folded but the one the reader is in, whose bookmark is highlighted; a click follows a bookmark, a click on its triangle folds it. **Search** lists the hits of a search. The sidebar's width is kept.
 
 ### Find
 

@@ -9,7 +9,7 @@ use crate::cache::Textures;
 use crate::engine::{Kind, PREVIEW_WIDTH, RenderKey};
 use crate::layout;
 use crate::pdfium::{OutlineItem, Target};
-use crate::settings::SidebarTab;
+use crate::settings::{SidebarSide, SidebarTab};
 use crate::style::Palette;
 
 pub enum SidebarAction {
@@ -25,6 +25,8 @@ pub enum SidebarAction {
     /// The page replaced by the pages of a PDF chosen in a dialog.
     ReplacePdf { page: usize },
     DeletePage { page: usize },
+    /// The side of the window chosen in the tabs' context menu.
+    Side(SidebarSide),
 }
 
 /// The space round a thumbnail and under it (its label).
@@ -51,10 +53,12 @@ pub fn min_width(ui: &Ui) -> f32 {
 }
 
 /// Draw the sidebar's content; the previews it wants go to `wanted`.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     tab: &Tab,
     which: SidebarTab,
+    side: SidebarSide,
     textures: &mut Textures,
     frame: u64,
     palette: &Palette,
@@ -64,14 +68,17 @@ pub fn show(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.add_space(4.0);
-        if ui.selectable_label(which == SidebarTab::Thumbnails, tr!("Pages", "Страницы")).clicked() {
-            actions.push(SidebarAction::Tab(SidebarTab::Thumbnails));
+        // Each tab's context menu chooses the side of the window.
+        let mut chosen = side;
+        for (tab, label) in [(SidebarTab::Thumbnails, tr!("Pages", "Страницы")), (SidebarTab::Outline, tr!("Outline", "Оглавление")), (SidebarTab::Search, tr!("Search", "Поиск"))] {
+            let response = ui.selectable_label(which == tab, label);
+            if response.clicked() {
+                actions.push(SidebarAction::Tab(tab));
+            }
+            crate::ui::sidebar_side_menu(&response, &mut chosen);
         }
-        if ui.selectable_label(which == SidebarTab::Outline, tr!("Outline", "Оглавление")).clicked() {
-            actions.push(SidebarAction::Tab(SidebarTab::Outline));
-        }
-        if ui.selectable_label(which == SidebarTab::Search, tr!("Search", "Поиск")).clicked() {
-            actions.push(SidebarAction::Tab(SidebarTab::Search));
+        if chosen != side {
+            actions.push(SidebarAction::Side(chosen));
         }
     });
     ui.add_space(4.0);
