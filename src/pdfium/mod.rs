@@ -794,10 +794,10 @@ pub struct TextObject {
 pub type FontLookup<'a> = &'a mut dyn FnMut(&str, i32) -> Option<std::sync::Arc<Vec<u8>>>;
 
 /// Whether a text read back from a page object says `wanted`: the text
-/// page reads a subset font's space as a no-break space, and runs of
-/// whitespace count as one.
+/// page reads a subset font's space as a no-break space and a hyphen at a
+/// line's end as U+0002, and runs of whitespace count as one.
 fn same_text(shown: &str, wanted: &str) -> bool {
-    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let norm = |s: &str| s.replace('\u{2}', "-").split_whitespace().collect::<Vec<_>>().join(" ");
     norm(shown) == norm(wanted)
 }
 
@@ -1558,6 +1558,7 @@ pub mod tests {
     #[test]
     fn read_back_text_is_compared_loosely() {
         assert!(same_text("Bold\u{a0}Bold", "Bold Bold"));
+        assert!(same_text("элемент\u{2}", "элемент-"));
         assert!(same_text(" 23.02.2026  11:32:33\r\n", "23.02.2026 11:32:33"));
         assert!(!same_text("BoldBold", "Bold Bold"));
         assert!(!same_text("Bold Bold", "Bold Bolder"));
@@ -2099,6 +2100,32 @@ pub mod tests {
                 assert!(pair[1][0] > pair[0][2] - 0.5, "objects overlap: {pair:?}");
             }
         }
+    }
+
+    /// On a real document (`METALPDF_SAMPLE`) whose lines end in hyphens
+    /// (PDFium reads them as U+0002): the first such line with its first
+    /// word cut short stays in its own font and keeps its hyphen.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_line_ending_in_a_hyphen_keeps_it() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let doc = Document::open(api(), Path::new(&sample), None).unwrap();
+        let mut fonts = crate::fonts::Fonts::default();
+        for index in 0..doc.page_count().min(60) {
+            let page = doc.load_page(index).unwrap();
+            let lines = crate::textline::lines(&page.text_objects());
+            let Some(line) = lines.iter().find(|l| l.raw.ends_with('-') && l.text.chars().take_while(|c| c.is_alphabetic()).count() >= 3) else { continue };
+            // The first letter dropped: no character the font may lack.
+            let wanted: String = line.text.chars().skip(1).collect();
+            let edit = line.edit(&wanted).unwrap();
+            let how = page.set_line(&edit.objects, &edit.text, &edit.followers, &mut |name, flags| fonts.get(name, flags)).unwrap();
+            let after = crate::textline::lines(&page.text_objects()).into_iter().find(|l| l.text == wanted);
+            println!("page {}: {:?} -> {how:?}, read back {:?}", index + 1, line.text, after.as_ref().map(|l| &l.text));
+            assert_eq!(how, Replaced::SameFont);
+            assert!(after.is_some(), "the line reads back as typed, hyphen and all");
+            return;
+        }
+        println!("no line ends in a hyphen among the first 60 pages");
     }
 
     /// On a real document (`METALPDF_SAMPLE`): the page numbering read off

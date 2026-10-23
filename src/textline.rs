@@ -21,8 +21,12 @@ pub struct Fragment {
 pub struct Line {
     pub fragments: Vec<Fragment>,
     /// The objects' texts joined, a space put between two objects apart by
-    /// a word's gap with no space of their own.
+    /// a word's gap with no space of their own, as the editor shows it
+    /// (`shown`).
     pub text: String,
+    /// The same as it is written back (`written`), a character for each
+    /// of `text`'s.
+    pub raw: String,
     /// left, bottom, right, top in page space: the objects' boxes joined.
     pub bounds: [f32; 4],
     /// The font size as drawn of the line's first object.
@@ -110,8 +114,31 @@ pub fn lines(objects: &[TextObject]) -> Vec<Line> {
 }
 
 /// The line of objects `members`, in order.
+/// A character of a run as it is written back: PDFium reads a hyphen at
+/// a line's end as U+0002, which is the font's own hyphen; a stand-in
+/// font's space reads as a no-break space (`set_text` tries both when it
+/// writes).
+fn written(c: char) -> char {
+    match c {
+        '\u{2}' => '-',
+        '\u{a0}' => ' ',
+        c => c,
+    }
+}
+
+/// A character as the inline editor shows it: the hyphens and the
+/// spaces egui's font has no glyph for (a box was drawn) as `-` and ` `.
+/// One for one, so an edit's place is the same in `raw`.
+fn shown(c: char) -> char {
+    match written(c) {
+        '\u{ad}' | '\u{2010}' | '\u{2011}' => '-',
+        '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}' => ' ',
+        c => c,
+    }
+}
+
 fn join(members: &[&Placed]) -> Line {
-    let mut text = String::new();
+    let mut raw = String::new();
     let mut fragments = Vec::new();
     let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
     let mut count = 0;
@@ -119,22 +146,21 @@ fn join(members: &[&Placed]) -> Line {
         if k > 0 {
             let prev = members[k - 1];
             let gap = p.start - prev.end;
-            let spaced = text.ends_with(char::is_whitespace) || p.object.text.starts_with(char::is_whitespace);
+            let spaced = raw.ends_with(char::is_whitespace) || p.object.text.starts_with(char::is_whitespace);
             if !spaced && gap > WORD_GAP * p.object.font_size.max(0.1) {
-                text.push(' ');
+                raw.push(' ');
                 count += 1;
             }
         }
         let n = p.object.text.chars().count();
         fragments.push(Fragment { object: p.object.index, start: count, end: count + n });
-        // A stand-in font's space reads as a no-break space (`set_text`
-        // tries both when it writes).
-        text.push_str(&p.object.text.replace('\u{a0}', " "));
+        raw.extend(p.object.text.chars().map(written));
         count += n;
         let b = p.object.bounds;
         bounds = [bounds[0].min(b[0]), bounds[1].min(b[1]), bounds[2].max(b[2]), bounds[3].max(b[3])];
     }
-    Line { fragments, text, bounds, font_size: members[0].object.font_size }
+    let text = raw.chars().map(shown).collect();
+    Line { fragments, text, raw, bounds, font_size: members[0].object.font_size }
 }
 
 impl Line {
@@ -146,7 +172,9 @@ impl Line {
     /// first the change touches to the last, merged, and those after
     /// them; `None` when nothing changed or nothing would be left.
     pub fn edit(&self, new: &str) -> Option<LineEdit> {
+        // Compared as shown, the characters kept written back as they were.
         let old: Vec<char> = self.text.chars().collect();
+        let raw: Vec<char> = self.raw.chars().collect();
         let new: Vec<char> = new.chars().collect();
         if old == new || self.fragments.is_empty() {
             return None;
@@ -172,7 +200,7 @@ impl Line {
         let merged = |lo: usize, hi: usize| -> String {
             let (a, b) = (self.fragments[lo].start, self.fragments[hi].end);
             let (a, b) = (a.min(p), b.max(end));
-            old[a..p].iter().chain(&new[p..new.len() - suffix]).chain(&old[end..b]).collect()
+            raw[a..p].iter().chain(&new[p..new.len() - suffix]).chain(&raw[end..b]).collect()
         };
         let mut text = merged(lo, hi);
         // The objects touched were all deleted: a neighbour takes the
@@ -279,6 +307,17 @@ mod tests {
         assert_eq!(line.edit("Students not are here"), Some(LineEdit { objects: vec![2], text: "not are".into(), followers: vec![3] }));
         // The space itself removed: both sides.
         assert_eq!(line.edit("Studentsare here"), Some(LineEdit { objects: vec![1, 2], text: "Studentsare".into(), followers: vec![3] }));
+    }
+
+    #[test]
+    fn a_hyphen_at_a_lines_end_is_shown_and_written_as_one() {
+        // PDFium's mark of a line-end hyphen, and an em space.
+        let line = &lines(&[run(1, 10.0, 100.0, "элемен\u{2}"), run(2, 50.0, 100.0, "a\u{2003}b")])[0];
+        assert_eq!(line.text, "элемен- a b");
+        assert_eq!(line.raw, "элемен- a\u{2003}b");
+        // The hyphen kept, written as the font's hyphen; the em space kept.
+        assert_eq!(line.edit("элемент- a b"), Some(LineEdit { objects: vec![1], text: "элемент-".into(), followers: vec![2] }));
+        assert_eq!(line.edit("элемен- a c"), Some(LineEdit { objects: vec![2], text: "a\u{2003}c".into(), followers: vec![] }));
     }
 
     #[test]

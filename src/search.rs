@@ -23,11 +23,12 @@ pub fn line_after(text: &str) -> String {
     collapse(head, true, false)
 }
 
-/// Runs of whitespace as one space, dropped at the ends unless kept.
+/// Runs of whitespace as one space, dropped at the ends unless kept;
+/// PDFium's mark of a hyphen at a line's end (U+0002) as the hyphen it is.
 fn collapse(s: &str, keep_leading: bool, keep_trailing: bool) -> String {
     let mut out = String::with_capacity(s.len());
     let mut pending = false;
-    for c in s.chars() {
+    for c in s.chars().map(|c| if c == '\u{2}' { '-' } else { c }) {
         if c.is_whitespace() {
             pending = true;
             continue;
@@ -203,6 +204,12 @@ impl FindState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_line_end_hyphen_reads_as_a_hyphen() {
+        assert_eq!(line_before("x\r\nэлемен\u{2}"), "элемен-");
+        assert_eq!(line_after(" элемен\u{2}\r\nтарные"), " элемен-");
+    }
+
     use super::*;
 
     fn hit(start: usize) -> SearchHit {
