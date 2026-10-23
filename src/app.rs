@@ -2491,9 +2491,13 @@ impl App {
         let palette = Palette::of(&ctx);
         self.tab_bar(ui, &palette);
         let wid = self.windows[cur].id;
-        Panel::top(Id::new(("toolbar", wid)))
-            .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(Margin::symmetric(8, 4)))
-            .show(ui, |ui| self.toolbar(ui));
+        // No toolbar on the start page, where it has nothing to act on;
+        // a print job under way keeps it for its progress and its cross.
+        if self.windows[cur].active_tab().is_some() || self.printing.is_some() {
+            Panel::top(Id::new(("toolbar", wid)))
+                .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(Margin::symmetric(8, 4)))
+                .show(ui, |ui| self.toolbar(ui));
+        }
         self.find_bar(ui, &palette);
         self.sidebar(ui, &palette);
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.central(ui, &palette));
