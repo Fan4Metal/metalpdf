@@ -1608,10 +1608,11 @@ impl App {
             tab.doc.need_outline(engine);
         }
         let mut actions = Vec::new();
+        let min = crate::ui::sidebar::min_width(ui);
         let response = Panel::left(Id::new(("sidebar", wid)))
             .resizable(true)
-            .default_size(self.settings.sidebar_width)
-            .size_range(120.0..=800.0)
+            .default_size(self.settings.sidebar_width.max(min))
+            .size_range(min..=800.0_f32.max(min))
             .show(ui, |ui| {
                 actions = crate::ui::sidebar::show(ui, tab, which, &mut self.textures, frame, palette, &mut self.wanted);
             });

@@ -31,6 +31,25 @@ pub enum SidebarAction {
 const THUMB_MARGIN: f32 = 12.0;
 const THUMB_LABEL: f32 = 18.0;
 
+/// The sidebar's smallest width, in points: the row of its tabs, which
+/// cannot wrap, plus the panel's margins. Narrower, the row ran past the
+/// panel and under the pages.
+pub fn min_width(ui: &Ui) -> f32 {
+    let spacing = ui.spacing();
+    let text = |s: &str| {
+        egui::WidgetText::from(s)
+            .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button)
+            .size()
+            .x
+    };
+    let labels = [tr!("Pages", "Страницы"), tr!("Outline", "Оглавление"), tr!("Search", "Поиск")];
+    let row: f32 = labels.iter().map(|l| text(l) + 2.0 * spacing.button_padding.x).sum::<f32>()
+        + 2.0 * spacing.item_spacing.x
+        + 4.0;
+    // Margins of the panel's frame, and a little slack.
+    row + 2.0 * 8.0 + 4.0
+}
+
 /// Draw the sidebar's content; the previews it wants go to `wanted`.
 pub fn show(
     ui: &mut Ui,
