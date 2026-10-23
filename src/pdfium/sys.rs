@@ -448,6 +448,10 @@ api! {
     FPDFFont_GetBaseFontName: fn(FPDF_FONT, *mut c_char, usize) -> usize;
     FPDFFont_GetIsEmbedded: fn(FPDF_FONT) -> c_int;
     FPDFFont_GetFlags: fn(FPDF_FONT) -> c_int;
+    // The font's bytes (the substitute's for a font not embedded), the
+    // size through the last pointer; a Type 3 font, with no face, has
+    // none.
+    FPDFFont_GetFontData: fn(FPDF_FONT, *mut u8, usize, *mut usize) -> FPDF_BOOL;
     // The glyph's path for a character (Unicode), or null when the font
     // has no glyph for it; the path is the font's, never freed.
     FPDFFont_GetGlyphPath: fn(FPDF_FONT, u32, c_float) -> *const c_void;

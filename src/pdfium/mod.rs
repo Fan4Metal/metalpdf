@@ -204,7 +204,7 @@ impl Document {
         if !self.inner.form.is_null() {
             unsafe { (self.api().FORM_OnAfterLoadPage)(handle, self.inner.form) };
         }
-        Some(Page { doc: Rc::clone(&self.inner), handle, text: RefCell::new(None), rendering: Cell::new(false) })
+        Some(Page { doc: Rc::clone(&self.inner), handle, index: index as c_int, text: RefCell::new(None), rendering: Cell::new(false) })
     }
 
     /// A document information field: `Title`, `Author`, `Subject`,
@@ -435,6 +435,8 @@ unsafe extern "C" fn need_to_pause(this: *mut sys::IFSDK_PAUSE) -> sys::FPDF_BOO
 pub struct Page {
     doc: Rc<DocumentInner>,
     handle: sys::FPDF_PAGE,
+    /// Its index in the document, to parse it again from its content.
+    index: c_int,
     text: RefCell<Option<sys::FPDF_TEXTPAGE>>,
     /// A progressive render is under way: `render_close` is owed.
     rendering: Cell<bool>,
@@ -875,16 +877,44 @@ impl Page {
         Ok(object)
     }
 
-    /// After a change of the page's objects: the content regenerated, the
-    /// text page (which described the old content) closed.
+    /// After a change of the page's objects: the content written anew
+    /// from them, the text page (which described the old content)
+    /// closed, and the new content checked to hold every object:
+    /// `FPDFPage_GenerateContent` leaves out text in Type 3 fonts,
+    /// shadings (`sh`) and inline images, which a save would then lose
+    /// (`has_type3_text` says so before an edit; this catches the rest).
+    /// An error leaves the page changed in memory: the caller puts the
+    /// document back (the engine rebuilds its copy from the log).
     fn content_changed(&self) -> Result<(), String> {
-        if unsafe { (self.api().FPDFPage_GenerateContent)(self.handle) } == 0 {
+        let api = self.api();
+        if unsafe { (api.FPDFPage_GenerateContent)(self.handle) } == 0 {
             return Err("the page's content could not be regenerated".into());
         }
         if let Some(text) = self.text.take() {
-            unsafe { (self.api().FPDFText_ClosePage)(text) };
+            unsafe { (api.FPDFText_ClosePage)(text) };
         }
-        Ok(())
+        // The page parsed again from the content just written.
+        let again = unsafe { (api.FPDF_LoadPage)(self.doc.handle, self.index) };
+        if again.is_null() {
+            return Err("the page's new content could not be read".into());
+        }
+        let count = |page: sys::FPDF_PAGE| {
+            let mut counts = [0usize; 6];
+            let n = unsafe { (api.FPDFPage_CountObjects)(page) }.max(0);
+            for i in 0..n {
+                let kind = unsafe { (api.FPDFPageObj_GetType)((api.FPDFPage_GetObject)(page, i)) };
+                counts[usize::try_from(kind).unwrap_or(0).min(5)] += 1;
+            }
+            counts
+        };
+        let (wanted, written) = (count(self.handle), count(again));
+        unsafe { (api.FPDF_ClosePage)(again) };
+        if wanted == written {
+            return Ok(());
+        }
+        const KINDS: [&str; 6] = ["objects", "text", "paths", "pictures", "shadings", "forms"];
+        let lost: Vec<String> = (0..6).filter(|&k| written[k] < wanted[k]).map(|k| format!("{} {}", wanted[k] - written[k], KINDS[k])).collect();
+        Err(format!("the page's content cannot be written back whole ({} would be lost)", lost.join(", ")))
     }
 
     /// Remove object `index` (an image) from the page.
@@ -966,6 +996,29 @@ impl Page {
             (api.FPDFPageObj_Transform)(object, 1.0, 0.0, 0.0, 1.0, f64::from(bounds[0]), f64::from(bounds[1]));
         }
         self.content_changed()
+    }
+
+    /// Whether the page has text in a Type 3 font (glyphs drawn by
+    /// content streams, as Chrome and Edge print variable fonts, Cascadia
+    /// among them): `FPDFPage_GenerateContent` writes no such text, so an
+    /// edit on the page would lose it when saved. Known by the font
+    /// having no face, so no bytes (`FPDFFont_GetFontData`); a font not
+    /// embedded gives its substitute's.
+    pub fn has_type3_text(&self) -> bool {
+        let api = self.api();
+        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle) }.max(0);
+        (0..count).any(|index| {
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index) };
+            if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
+                return false;
+            }
+            let font = unsafe { (api.FPDFTextObj_GetFont)(object) };
+            if font.is_null() {
+                return false;
+            }
+            let mut size = 0usize;
+            unsafe { (api.FPDFFont_GetFontData)(font, std::ptr::null_mut(), 0, &mut size) != 0 && size == 0 }
+        })
     }
 
     /// The page's text objects, top level only (text inside form
@@ -1078,7 +1131,7 @@ impl Page {
                 unsafe { (api.FPDFPageObj_Transform)(object, 1.0, 0.0, 0.0, 1.0, f64::from(dx * delta), f64::from(dy * delta)) };
             }
         }
-        self.regenerate()?;
+        self.content_changed()?;
         Ok(replaced)
     }
 
@@ -1265,18 +1318,6 @@ impl Page {
         }
     }
 
-    /// The page's content stream written anew from its objects; the text
-    /// page, which described the old content, is dropped.
-    fn regenerate(&self) -> Result<(), String> {
-        let api = self.api();
-        if unsafe { (api.FPDFPage_GenerateContent)(self.handle) } == 0 {
-            return Err("the page's content could not be regenerated".into());
-        }
-        if let Some(text) = self.text.take() {
-            unsafe { (api.FPDFText_ClosePage)(text) };
-        }
-        Ok(())
-    }
 }
 
 impl Page {
@@ -1565,7 +1606,7 @@ pub mod tests {
     }
 
     pub fn sample_pdf() -> Vec<u8> {
-        let objects: Vec<String> = vec![
+        write_pdf(vec![
             "<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R >>".into(),
             "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".into(),
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>".into(),
@@ -1579,7 +1620,12 @@ pub mod tests {
             "<< /Type /Annot /Subtype /Link /Rect [100 690 200 720] /Border [0 0 0] /Dest [3 0 R /XYZ 0 700 0] >>".into(),
             // A 2 × 2 picture, its samples ASCII letters (the builder works in text).
             "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\nABCDEFGHIJKL\nendstream".into(),
-        ];
+        ])
+    }
+
+    /// A PDF of `objects` (numbered from 1, the first the catalog), with
+    /// its cross-reference table and trailer.
+    fn write_pdf(objects: Vec<String>) -> Vec<u8> {
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offsets = Vec::new();
         for (i, obj) in objects.iter().enumerate() {
@@ -2220,6 +2266,62 @@ pub mod tests {
         assert_same_picture(plain.pixels(), always.pixels(), "progressive with pauses");
     }
 
+    /// What `FPDFPage_GenerateContent` leaves out, so that the editing
+    /// refuses such pages: text in a Type 3 font (`Page::has_type3_text`,
+    /// on a page whose glyphs are content streams). A shading object
+    /// (`sh`) is checked too, for the record. Should PDFium one day write
+    /// the text back, this test says so and the refusal can go.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn generate_content_drops_type3_text() {
+        let api = api();
+        let pdf = write_pdf(vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /T3 6 0 R >> /Shading << /Sh1 8 0 R >> >> >>".into(),
+            stream("BT /F1 24 Tf 20 250 Td (Hello) Tj ET BT /T3 24 Tf 20 150 Td (ab) Tj ET q 0 0 300 100 re W n /Sh1 sh Q q 20 0 0 20 200 200 cm BI /W 2 /H 2 /CS /RGB /BPC 8 ID ABCDEFGHIJKL EI Q"),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+            "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 750 750] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /square 7 0 R >> /Encoding << /Type /Encoding /Differences [97 /square /square] >> /FirstChar 97 /LastChar 98 /Widths [1000 1000] /Resources << >> >>".into(),
+            stream("1000 0 0 0 750 750 d1 0 0 375 375 re f"),
+            "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 300 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> /Extend [true true] >>".into(),
+        ]);
+        let path = std::env::temp_dir().join(format!("metalpdf_type3_{}.pdf", std::process::id()));
+        std::fs::write(&path, pdf).unwrap();
+        let types = |page: &Page| -> Vec<c_int> {
+            let n = unsafe { (api.FPDFPage_CountObjects)(page.handle) };
+            (0..n).map(|i| unsafe { (api.FPDFPageObj_GetType)((api.FPDFPage_GetObject)(page.handle, i)) }).collect()
+        };
+        let doc = Document::open(api, &path, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        assert_eq!(types(&page), vec![sys::FPDF_PAGEOBJ_TEXT, sys::FPDF_PAGEOBJ_TEXT, sys::FPDF_PAGEOBJ_SHADING, sys::FPDF_PAGEOBJ_IMAGE]);
+        assert!(page.has_type3_text());
+        // The sample's own page has none.
+        let plain = Document::open(api, &sample_file("plain"), None).unwrap();
+        assert!(!plain.load_page(0).unwrap().has_type3_text());
+        drop(plain);
+        // The Helvetica run edited: the content written anew comes up
+        // short, and the edit is refused.
+        let refused = page.set_text(0, "Edited", &mut |_, _| None).unwrap_err();
+        println!("refused: {refused}");
+        assert!(refused.contains("1 text") && refused.contains("1 shadings"), "{refused}");
+        assert!(refused.contains("1 pictures"), "PDFium wrote the inline image back: {refused}");
+        // Saved regardless (as the engine never does): the page has the
+        // Helvetica run alone.
+        let saved = std::env::temp_dir().join(format!("metalpdf_type3_saved_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(page);
+        drop(doc);
+        let again = Document::open(api, &saved, None).unwrap();
+        let page = again.load_page(0).unwrap();
+        let after = types(&page);
+        println!("objects after the save: {after:?}; text {:?}", page.text(0, page.char_count()));
+        assert_eq!(after, vec![sys::FPDF_PAGEOBJ_TEXT], "PDFium writes more back now: the checks in Page::content_changed may be eased");
+        drop(page);
+        drop(again);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(saved).unwrap();
+    }
+
     #[test]
     #[ignore = "needs vendor/pdfium"]
     fn a_wrong_file_is_refused_cleanly() {
@@ -2229,5 +2331,66 @@ pub mod tests {
         assert_eq!(Document::open(api, &path, None).err(), Some(OpenError::Format));
         std::fs::remove_file(&path).unwrap();
         assert!(matches!(Document::open(api, &path, None).err(), Some(OpenError::File(_))));
+    }
+
+    /// On a real document (`METALPDF_SAMPLE`): the first line of page
+    /// `METALPDF_PAGE` (1-based, 1 by default) edited, the document saved
+    /// and read back: every page's text is as it was, but for that line.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_real_documents_text_survives_a_save() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let index = std::env::var("METALPDF_PAGE").ok().and_then(|p| p.parse::<usize>().ok()).unwrap_or(1).saturating_sub(1);
+        let api = api();
+        let doc = Document::open(api, Path::new(&sample), None).unwrap();
+        let texts = |doc: &Document| -> Vec<String> { (0..doc.page_count()).map(|i| doc.load_page(i).map_or_else(String::new, |p| p.text(0, p.char_count()))).collect() };
+        let before = texts(&doc);
+        let mut fonts = crate::fonts::Fonts::default();
+        let (wanted, old) = {
+            let page = doc.load_page(index).unwrap();
+            println!("page {}: Type 3 text {}", index + 1, page.has_type3_text());
+            let lines = crate::textline::lines(&page.text_objects());
+            let line = lines.iter().find(|l| l.text.trim().chars().count() >= 3).expect("a line of text on the page");
+            let wanted: String = line.text.chars().skip(1).collect();
+            let edit = line.edit(&wanted).unwrap();
+            let how = match page.set_line(&edit.objects, &edit.text, &edit.followers, &mut |name, flags| fonts.get(name, flags)) {
+                Ok(how) => how,
+                Err(refused) => {
+                    // The page's content cannot be written back whole: the
+                    // engine refuses such an edit, so nothing is lost.
+                    println!("page {}: the edit is refused: {refused}", index + 1);
+                    return;
+                }
+            };
+            println!("page {}: {:?} -> {how:?}; {} characters in memory after the edit, {} before", index + 1, line.text, page.char_count(), before[index].chars().count());
+            (wanted, line.text.clone())
+        };
+        let saved = std::env::temp_dir().join(format!("metalpdf_survives_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(doc);
+        let again = Document::open(api, &saved, None).unwrap();
+        let after = texts(&again);
+        drop(again);
+        // `METALPDF_KEEP` leaves the saved file in `%TEMP%` to look at.
+        if std::env::var_os("METALPDF_KEEP").is_none() {
+            std::fs::remove_file(&saved).unwrap();
+        } else {
+            println!("saved as {}", saved.display());
+        }
+        assert_eq!(before.len(), after.len());
+        let mut lost = 0;
+        for (i, (b, a)) in before.iter().zip(&after).enumerate() {
+            let (nb, na) = (b.chars().count(), a.chars().count());
+            if i == index {
+                assert!(a.contains(&wanted), "page {}: the edited line is not there", i + 1);
+                assert!(!a.contains(&old) || b.matches(&old).count() > 1, "page {}: the old line is still there", i + 1);
+            }
+            if na + 2 < nb || (i != index && a != b) {
+                lost += 1;
+                let missing: Vec<&str> = b.split_whitespace().filter(|w| !a.contains(w)).take(12).collect();
+                println!("page {}: {nb} characters before, {na} after; missing words: {missing:?}", i + 1);
+            }
+        }
+        assert_eq!(lost, 0, "{lost} pages lost text");
     }
 }

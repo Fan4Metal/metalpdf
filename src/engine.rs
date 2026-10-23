@@ -737,6 +737,12 @@ impl Worker {
             state.log.push(edit);
             return Ok(state.log.len());
         }
+        // PDFium writes the page's content anew from its objects and
+        // leaves out text in Type 3 fonts: such a page takes no edit, or
+        // that text would be lost when saved.
+        if self.page(id, page).is_some_and(Page::has_type3_text) {
+            return Err("the page has text in a Type 3 font, which PDFium cannot write back".into());
+        }
         // The page comes from the edited copy from now on.
         self.pages.remove(&(id, page));
         self.page_order.retain(|k| *k != (id, page));
@@ -754,7 +760,16 @@ impl Worker {
             },
         };
         self.fonts = fonts;
-        applied?;
+        if let Err(reason) = applied {
+            // The page may have changed in memory before the edit failed
+            // (its content written anew and found short): the copy is
+            // made again from the log, without it.
+            let log = self.edits.get(&id).map(|s| s.log.clone()).unwrap_or_default();
+            if let Err(e) = self.rebuild_edits(id, log) {
+                log::warn!("the edited copy could not be rebuilt after a failed edit: {e}");
+            }
+            return Err(reason);
+        }
         let state = self.edits.get_mut(&id).expect("inserted above");
         state.log.push(edit);
         Ok(state.log.len())
@@ -827,16 +842,16 @@ impl Worker {
         self.send(Event::Printed { id, outcome });
     }
 
-    /// The edited copy made again from the file with `log` applied.
+    /// The edited copy made again from the file with `log` applied. A
+    /// file that cannot be opened again (moved, taken) leaves the copy
+    /// and its log as they are.
     fn rebuild_edits(&mut self, id: DocId, log: Vec<Edit>) -> Result<usize, String> {
         let path = self.paths.get(&id).cloned().ok_or("no such document")?;
+        let doc = if log.is_empty() { None } else { Some(Document::open(self.api, &path, None).map_err(|e| e.to_string())?) };
         self.pages.retain(|k, _| k.0 != id);
         self.page_order.retain(|k| k.0 != id);
         self.edits.remove(&id);
-        if log.is_empty() {
-            return Ok(0);
-        }
-        let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
+        let Some(doc) = doc else { return Ok(0) };
         let obstacles = doc.edit_obstacles();
         self.edits.insert(id, EditState { doc, obstacles, log: Vec::new(), edited: HashSet::new(), all_pages: false });
         let count = log.len();
