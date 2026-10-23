@@ -1780,6 +1780,10 @@ impl App {
         if !tab.doc.ready() {
             return;
         }
+        // The search tab is hidden while this document's find bar is
+        // closed: its pages instead, the setting kept for a document
+        // still searching.
+        let which = if which == SidebarTab::Search && !tab.find.open { SidebarTab::Thumbnails } else { which };
         if which == SidebarTab::Outline {
             tab.doc.need_outline(engine);
         }

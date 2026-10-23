@@ -35,7 +35,8 @@ const THUMB_LABEL: f32 = 18.0;
 
 /// The sidebar's smallest width, in points: the row of its tabs, which
 /// cannot wrap, plus the panel's margins. Narrower, the row ran past the
-/// panel and under the pages.
+/// panel and under the pages. Search counts while it is hidden too: the
+/// panel does not widen when a search shows it.
 pub fn min_width(ui: &Ui) -> f32 {
     let spacing = ui.spacing();
     let text = |s: &str| {
@@ -70,7 +71,11 @@ pub fn show(
         ui.add_space(4.0);
         // Each tab's context menu chooses the side of the window.
         let mut chosen = side;
-        for (tab, label) in [(SidebarTab::Thumbnails, tr!("Pages", "Страницы")), (SidebarTab::Outline, tr!("Outline", "Оглавление")), (SidebarTab::Search, tr!("Search", "Поиск"))] {
+        // Search only while the find bar is open: without it the tab has
+        // nothing to show.
+        let searching = tab.find.open;
+        let tabs = [(SidebarTab::Thumbnails, tr!("Pages", "Страницы")), (SidebarTab::Outline, tr!("Outline", "Оглавление")), (SidebarTab::Search, tr!("Search", "Поиск"))];
+        for (tab, label) in tabs.into_iter().filter(|&(t, _)| t != SidebarTab::Search || searching) {
             let response = ui.selectable_label(which == tab, label);
             if response.clicked() {
                 actions.push(SidebarAction::Tab(tab));
