@@ -648,33 +648,24 @@ impl Page {
         String::from_utf16_lossy(&buf[..written])
     }
 
-    /// The character ranges of `query` on the page: `(first index, count)`.
-    pub fn find(&self, query: &str, match_case: bool, whole_words: bool) -> Vec<(usize, usize)> {
+    /// The page's characters, one per text page index (a UTF-16 unit
+    /// each: a character beyond the BMP takes two indices, as PDFium
+    /// counts them).
+    pub fn chars(&self) -> Vec<char> {
         let api = self.api();
         let Some(text) = self.text_page() else {
             return Vec::new();
         };
-        let wide: Vec<u16> = query.encode_utf16().chain(std::iter::once(0)).collect();
-        let flags = if match_case { sys::FPDF_MATCHCASE } else { 0 } | if whole_words { sys::FPDF_MATCHWHOLEWORD } else { 0 };
-        let search = unsafe { (api.FPDFText_FindStart)(text, wide.as_ptr(), flags, 0) };
-        if search.is_null() {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        unsafe {
-            while (api.FPDFText_FindNext)(search) != 0 {
-                let index = (api.FPDFText_GetSchResultIndex)(search);
-                let count = (api.FPDFText_GetSchCount)(search);
-                if index >= 0 && count > 0 {
-                    out.push((index as usize, count as usize));
-                }
-                if out.len() > 100_000 {
-                    break;
-                }
-            }
-            (api.FPDFText_FindClose)(search);
-        }
-        out
+        let count = unsafe { (api.FPDFText_CountChars)(text) }.max(0);
+        (0..count).map(|i| char::from_u32(unsafe { (api.FPDFText_GetUnicode)(text, i) }).unwrap_or(char::REPLACEMENT_CHARACTER)).collect()
+    }
+
+    /// The character ranges of `query` on the page: `(first index,
+    /// count)`. The search is the program's own (`search::matches`):
+    /// PDFium's `FPDFText_FindStart` folds the case and bounds words in
+    /// ASCII alone.
+    pub fn find(&self, query: &str, match_case: bool, whole_words: bool) -> Vec<(usize, usize)> {
+        crate::search::matches(&self.chars(), query, match_case, whole_words)
     }
 
     /// The rectangles (left, bottom, right, top, page space) covering
@@ -2264,6 +2255,33 @@ pub mod tests {
         assert_eq!(status, RenderStatus::Done);
         assert_same_picture(plain.pixels(), never.pixels(), "progressive without pauses");
         assert_same_picture(plain.pixels(), always.pixels(), "progressive with pauses");
+    }
+
+    /// On a real document (`METALPDF_SAMPLE`) with non-ASCII text: the
+    /// search without "match case" finds a capitalised word typed in
+    /// lower case, and with "whole words" finds the word itself.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_SAMPLE"]
+    fn a_real_documents_search_folds_case_beyond_ascii() {
+        let Some(sample) = std::env::var_os("METALPDF_SAMPLE") else { return };
+        let doc = Document::open(api(), Path::new(&sample), None).unwrap();
+        let mut tried = 0;
+        for index in 0..doc.page_count().min(10) {
+            let page = doc.load_page(index).unwrap();
+            let text = page.text(0, page.char_count());
+            let Some(word) = text.split(|c: char| !c.is_alphabetic()).find(|w| w.chars().count() >= 4 && w.chars().next().is_some_and(|c| c.is_uppercase() && !c.is_ascii())) else { continue };
+            let lower = word.to_lowercase();
+            let (exact, folded, whole) = (page.find(word, true, false).len(), page.find(&lower, false, false).len(), page.find(word, false, true).len());
+            println!("page {}: {word:?} {exact} exact; {lower:?} folded {folded}; whole words {whole}", index + 1);
+            assert!(exact >= 1);
+            assert!(folded >= exact, "the search does not fold the case of {word:?}");
+            assert!(whole >= 1, "whole words miss {word:?}");
+            tried += 1;
+            if tried >= 3 {
+                break;
+            }
+        }
+        assert!(tried > 0, "no capitalised non-ASCII word on the first pages");
     }
 
     /// What `FPDFPage_GenerateContent` leaves out, so that the editing

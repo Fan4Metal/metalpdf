@@ -7,6 +7,69 @@ use std::collections::BTreeMap;
 
 use crate::engine::SearchHit;
 
+/// The matches of `query` in a page's characters (one per text page
+/// index): `(first index, count)`, in order, not overlapping. The case
+/// is folded by Unicode's rules unless `match_case` (PDFium's own search
+/// folds ASCII alone, so "быстрый" never found "Быстрый"); a word of
+/// the query is matched across any run of whitespace, line breaks
+/// included; `whole_words` wants no letter or digit against the match's
+/// letters or digits, in any script.
+pub fn matches(chars: &[char], query: &str, match_case: bool, whole_words: bool) -> Vec<(usize, usize)> {
+    let fold = |c: char| -> Vec<char> { if match_case { vec![c] } else { c.to_lowercase().collect() } };
+    let words: Vec<Vec<char>> = query.split_whitespace().map(|w| w.chars().flat_map(fold).collect()).collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    // The folded text, each character remembering the index it came from
+    // (a character may fold to several).
+    let mut folded = Vec::with_capacity(chars.len());
+    let mut origin = Vec::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate() {
+        for f in fold(c) {
+            folded.push(f);
+            origin.push(i);
+        }
+    }
+    // The words one after another, whitespace between them; the folded
+    // index after the match.
+    let match_at = |mut p: usize| -> Option<usize> {
+        for (k, word) in words.iter().enumerate() {
+            if k > 0 {
+                let s = p;
+                while p < folded.len() && folded[p].is_whitespace() {
+                    p += 1;
+                }
+                if p == s {
+                    return None;
+                }
+            }
+            if folded.len() < p + word.len() || folded[p..p + word.len()] != word[..] {
+                return None;
+            }
+            p += word.len();
+        }
+        Some(p)
+    };
+    let starts_word = words[0][0].is_alphanumeric();
+    let ends_word = words[words.len() - 1].last().is_some_and(|c| c.is_alphanumeric());
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < folded.len() {
+        if let Some(end) = match_at(i) {
+            let (start, last) = (origin[i], origin[end - 1]);
+            let before = !whole_words || !starts_word || start == 0 || !chars[start - 1].is_alphanumeric();
+            let after = !whole_words || !ends_word || last + 1 >= chars.len() || !chars[last + 1].is_alphanumeric();
+            if before && after {
+                out.push((start, last - start + 1));
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// The end of `text` after its last line break, its whitespace collapsed:
 /// what a hit's line says before the match (a space before the match
 /// kept, the line's start trimmed).
@@ -213,6 +276,28 @@ impl FindState {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_search_folds_case_in_any_script_and_knows_words() {
+        let chars: Vec<char> = "Быстрый просмотрщик PDF. Кот, который\r\nбыстрый. İstanbul".chars().collect();
+        assert_eq!(matches(&chars, "быстрый", false, false), vec![(0, 7), (39, 7)]);
+        assert_eq!(matches(&chars, "быстрый", true, false), vec![(39, 7)]);
+        assert_eq!(matches(&chars, "pdf", false, false), vec![(20, 3)]);
+        // Whole words in Cyrillic: "кот" is not "который".
+        assert_eq!(matches(&chars, "кот", false, true), vec![(25, 3)]);
+        assert_eq!(matches(&chars, "кот", false, false), vec![(25, 3), (30, 3)]);
+        // A query's space matches the line break; the indices are the
+        // page's, whatever a character folds to (İ folds to two).
+        assert_eq!(matches(&chars, "который быстрый", false, false), vec![(30, 16)]);
+        assert_eq!(matches(&chars, "istanbul", false, false).len(), 0);
+        assert_eq!(matches(&chars, "İstanbul", false, false), vec![(48, 8)]);
+        assert!(matches(&chars, "  ", false, false).is_empty());
+        // Matches do not overlap.
+        let aa: Vec<char> = "aaaa".chars().collect();
+        assert_eq!(matches(&aa, "aa", true, false), vec![(0, 2), (2, 2)]);
+    }
+
     #[test]
     fn a_line_end_hyphen_reads_as_a_hyphen() {
         assert_eq!(line_before("x\r\nэлемен\u{2}"), "элемен-");
@@ -220,8 +305,6 @@ mod tests {
         assert_eq!(line_after(" элемен\u{2}\r\nтарные числа\r\nдальше"), " элементарные числа");
         assert_eq!(line_before("с одного переклю\u{fffe}чение "), "с одного переключение ");
     }
-
-    use super::*;
 
     fn hit(start: usize) -> SearchHit {
         SearchHit { start, count: 3, rects: vec![[0.0, 0.0, 10.0, 10.0]], before: String::new(), matched: String::new(), after: String::new() }
