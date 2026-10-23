@@ -7,7 +7,19 @@
 //!   in "Open with";
 //! - `Applications\metalpdf.exe` and `Capabilities` listed in
 //!   `RegisteredApplications`, so that MetalPDF appears in Settings →
-//!   Default apps.
+//!   Default apps;
+//! - the thumbnail and preview handlers of the other PDF programs, on the
+//!   ProgID (`borrow_handlers`): Explorer asks the default ProgID for them,
+//!   and MetalPDF has none of its own, so once it was the default the
+//!   files showed its icon where Acrobat had drawn the first page (its
+//!   handler is on its ProgID, `Acrobat.Document.DC`, not on `.pdf`).
+//!   Acrobat lists its class as an `IExtractImage` only, and the
+//!   `IThumbnailProvider` on `.pdf` (here a 2011 bridge for 32-bit Reader)
+//!   comes first and fails, so with no thumbnail provider to borrow the
+//!   image extractor is put down as one too: Explorer takes a class there
+//!   that gives only `IExtractImage` and wraps it (measured: Acrobat's
+//!   class answers E_NOINTERFACE for `IThumbnailProvider`, and the files
+//!   got their thumbnails).
 //!
 //! Windows does not let a program make itself the default: the choice
 //! (`UserChoice`) is protected and belongs to the user. So `register` only
@@ -17,11 +29,14 @@
 
 use std::path::Path;
 
-/// Where the keys go, under HKEY_CURRENT_USER. Tests use a scratch key.
+/// Where the keys go, under HKEY_CURRENT_USER, and where the other
+/// programs' classes are read (HKEY_CLASSES_ROOT, the machine's merged
+/// with the user's). Tests use a scratch key for both.
 struct Roots {
     classes: String,
     software: String,
     registered_apps: String,
+    lookup: (reg::Hkey, String),
 }
 
 impl Roots {
@@ -30,13 +45,38 @@ impl Roots {
             classes: r"Software\Classes".into(),
             software: format!(r"Software\{}", crate::APP_NAME),
             registered_apps: r"Software\RegisteredApplications".into(),
+            lookup: (reg::CLASSES_ROOT, String::new()),
         }
+    }
+
+    /// The class key `key` where the other programs' classes are read.
+    fn class_key(&self, key: &str) -> String {
+        let prefix = &self.lookup.1;
+        if prefix.is_empty() { key.to_string() } else { format!(r"{prefix}\{key}") }
+    }
+
+    /// Value `name` of the class key `key`, as Explorer sees it.
+    fn class_value(&self, key: &str, name: Option<&str>) -> Option<String> {
+        reg::get_in(self.lookup.0, &self.class_key(key), name)
+    }
+
+    /// The value names of the class key `key`.
+    fn class_value_names(&self, key: &str) -> Vec<String> {
+        reg::value_names(self.lookup.0, &self.class_key(key))
     }
 }
 
 const PROG_ID: &str = "MetalPDF.pdf";
 const APP_KEY: &str = r"Applications\metalpdf.exe";
 const EXTENSION: &str = ".pdf";
+
+/// The shell extensions Explorer looks up on a file's ProgID that draw a
+/// file: the thumbnail (`IThumbnailProvider`, and the older
+/// `IExtractImage`, Acrobat's) and the preview pane (`IPreviewHandler`).
+const HANDLERS: [&str; 3] = [THUMBNAIL_PROVIDER, EXTRACT_IMAGE, PREVIEW_HANDLER];
+const THUMBNAIL_PROVIDER: &str = "{E357FCCD-A995-4576-B01F-234630154E96}";
+const EXTRACT_IMAGE: &str = "{BB2E617C-0920-11D1-9A0B-00C04FC2D6C1}";
+const PREVIEW_HANDLER: &str = "{8895B1C6-B41F-4C1C-A562-0D564250836F}";
 
 /// The command Explorer runs to open a file with `exe`.
 fn open_command(exe: &Path) -> String {
@@ -103,7 +143,47 @@ fn register_in(r: &Roots, exe: &Path) -> Result<(), String> {
     reg::set(&capabilities, Some("ApplicationIcon"), &icon)?;
     reg::set(&format!(r"{capabilities}\FileAssociations"), Some(EXTENSION), PROG_ID)?;
     reg::set(&r.registered_apps, Some(crate::APP_NAME), &capabilities)?;
+    borrow_handlers(r)?;
     Ok(())
+}
+
+/// Put on our ProgID the thumbnail and preview handlers that the other
+/// PDF programs (the ProgIDs in `.pdf`'s `OpenWithProgids` and its
+/// default) have on theirs, each from the first that has one whose DLL is
+/// there; those borrowed before are dropped first, so a register after
+/// another program came or went brings them up to date. With no
+/// thumbnail provider to borrow, the image extractor is put down as one
+/// (see the module's notes). They go with the ProgID on unregistering.
+fn borrow_handlers(r: &Roots) -> Result<(), String> {
+    let mut sources: Vec<String> = r.class_value_names(&format!(r"{EXTENSION}\OpenWithProgids"));
+    sources.extend(r.class_value(EXTENSION, None));
+    sources.retain(|p| !p.is_empty() && !p.eq_ignore_ascii_case(PROG_ID));
+    let lent = |handler: &str| -> Vec<String> {
+        sources
+            .iter()
+            .filter_map(|p| r.class_value(&format!(r"{p}\ShellEx\{handler}"), None))
+            .filter(|clsid| handler_installed(r, clsid))
+            .collect()
+    };
+    for handler in HANDLERS {
+        let key = format!(r"{}\{PROG_ID}\ShellEx\{handler}", r.classes);
+        reg::delete_tree(&key)?;
+        let mut found = lent(handler).into_iter().next();
+        if found.is_none() && handler == THUMBNAIL_PROVIDER {
+            found = lent(EXTRACT_IMAGE).into_iter().next();
+        }
+        if let Some(clsid) = found {
+            reg::set(&key, None, &clsid)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the COM class `clsid` is registered with a DLL that exists (a
+/// program uninstalled carelessly leaves its keys behind).
+fn handler_installed(r: &Roots, clsid: &str) -> bool {
+    r.class_value(&format!(r"CLSID\{clsid}\InprocServer32"), None)
+        .is_some_and(|dll| Path::new(dll.trim().trim_matches('"')).is_file())
 }
 
 fn unregister_in(r: &Roots) -> Result<(), String> {
@@ -140,8 +220,15 @@ fn notify_shell() {
 mod reg {
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW,
+        HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_READ, REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegDeleteKeyValueW,
+        RegDeleteTreeW, RegEnumValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW,
     };
+
+    /// A root key, to read from.
+    pub type Hkey = HKEY;
+    pub const CLASSES_ROOT: Hkey = HKEY_CLASSES_ROOT;
+    #[cfg(test)]
+    pub const CURRENT_USER: Hkey = HKEY_CURRENT_USER;
 
     use crate::win::wide;
 
@@ -169,13 +256,19 @@ mod reg {
 
     /// Value `name` of `key`, if it is there.
     pub fn get(key: &str, name: Option<&str>) -> Option<String> {
+        get_in(HKEY_CURRENT_USER, key, name)
+    }
+
+    /// Value `name` of `key` under `root`, if it is there (an expandable
+    /// string comes expanded).
+    pub fn get_in(root: Hkey, key: &str, name: Option<&str>) -> Option<String> {
         let (k, n) = (wide(key), name.map(wide));
         let mut buf = vec![0u16; 1024];
         loop {
             let mut bytes = (buf.len() * 2) as u32;
             let code = unsafe {
                 RegGetValueW(
-                    HKEY_CURRENT_USER,
+                    root,
                     k.as_ptr(),
                     name_ptr(&n),
                     RRF_RT_REG_SZ,
@@ -194,6 +287,40 @@ mod reg {
                 _ => return None,
             }
         }
+    }
+
+    /// The names of `key`'s values under `root` (the default value's is
+    /// empty); none for a missing key.
+    pub fn value_names(root: Hkey, key: &str) -> Vec<String> {
+        let k = wide(key);
+        let mut handle: HKEY = std::ptr::null_mut();
+        if unsafe { RegOpenKeyExW(root, k.as_ptr(), 0, KEY_READ, &mut handle) } != ERROR_SUCCESS {
+            return Vec::new();
+        }
+        let mut names = Vec::new();
+        // Value names are at most 16383 characters.
+        let mut buf = vec![0u16; 16384];
+        for index in 0.. {
+            let mut len = buf.len() as u32;
+            let code = unsafe {
+                RegEnumValueW(
+                    handle,
+                    index,
+                    buf.as_mut_ptr(),
+                    &mut len,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if code != ERROR_SUCCESS {
+                break;
+            }
+            names.push(String::from_utf16_lossy(&buf[..len as usize]));
+        }
+        unsafe { RegCloseKey(handle) };
+        names
     }
 
     /// Delete `key` with everything under it; a missing key is fine.
@@ -223,6 +350,7 @@ mod tests {
             classes: format!(r"{root}\Classes"),
             software: format!(r"{root}\Software\MetalPDF"),
             registered_apps: format!(r"{root}\RegisteredApplications"),
+            lookup: (reg::CURRENT_USER, format!(r"{root}\Classes")),
         };
         let exe = Path::new(r"C:\Programs\MetalPDF\metalpdf.exe");
         assert_eq!(status_in(&r, exe), Status::NotRegistered);
@@ -251,6 +379,63 @@ mod tests {
         assert_eq!(reg::get(&r.registered_apps, Some("MetalPDF")), None);
         // Unregistering twice is fine.
         unregister_in(&r).unwrap();
+        reg::delete_tree(&root).unwrap();
+    }
+
+    /// The other PDF programs' thumbnail and preview handlers come over to
+    /// our ProgID, only those whose DLL is there, and go with it.
+    #[test]
+    fn handlers_are_borrowed() {
+        let root = format!(r"Software\metalpdf_test_handlers_{}", std::process::id());
+        let classes = format!(r"{root}\Classes");
+        let r = Roots {
+            classes: classes.clone(),
+            software: format!(r"{root}\Software\MetalPDF"),
+            registered_apps: format!(r"{root}\RegisteredApplications"),
+            lookup: (reg::CURRENT_USER, classes.clone()),
+        };
+        let set = |key: &str, name: Option<&str>, value: &str| reg::set(&format!(r"{classes}\{key}"), name, value).unwrap();
+        let get = |key: &str| reg::get(&format!(r"{classes}\{key}"), None);
+        let dll = std::env::current_exe().unwrap().display().to_string();
+        let [thumbnail, extract, preview] = HANDLERS;
+        let (gone, reader_extract, reader_preview, default_thumbnail) = (
+            "{11111111-0000-0000-0000-000000000000}",
+            "{22222222-0000-0000-0000-000000000000}",
+            "{33333333-0000-0000-0000-000000000000}",
+            "{44444444-0000-0000-0000-000000000000}",
+        );
+        // A program uninstalled with its keys left behind, a reader with a
+        // thumbnail extractor and a preview handler on its ProgID, and the
+        // extension's default with a thumbnail provider.
+        set(r".pdf\OpenWithProgids", Some("Gone.pdf"), "");
+        set(r".pdf\OpenWithProgids", Some("Reader.pdf"), "");
+        set(".pdf", None, "Default.pdf");
+        set(&format!(r"Gone.pdf\ShellEx\{extract}"), None, gone);
+        set(&format!(r"CLSID\{gone}\InprocServer32"), None, r"C:\nowhere\gone.dll");
+        set(&format!(r"Reader.pdf\ShellEx\{extract}"), None, reader_extract);
+        set(&format!(r"Reader.pdf\ShellEx\{preview}"), None, reader_preview);
+        set(&format!(r"Default.pdf\ShellEx\{thumbnail}"), None, default_thumbnail);
+        for clsid in [reader_extract, reader_preview, default_thumbnail] {
+            set(&format!(r"CLSID\{clsid}\InprocServer32"), None, &format!("\"{dll}\""));
+        }
+        let exe = Path::new(r"C:\Programs\MetalPDF\metalpdf.exe");
+        register_in(&r, exe).unwrap();
+        assert_eq!(get(&format!(r"MetalPDF.pdf\ShellEx\{extract}")).unwrap(), reader_extract);
+        assert_eq!(get(&format!(r"MetalPDF.pdf\ShellEx\{preview}")).unwrap(), reader_preview);
+        assert_eq!(get(&format!(r"MetalPDF.pdf\ShellEx\{thumbnail}")).unwrap(), default_thumbnail);
+        // With no thumbnail provider lent, the reader's image extractor
+        // stands in as one.
+        reg::delete_tree(&format!(r"{classes}\Default.pdf")).unwrap();
+        register_in(&r, exe).unwrap();
+        assert_eq!(get(&format!(r"MetalPDF.pdf\ShellEx\{thumbnail}")).unwrap(), reader_extract);
+        // The reader uninstalled: registering again drops what it lent.
+        reg::delete_tree(&format!(r"{classes}\Reader.pdf")).unwrap();
+        register_in(&r, exe).unwrap();
+        for handler in HANDLERS {
+            assert_eq!(get(&format!(r"MetalPDF.pdf\ShellEx\{handler}")), None);
+        }
+        unregister_in(&r).unwrap();
+        assert_eq!(get("MetalPDF.pdf"), None);
         reg::delete_tree(&root).unwrap();
     }
 }
