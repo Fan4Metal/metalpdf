@@ -433,6 +433,15 @@ const LOOK_FRAMES: u32 = 10;
 /// The window's place is saved this long after it last moved.
 const WINDOW_SAVE_DELAY: Duration = Duration::from_secs(1);
 
+/// The name Save As offers for an edited `path`: `name_edited.pdf`, so
+/// that the original is not overwritten by a hurried Enter (a name that
+/// ends in `_edited` already is offered as it is).
+fn edited_name(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy();
+    let stem = if stem.ends_with("_edited") { stem.into_owned() } else { format!("{stem}_edited") };
+    Some(format!("{stem}.pdf"))
+}
+
 /// What the toolbar's page field resolves a typed label or number with.
 type PageResolver = Box<dyn Fn(&str) -> Option<usize>>;
 
@@ -753,8 +762,8 @@ impl App {
                 if let Some(folder) = path.parent() {
                     dialog = dialog.set_directory(folder);
                 }
-                if let Some(name) = path.file_name() {
-                    dialog = dialog.set_file_name(name.to_string_lossy());
+                if let Some(name) = edited_name(&path) {
+                    dialog = dialog.set_file_name(name);
                 }
                 dialog
             },
@@ -2898,5 +2907,18 @@ impl eframe::App for App {
         self.remember_session();
         self.settings.save();
         crate::textures::delete_dropped();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_as_offers_an_edited_name() {
+        assert_eq!(edited_name(Path::new(r"C:\Docs\Отчёт.pdf")).as_deref(), Some("Отчёт_edited.pdf"));
+        assert_eq!(edited_name(Path::new(r"C:\Docs\report_edited.pdf")).as_deref(), Some("report_edited.pdf"));
+        assert_eq!(edited_name(Path::new(r"C:\Docs\scan.PDF")).as_deref(), Some("scan_edited.pdf"));
+        assert_eq!(edited_name(Path::new(r"C:\Docs\v1.2.pdf")).as_deref(), Some("v1.2_edited.pdf"));
     }
 }
