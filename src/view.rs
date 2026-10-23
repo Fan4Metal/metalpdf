@@ -35,7 +35,14 @@ pub struct ViewState {
     pub wheel_acc: f32,
     /// Wheel notches not yet turned into a zoom step.
     pub zoom_acc: f32,
+    /// Single-page mode: how far a drag of the pages has pulled past the
+    /// page's edge, down positive (`drag_single`).
+    pub pull: f32,
 }
+
+/// How far the hand pulls past a page's edge, in points, to turn it in
+/// single-page mode.
+pub const PULL: f32 = 80.0;
 
 /// What a wheel notch scrolls within a page taller than the view, in
 /// points (egui's `line_scroll_speed`, as set in `App::new`).
@@ -56,6 +63,7 @@ impl ViewState {
             forward: true,
             current: 0,
             wheel_acc: 0.0,
+            pull: 0.0,
             zoom_acc: 0.0,
         }
     }
@@ -124,6 +132,28 @@ impl ViewState {
             self.forward = anchor.page > self.anchor.page;
         }
         self.anchor = anchor;
+    }
+
+    /// Single-page mode, the pages scrolled to `scroll` by the hand (or
+    /// its inertia, `dragging` false): kept within the page shown, what
+    /// went past its edge gathered while the drag goes on, a page turned
+    /// once it is past `PULL`, the next from its top, the previous from
+    /// its bottom, either way alike. Without this, the least pull up went
+    /// to the previous page (the offset was on it) and none down did.
+    pub fn drag_single(&mut self, layout: &Layout, scroll: f32, dragging: bool, count: usize) {
+        let (top, bottom) = layout.page_scroll_range(self.anchor.page, self.viewport[1]);
+        let over = if scroll > bottom { scroll - bottom } else if scroll < top { scroll - top } else { 0.0 };
+        self.set_scroll(layout, scroll.clamp(top, bottom.max(top)));
+        if !dragging || over == 0.0 || (self.pull != 0.0 && (over > 0.0) != (self.pull > 0.0)) {
+            self.pull = if dragging { over } else { 0.0 };
+        } else {
+            self.pull += over;
+        }
+        if self.pull.abs() >= PULL {
+            let down = self.pull > 0.0;
+            self.pull = 0.0;
+            self.flip(down, count);
+        }
     }
 
     /// A screen of pages down or up (`Page Down`, `Space`), with a little
@@ -331,6 +361,40 @@ mod tests {
         assert_eq!(view.anchor.page, 0);
         assert_eq!(view.anchor.offset, 1.0);
         view.turn_page(true, 3);
+        assert_eq!(view.anchor.page, 1);
+    }
+
+    #[test]
+    fn the_hand_turns_pages_both_ways_once_pulled_far_enough() {
+        let mut view = ViewState::new(ViewMode::Single, ZoomSetting::FitPage);
+        view.viewport = [1000.0, 800.0];
+        let s = sizes(3);
+        view.go_to_page(1, 3);
+        let layout = view.layout(&s, A4);
+        let (top, bottom) = layout.page_scroll_range(1, 800.0);
+        // A little past the top is not a page.
+        view.drag_single(&layout, top - 5.0, true, 3);
+        assert_eq!(view.anchor.page, 1);
+        // Pulled down past the bottom, a frame at a time: the next page.
+        for _ in 0..2 {
+            view.drag_single(&layout, bottom + 30.0, true, 3);
+            assert_eq!(view.anchor.page, 1);
+        }
+        view.drag_single(&layout, bottom + 30.0, true, 3);
+        assert_eq!(view.anchor.page, 2);
+        assert_eq!(view.anchor.offset, 0.0);
+        // Up past the top: the previous page, from its bottom.
+        let (top, _) = layout.page_scroll_range(2, 800.0);
+        for _ in 0..3 {
+            view.drag_single(&layout, top - 30.0, true, 3);
+        }
+        assert_eq!(view.anchor.page, 1);
+        assert_eq!(view.anchor.offset, 1.0);
+        // Inertia after the button is let go turns nothing.
+        let (_, bottom) = layout.page_scroll_range(1, 800.0);
+        for _ in 0..10 {
+            view.drag_single(&layout, bottom + 30.0, false, 3);
+        }
         assert_eq!(view.anchor.page, 1);
     }
 

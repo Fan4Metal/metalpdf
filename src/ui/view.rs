@@ -706,9 +706,18 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
         });
     tab.selection = selection;
     tab.selecting = selecting;
-    // Where the scroll area ended up (the wheel, the bar, a drag).
+    // Where the scroll area ended up (the wheel, the bar, a drag). In
+    // single-page mode a drag of the pages with the hand turns a page only
+    // when pulled well past its edge (`ViewState::drag_single`); a drag of
+    // the bar goes where it is dragged, turning pages on the way.
     let offset = scroll.state.offset;
-    tab.view.set_scroll(&layout, offset.y);
+    let on_bar = ui.input(|i| i.pointer.any_down() && i.pointer.press_origin().is_some_and(|p| !scroll.inner_rect.contains(p)));
+    if single && hand && !on_bar {
+        let dragging = ui.input(|i| i.pointer.primary_down());
+        tab.view.drag_single(&layout, offset.y, dragging, tab.doc.page_count);
+    } else {
+        tab.view.set_scroll(&layout, offset.y);
+    }
     tab.view.scroll_x = offset.x;
     tab.view.current = layout.current(offset.y, area.height());
     out.visible = visible.clone();
