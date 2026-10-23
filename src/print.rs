@@ -238,8 +238,9 @@ pub struct Placed {
 
 /// Page `page` (points, /Rotate applied) on `sheet`: turned when
 /// `auto_rotate` and its shape is the other way round from the printable
-/// area's, sized by `scale`, centred on the printable area.
-pub fn place(page: [f32; 2], sheet: &Sheet, scale: PrintScale, auto_rotate: bool) -> Placed {
+/// area's, sized by `scale` (`percent` of its size for the custom one),
+/// centred on the printable area.
+pub fn place(page: [f32; 2], sheet: &Sheet, scale: PrintScale, percent: u32, auto_rotate: bool) -> Placed {
     let [_, _, pw, ph] = sheet.printable;
     let page = [page[0].max(1.0), page[1].max(1.0)];
     let turn = auto_rotate && page[0] != page[1] && (page[0] > page[1]) != (pw > ph);
@@ -250,6 +251,7 @@ pub fn place(page: [f32; 2], sheet: &Sheet, scale: PrintScale, auto_rotate: bool
         PrintScale::Shrink => fit.min(1.0),
         PrintScale::Fit => fit,
         PrintScale::Actual => 1.0,
+        PrintScale::Custom => percent.max(1) as f32 / 100.0,
     };
     let (w, h) = (natural[0] * k, natural[1] * k);
     Placed { rotate: if turn { 1 } else { 0 }, rect: [(pw - w) / 2.0, (ph - h) / 2.0, w, h] }
@@ -437,31 +439,35 @@ mod tests {
     #[test]
     fn a_small_page_prints_at_its_size_centred() {
         // A5 on A4.
-        let p = place([420.0, 595.0], &a4(), PrintScale::Shrink, true);
+        let p = place([420.0, 595.0], &a4(), PrintScale::Shrink, 100, true);
         assert_eq!(p.rotate, 0);
         assert!((p.rect[2] - 420.0 * 600.0 / 72.0).abs() < 0.01);
         assert!((p.rect[0] - (4660.0 - p.rect[2]) / 2.0).abs() < 0.01);
         // Fitted, it fills the width.
-        let p = place([420.0, 595.0], &a4(), PrintScale::Fit, true);
+        let p = place([420.0, 595.0], &a4(), PrintScale::Fit, 100, true);
         assert!((p.rect[2] - 4660.0).abs() < 0.5 || (p.rect[3] - 6716.0).abs() < 0.5);
     }
 
     #[test]
     fn a_large_page_is_shrunk_unless_actual_size() {
         // A3 on A4.
-        let p = place([842.0, 1191.0], &a4(), PrintScale::Shrink, true);
+        let p = place([842.0, 1191.0], &a4(), PrintScale::Shrink, 100, true);
         assert!(p.rect[2] <= 4660.0 + 0.01 && p.rect[3] <= 6716.0 + 0.01);
-        let p = place([842.0, 1191.0], &a4(), PrintScale::Actual, true);
+        let p = place([842.0, 1191.0], &a4(), PrintScale::Actual, 100, true);
         assert!(p.rect[0] < 0.0, "cut off on both sides, centred");
+        // A custom scale: A3 at 50 % is A5's size, whatever the sheet.
+        let p = place([842.0, 1191.0], &a4(), PrintScale::Custom, 50, true);
+        assert!((p.rect[2] - 421.0 * 600.0 / 72.0).abs() < 0.01);
+        assert!((p.rect[0] - (4660.0 - p.rect[2]) / 2.0).abs() < 0.01);
     }
 
     #[test]
     fn a_landscape_page_is_turned_on_a_portrait_sheet() {
-        let p = place([842.0, 595.0], &a4(), PrintScale::Shrink, true);
+        let p = place([842.0, 595.0], &a4(), PrintScale::Shrink, 100, true);
         assert_eq!(p.rotate, 1);
         assert!(p.rect[3] > p.rect[2], "the turned box is tall");
-        assert_eq!(place([842.0, 595.0], &a4(), PrintScale::Shrink, false).rotate, 0);
-        assert_eq!(place([500.0, 500.0], &a4(), PrintScale::Shrink, true).rotate, 0);
+        assert_eq!(place([842.0, 595.0], &a4(), PrintScale::Shrink, 100, false).rotate, 0);
+        assert_eq!(place([500.0, 500.0], &a4(), PrintScale::Shrink, 100, true).rotate, 0);
     }
 
     #[test]

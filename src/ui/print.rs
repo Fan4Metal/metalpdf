@@ -14,7 +14,7 @@ use crate::cache::Textures;
 use crate::document::DocState;
 use crate::engine::{Engine, Kind, PREVIEW_WIDTH, PrintJob, RenderKey};
 use crate::print::{self, DevMode, PrinterState, Sheet};
-use crate::settings::{PrintScale, PrintSettings};
+use crate::settings::{PRINT_PERCENT, PrintScale, PrintSettings};
 use crate::style::Palette;
 
 /// Which pages are printed.
@@ -63,6 +63,8 @@ pub struct PrintDialog {
     copies: u32,
     collate: bool,
     scale: PrintScale,
+    /// The custom scale, in percent.
+    percent: u32,
     auto_rotate: bool,
     as_image: bool,
     /// The sheet the preview shows, among the pages chosen.
@@ -101,6 +103,7 @@ impl PrintDialog {
             copies: 1,
             collate: true,
             scale: if print_scaling { settings.scale } else { PrintScale::Actual },
+            percent: settings.percent.clamp(*PRINT_PERCENT.start(), *PRINT_PERCENT.end()),
             auto_rotate: settings.auto_rotate,
             as_image: settings.as_image,
             shown: 0,
@@ -112,6 +115,7 @@ impl PrintDialog {
         PrintSettings {
             printer: self.state.as_ref().map(|s| s.name.clone()).or_else(|| settings.printer.clone()),
             scale: self.scale,
+            percent: self.percent,
             auto_rotate: self.auto_rotate,
             as_image: self.as_image,
         }
@@ -262,6 +266,7 @@ impl PrintDialog {
                 devmode: state.devmode.clone(),
                 sheets: print::sheets(pages, self.copies as usize, self.collate),
                 scale: self.scale,
+                percent: self.percent,
                 auto_rotate: self.auto_rotate,
                 as_image: self.as_image,
                 title: self.title.clone(),
@@ -389,6 +394,15 @@ impl PrintDialog {
                     .on_hover_text(tr!("Pages larger than the sheet fit into it; the others print at their size", "Страницы больше листа вписываются в него, остальные печатаются в своём размере"));
                 ui.radio_value(&mut self.scale, PrintScale::Fit, tr!("Fit to the sheet", "Вписать в лист"));
                 ui.radio_value(&mut self.scale, PrintScale::Actual, tr!("Actual size", "Истинный размер"));
+                // A scale of one's own: the field chooses it as it changes.
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.scale, PrintScale::Custom, tr!("Custom", "Свой"));
+                    let field = egui::DragValue::new(&mut self.percent).range(PRINT_PERCENT).speed(1.0).suffix(" %");
+                    let response = ui.add(field).on_hover_text(tr!("The pages at this share of their size, centred on the sheet", "Страницы в этой доле своего размера, по центру листа"));
+                    if response.changed() || response.gained_focus() {
+                        self.scale = PrintScale::Custom;
+                    }
+                });
                 if !doc.print_scaling {
                     ui.weak(tr!("The document asks to be printed at its size", "Документ просит печатать его в истинном размере"));
                 }
@@ -427,7 +441,7 @@ impl PrintDialog {
             painter.rect_stroke(printable, 0.0, Stroke::new(1.0, Color32::from_gray(225)), StrokeKind::Inside);
         }
         let Some(&page) = pages.get(self.shown) else { return };
-        let placed = print::place(doc.size_of(page), &sheet, self.scale, self.auto_rotate);
+        let placed = print::place(doc.size_of(page), &sheet, self.scale, self.percent, self.auto_rotate);
         let [x, y, w, h] = placed.rect;
         let rect = Rect::from_min_size(printable.min + vec2(x * k, y * k), vec2(w * k, h * k));
         let clipped = painter.with_clip_rect(paper);

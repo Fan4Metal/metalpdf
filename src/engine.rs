@@ -129,6 +129,8 @@ pub struct PrintJob {
     /// The pages, one a sheet, in the order printed (copies included).
     pub sheets: Vec<usize>,
     pub scale: crate::settings::PrintScale,
+    /// The custom scale's percent (`PrintScale::Custom`).
+    pub percent: u32,
     pub auto_rotate: bool,
     /// Each page sent as a picture (`AS_IMAGE_DPI` at most).
     pub as_image: bool,
@@ -794,7 +796,7 @@ impl Worker {
         }
         let printer = crate::print::Job::start(&job.printer, job.devmode.as_ref(), &job.title, job.output.as_deref())?;
         log::info!("printing {} sheets on {} ({:?})", job.sheets.len(), job.printer, printer.sheet());
-        Ok(Printing { id, doc, job: printer, sheets: job.sheets, next: 0, scale: job.scale, auto_rotate: job.auto_rotate, as_image: job.as_image, _temp: temp })
+        Ok(Printing { id, doc, job: printer, sheets: job.sheets, next: 0, scale: job.scale, percent: job.percent, auto_rotate: job.auto_rotate, as_image: job.as_image, _temp: temp })
     }
 
     /// The next sheet of the print job; the job finished after the last.
@@ -1035,6 +1037,7 @@ struct Printing {
     sheets: Vec<usize>,
     next: usize,
     scale: crate::settings::PrintScale,
+    percent: u32,
     auto_rotate: bool,
     as_image: bool,
     /// The edited copy saved for the job.
@@ -1066,7 +1069,7 @@ fn print_sheet(api: &'static pdfium::sys::Api, p: &Printing, index: usize) -> Re
         page = p.doc.load_page(index).ok_or("the page could not be loaded")?;
     }
     let sheet = *p.job.sheet();
-    let placed = crate::print::place(page.size(), &sheet, p.scale, p.auto_rotate);
+    let placed = crate::print::place(page.size(), &sheet, p.scale, p.percent, p.auto_rotate);
     let [x, y, w, h] = placed.rect;
     let rect = [x.round() as i32, y.round() as i32, w.round().max(1.0) as i32, h.round().max(1.0) as i32];
     let flags = FLAGS | pdfium::sys::FPDF_PRINTING;
@@ -1155,7 +1158,7 @@ mod tests {
             let doc = Document::open(api, &source, None).unwrap();
             let job = crate::print::Job::start(PRINTER, None, "MetalPDF test", Some(&out)).unwrap();
             println!("sheet {:?}", job.sheet());
-            let printing = Printing { id: 1, doc, job, sheets: vec![0, 1], next: 0, scale: crate::settings::PrintScale::Shrink, auto_rotate: true, as_image, _temp: None };
+            let printing = Printing { id: 1, doc, job, sheets: vec![0, 1], next: 0, scale: crate::settings::PrintScale::Shrink, percent: 100, auto_rotate: true, as_image, _temp: None };
             for &index in &printing.sheets {
                 print_sheet(api, &printing, index).unwrap();
             }

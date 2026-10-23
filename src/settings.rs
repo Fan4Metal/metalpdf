@@ -94,7 +94,13 @@ pub enum PrintScale {
     Fit,
     /// Every page at its size, cut off where the sheet ends.
     Actual,
+    /// Every page at `PrintSettings::percent` of its size, centred, cut
+    /// off where the sheet ends.
+    Custom,
 }
+
+/// The custom print scale's bounds, in percent.
+pub const PRINT_PERCENT: std::ops::RangeInclusive<u32> = 10..=800;
 
 /// The print dialog's choices kept between runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,6 +109,9 @@ pub struct PrintSettings {
     /// The printer last printed on; `None` is Windows' default.
     pub printer: Option<String>,
     pub scale: PrintScale,
+    /// The custom scale (`PrintScale::Custom`), in percent; kept while
+    /// another scale is chosen.
+    pub percent: u32,
     /// A landscape page turned on a portrait sheet, and the reverse.
     pub auto_rotate: bool,
     /// Pages sent as pictures, for printers that print the vector output
@@ -112,7 +121,7 @@ pub struct PrintSettings {
 
 impl Default for PrintSettings {
     fn default() -> Self {
-        PrintSettings { printer: None, scale: PrintScale::Shrink, auto_rotate: true, as_image: false }
+        PrintSettings { printer: None, scale: PrintScale::Shrink, percent: 100, auto_rotate: true, as_image: false }
     }
 }
 
