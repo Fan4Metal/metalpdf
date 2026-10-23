@@ -1113,9 +1113,12 @@ impl Page {
         let (replaced, new) = self.replace_text(objects[0], text, span, fallback)?;
         for &object in rest {
             unsafe {
-                if (api.FPDFPage_RemoveObject)(self.handle, object) != 0 {
-                    (api.FPDFPageObj_Destroy)(object);
+                if (api.FPDFPage_RemoveObject)(self.handle, object) == 0 {
+                    // Left in place it would show its text over the new
+                    // one; the engine rebuilds its copy on the error.
+                    return Err("a run of the line could not be removed".into());
                 }
+                (api.FPDFPageObj_Destroy)(object);
             }
         }
         let delta = reach(new) - old_reach;
@@ -1226,12 +1229,14 @@ impl Page {
                     // In the old one's place: the content's order (the
                     // reading order of an untagged document) and the other
                     // objects' indices stay.
-                    if (api.FPDFPage_RemoveObject)(self.handle, object) != 0 {
-                        (api.FPDFPageObj_Destroy)(object);
-                        if (api.FPDFPage_InsertObjectAtIndex)(self.handle, new, index) == 0 {
-                            (api.FPDFPage_InsertObject)(self.handle, new);
-                        }
-                    } else {
+                    if (api.FPDFPage_RemoveObject)(self.handle, object) == 0 {
+                        // Both would show, one over the other.
+                        (api.FPDFPageObj_Destroy)(new);
+                        (api.FPDFFont_Close)(new_font);
+                        return Err("the old text could not be removed".into());
+                    }
+                    (api.FPDFPageObj_Destroy)(object);
+                    if (api.FPDFPage_InsertObjectAtIndex)(self.handle, new, index) == 0 {
                         (api.FPDFPage_InsertObject)(self.handle, new);
                     }
                     (api.FPDFFont_Close)(new_font);

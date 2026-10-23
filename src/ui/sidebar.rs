@@ -300,20 +300,9 @@ fn search(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarAc
     }
     ui.label(RichText::new(find.status()).color(palette.muted));
     ui.add_space(4.0);
-    // The rows: a page's header, then its hits.
-    enum Row {
-        Page(usize),
-        Hit(usize, usize),
-    }
-    let mut rows = Vec::new();
-    'pages: for (&page, hits) in &find.hits {
-        rows.push(Row::Page(page));
-        for i in 0..hits.len() {
-            if rows.len() >= SEARCH_ROWS {
-                break 'pages;
-            }
-            rows.push(Row::Hit(page, i));
-        }
+    let (rows, earlier) = search_rows(&find.hits, find.current, SEARCH_ROWS);
+    if earlier {
+        ui.label(RichText::new(tr!("Earlier hits are not listed", "Предыдущие находки не показаны")).color(palette.muted).size(12.0));
     }
     let current = find.current;
     let spacing = ui.spacing().item_spacing.y;
@@ -400,6 +389,41 @@ fn search(ui: &mut Ui, tab: &Tab, palette: &Palette, actions: &mut Vec<SidebarAc
     if rows.len() >= SEARCH_ROWS {
         ui.label(RichText::new(tr!("…and more", "…и ещё")).color(palette.muted).size(12.0));
     }
+}
+
+/// A row of the search list: a page's header, or hit `.1` of page `.0`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Row {
+    Page(usize),
+    Hit(usize, usize),
+}
+
+/// The search list's rows, at most `cap`: from the start, or, when the
+/// current hit lies further, from about half the cap before it, so that
+/// it is always listed (F3 went on through hits the list did not have);
+/// and whether hits before the first row were left out.
+fn search_rows(hits: &std::collections::BTreeMap<usize, Vec<crate::engine::SearchHit>>, current: Option<(usize, usize)>, cap: usize) -> (Vec<Row>, bool) {
+    // The rows before the current hit's own row.
+    let before = current.map_or(0, |(cp, ci)| hits.range(..cp).map(|(_, h)| 1 + h.len()).sum::<usize>() + 1 + ci);
+    let skip = if before < cap { 0 } else { before - cap / 2 };
+    let mut rows = Vec::new();
+    let mut seen = 0;
+    'pages: for (&page, page_hits) in hits {
+        if seen >= skip {
+            rows.push(Row::Page(page));
+        }
+        seen += 1;
+        for i in 0..page_hits.len() {
+            if rows.len() >= cap {
+                break 'pages;
+            }
+            if seen >= skip {
+                rows.push(Row::Hit(page, i));
+            }
+            seen += 1;
+        }
+    }
+    (rows, skip > 0)
 }
 
 /// One bookmark, and its children when its fold is open: a row of its
@@ -535,6 +559,21 @@ fn active_item(items: &[OutlineItem], page: usize) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_search_list_always_holds_the_current_hit() {
+        let hit = crate::engine::SearchHit { start: 0, count: 1, rects: Vec::new(), before: String::new(), matched: String::new(), after: String::new() };
+        let hits: std::collections::BTreeMap<usize, Vec<crate::engine::SearchHit>> = (0..10).map(|p| (p, vec![hit.clone(); 100])).collect();
+        let (rows, earlier) = search_rows(&hits, Some((0, 3)), 50);
+        assert_eq!((rows.len(), rows[0], earlier), (50, Row::Page(0), false));
+        let (rows, earlier) = search_rows(&hits, Some((5, 30)), 50);
+        assert!(earlier);
+        assert_eq!(rows.len(), 50);
+        assert!(rows.contains(&Row::Hit(5, 30)), "{rows:?}");
+        let (rows, _) = search_rows(&hits, Some((9, 99)), 50);
+        assert_eq!(rows.last(), Some(&Row::Hit(9, 99)));
+        assert_eq!(search_rows(&hits, None, 50).0.len(), 50);
+    }
 
     #[test]
     fn the_text_before_a_match_is_cut_at_a_word() {

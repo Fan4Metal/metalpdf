@@ -207,7 +207,8 @@ fn parse_names(table: &[u8]) -> Option<Names> {
         if rank == 0 || rank <= ranks[id as usize] {
             continue;
         }
-        let bytes = table.get(strings + off..strings + off + len)?;
+        // A record pointing past the table is skipped, not the font.
+        let Some(bytes) = table.get(strings + off..strings + off + len) else { continue };
         let text = if platform == 1 { bytes.iter().map(|&b| b as char).collect::<String>() } else { utf16be(bytes) };
         let text = text.trim().to_owned();
         if text.is_empty() {
@@ -382,6 +383,17 @@ mod tests {
         assert_eq!(file_of(Style { italic: true, ..Default::default() }), "ariali.ttf");
         assert_eq!(file_of(Style { bold: true, italic: true, serif: true, ..Default::default() }), "timesbi.ttf");
         assert_eq!(file_of(Style { mono: true, bold: true, ..Default::default() }), "courbd.ttf");
+    }
+
+    #[test]
+    fn a_broken_name_record_skips_only_itself() {
+        let record = |id: u16, len: u16, off: u16| -> Vec<u8> { [3u16, 1, 0x409, id, len, off].iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut table: Vec<u8> = [0u16, 2, 6 + 12 * 2].iter().flat_map(|v| v.to_be_bytes()).collect();
+        // The first points past the table; the second is the family.
+        table.extend(record(1, 4, 1000));
+        table.extend(record(1, 4, 0));
+        table.extend([0, b'A', 0, b'b']);
+        assert_eq!(parse_names(&table).map(|n| n.family), Some("Ab".to_owned()));
     }
 
     #[test]
