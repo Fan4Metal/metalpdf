@@ -267,8 +267,13 @@ impl ViewState {
         self.zoom = zoom;
         let after = self.layout(sizes, fallback);
         let q = after.pages.get(page).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
-        let new_scroll = q[1] + frac[1] * q[3] - cursor[1];
-        self.anchor = after.anchor_at(new_scroll.max(0.0), self.viewport[1]);
+        let mut new_scroll = (q[1] + frac[1] * q[3] - cursor[1]).max(0.0);
+        if self.mode == ViewMode::Single {
+            // The page shown stays: a step out at the centre put the
+            // view's top on the page before.
+            new_scroll = after.clamp_scroll(new_scroll, page, self.viewport[1]);
+        }
+        self.anchor = after.anchor_at(new_scroll, self.viewport[1]);
         self.scroll_x = (q[0] + frac[0] * q[2] - cursor[0]).clamp(0.0, (after.size[0] - self.viewport[0]).max(0.0));
         self.unsettle();
     }
@@ -335,6 +340,23 @@ mod tests {
         let frac2 = (doc_y2 - after.pages[page][1]) / after.pages[page][3];
         assert!((frac - frac2).abs() < 1e-3, "{frac} against {frac2}");
         assert!(!view.settled());
+    }
+
+    #[test]
+    fn a_zoom_step_in_single_page_mode_stays_on_the_page() {
+        let mut view = ViewState::new(ViewMode::Single, ZoomSetting::FitPage);
+        view.viewport = [1000.0, 800.0];
+        let s = sizes(10);
+        view.go_to_page(3, 10);
+        // Out at the centre: the page shrinks round it, and the view's
+        // top would land on the page before.
+        view.set_zoom(ZoomSetting::Scale(0.5), None, &s, A4);
+        assert_eq!(view.anchor.page, 3);
+        let layout = view.layout(&s, A4);
+        assert_eq!(layout.current(layout.scroll_of(view.anchor), 800.0), 3);
+        // In, with the pointer at the area's top.
+        view.set_zoom(ZoomSetting::Scale(2.0), Some([500.0, 2.0]), &s, A4);
+        assert_eq!(view.anchor.page, 3);
     }
 
     #[test]

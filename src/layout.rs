@@ -86,7 +86,7 @@ impl Layout {
         // The widest known page decides the fit, not the current one: the
         // zoom must not change while scrolling through pages of several
         // sizes.
-        let widest = (0..count).map(page_size).fold(fallback, |w, s| if s[0] > w[0] { s } else { w });
+        let widest = (0..count).map(page_size).fold(turned(fallback, turns), |w, s| if s[0] > w[0] { s } else { w });
         let fit_page = match mode {
             ViewMode::Single => page_size(current.min(count.saturating_sub(1))),
             ViewMode::Continuous => widest,
@@ -259,6 +259,17 @@ mod tests {
         assert_eq!(layout.pages[1][1], GAP + layout.pages[0][3] + GAP);
         assert_eq!(layout.size[0], 1000.0);
         assert!((layout.size[1] - (GAP + 3.0 * (layout.pages[0][3] + GAP))).abs() < 0.01);
+    }
+
+    #[test]
+    fn turned_landscape_pages_fit_their_turned_width() {
+        // A slide deck turned upright: the fit follows the turned size,
+        // not the unturned fallback's (which was the widest before).
+        let slide = [792.0, 612.0];
+        let layout = Layout::new(ViewMode::Continuous, ZoomSetting::FitWidth, 1, &[Some(slide); 2], slide, [1000.0, 800.0], 0);
+        assert!((layout.pages[0][2] - (1000.0 - 2.0 * GAP)).abs() < 0.01, "{:?}", layout.pages[0]);
+        let page = Layout::new(ViewMode::Continuous, ZoomSetting::FitPage, 1, &[Some(slide); 2], slide, [1000.0, 800.0], 0);
+        assert!((page.pages[0][3] - (800.0 - 2.0 * GAP)).abs() < 0.01, "{:?}", page.pages[0]);
     }
 
     #[test]
