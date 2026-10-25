@@ -14,6 +14,10 @@ pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 64.0;
 /// The gap between pages and round them.
 pub const GAP: f32 = 8.0;
+/// How far above the view's top a page's bottom may be, in points, and
+/// still count as passed (`Layout::anchor_at`): rounding, far less than
+/// the gap.
+const ANCHOR_SLACK: f32 = 0.5;
 
 /// The zoom steps of the keyboard and the wheel: each step hits a cached
 /// render again on the way back.
@@ -137,8 +141,13 @@ impl Layout {
         }
         let scroll = scroll.max(0.0);
         // The first page whose bottom is below the view's top; the gap above
-        // a page belongs to that page.
-        let i = self.pages.partition_point(|p| p[1] + p[3] <= scroll).min(self.pages.len() - 1);
+        // a page belongs to that page. A page's top (`scroll_of`, `p[1] -
+        // GAP`) and the bottom of the page before (`p[1] + p[3]`) are sums
+        // that may differ in the last bit, and the top read back as the
+        // page before, to which single-page mode then went back: the wheel
+        // could not leave a page. A bottom within `ANCHOR_SLACK` counts as
+        // passed.
+        let i = self.pages.partition_point(|p| p[1] + p[3] <= scroll + ANCHOR_SLACK).min(self.pages.len() - 1);
         let p = self.pages[i];
         let offset = if p[3] > 0.0 { (scroll - p[1] + GAP) / p[3] } else { 0.0 };
         let _ = viewport_height;
@@ -367,6 +376,34 @@ mod tests {
         // Continuous mode clamps nothing.
         let flow = Layout::new(ViewMode::Continuous, ZoomSetting::Scale(2.0), 0, &pages(5), A4, [1000.0, 800.0], 1);
         assert_eq!(flow.clamp_scroll(1234.5, 1, 800.0), 1234.5);
+    }
+
+    #[test]
+    fn a_page_top_reads_back_as_that_page() {
+        // A book whose cover is a fifth of a point wider than its pages,
+        // fitted in single-page mode: the offset of a page's top, the
+        // previous page's bottom, read back as the previous page for some
+        // view sizes (`p[1] - GAP` against `p[1] + p[3]` of the one before
+        // differ in the last bit), and the wheel could not leave page 1.
+        let mut sizes = vec![Some([576.0, 720.0]); 304];
+        sizes[0] = Some([576.2, 720.0]);
+        sizes[3] = Some([576.1, 719.9]);
+        let mut bad = Vec::new();
+        for mode in [ViewMode::Single, ViewMode::Continuous] {
+            for zoom in [ZoomSetting::FitPage, ZoomSetting::FitWidth, ZoomSetting::Scale(1.05)] {
+                for tenth in 0..2000 {
+                    let viewport = [1000.0 + tenth as f32 * 0.37, 700.0 + tenth as f32 * 0.1];
+                    for page in [1, 2, 4, 150, 303] {
+                        let layout = Layout::new(mode, zoom, 0, &sizes, [576.0, 720.0], viewport, page);
+                        let scroll = layout.clamp_scroll(layout.scroll_of(Layout::anchor_to_page(page)), page, viewport[1]);
+                        if layout.anchor_at(scroll, viewport[1]).page != page {
+                            bad.push((mode, zoom, viewport, page));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{} of them, first {:?}", bad.len(), bad.first());
     }
 
     #[test]
