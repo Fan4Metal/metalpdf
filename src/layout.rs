@@ -84,21 +84,21 @@ impl Layout {
     ) -> Layout {
         let page_size = |i: usize| turned(sizes.get(i).copied().flatten().unwrap_or(fallback), turns);
         let count = sizes.len();
-        // The widest known page decides the fit, not the current one: the
-        // zoom must not change while scrolling through pages of several
-        // sizes.
         let widest = (0..count).map(page_size).fold(turned(fallback, turns), |w, s| if s[0] > w[0] { s } else { w });
-        // What the view is made for: the widest page, or in single-page
-        // mode the page shown, which the document is then as wide as (a
-        // page narrower than the widest was off to the side of a document
-        // as wide as a cover).
+        // What the view is made for, the fits and the document's width: in
+        // continuous mode the widest known page, not the current one, so
+        // that the zoom does not change while scrolling through pages of
+        // several sizes; in single-page mode the page shown, each fitted
+        // on its own (fitted to the widest, a book's pages came out less
+        // than half the view's width behind a wide cover, and stood off to
+        // the side of a document as wide as it).
         let column = match mode {
             ViewMode::Single => page_size(current.min(count.saturating_sub(1))),
             ViewMode::Continuous => widest,
         };
         let scale = match zoom {
             ZoomSetting::Scale(z) => z.clamp(MIN_ZOOM, MAX_ZOOM) * POINT_SCALE,
-            ZoomSetting::FitWidth => fit_width_scale(widest, viewport),
+            ZoomSetting::FitWidth => fit_width_scale(column, viewport),
             ZoomSetting::FitPage => fit_page_scale(column, viewport),
         };
         let mut pages = Vec::with_capacity(count);
@@ -388,6 +388,14 @@ mod tests {
         // Continuous mode keeps the widest page's width.
         let flow = Layout::new(ViewMode::Continuous, scale, 0, &sizes, [373.0, 574.0], viewport, 2);
         assert_eq!(flow.size[0], cover.size[0]);
+        // Fit width fits the page shown, the narrow one and the cover
+        // alike; continuous mode fits the widest, wherever the reader is.
+        for page in [0, 2] {
+            let single = Layout::new(ViewMode::Single, ZoomSetting::FitWidth, 0, &sizes, [373.0, 574.0], viewport, page);
+            assert!((single.pages[page][2] - (viewport[0] - 2.0 * GAP)).abs() < 0.01, "{page}: {:?}", single.pages[page]);
+            let flow = Layout::new(ViewMode::Continuous, ZoomSetting::FitWidth, 0, &sizes, [373.0, 574.0], viewport, page);
+            assert!((flow.pages[0][2] - (viewport[0] - 2.0 * GAP)).abs() < 0.01);
+        }
     }
 
     #[test]
