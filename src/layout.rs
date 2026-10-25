@@ -120,7 +120,16 @@ impl Layout {
             pages.push([(doc_width - w) / 2.0, y, w, h]);
             y += h + GAP;
         }
-        let height = y.max(viewport[1]);
+        let mut height = y.max(viewport[1]);
+        if mode == ViewMode::Single
+            && let Some(last) = pages.last()
+        {
+            // The last page's top can be at the view's top: the scroll area
+            // keeps its offset within the document less the view, which,
+            // with pages shorter than the view, ended on the page before,
+            // and the last page could not be turned to.
+            height = height.max(last[1] - GAP + viewport[1]);
+        }
         Layout { mode, scale, turns, pages, size: [doc_width, height] }
     }
 
@@ -404,6 +413,28 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{} of them, first {:?}", bad.len(), bad.first());
+    }
+
+    #[test]
+    fn single_page_mode_reaches_the_last_page_shorter_than_the_view() {
+        // Landscape pages fitted are shorter than the view: the scroll area
+        // keeps its offset within the document less the view, which ended
+        // above the last page's top, on the page before.
+        let sizes = vec![Some([792.8, 612.8]); 4];
+        for height in [700.0, 900.0, 1250.0, 2000.0] {
+            let viewport = [1100.0, height];
+            for page in 0..4 {
+                let layout = Layout::new(ViewMode::Single, ZoomSetting::FitPage, 0, &sizes, [792.8, 612.8], viewport, page);
+                let scroll = layout.clamp_scroll(layout.scroll_of(Layout::anchor_to_page(page)), page, height);
+                // As egui keeps it.
+                let scroll = scroll.min((layout.size[1] - height).max(0.0));
+                assert_eq!(layout.anchor_at(scroll, height).page, page, "page {page} in a view {height} high");
+            }
+            // Continuous mode ends with the last page.
+            let flow = Layout::new(ViewMode::Continuous, ZoomSetting::FitPage, 0, &sizes, [792.8, 612.8], viewport, 0);
+            let last = flow.pages[3];
+            assert_eq!(flow.size[1], (last[1] + last[3] + GAP).max(height));
+        }
     }
 
     #[test]
