@@ -62,7 +62,8 @@ pub struct Layout {
     pub turns: u8,
     /// Each page's rectangle in document space: `[x, y, w, h]`, y from the
     /// top of the document, x from its left edge; the document is as wide
-    /// as its widest page plus the gaps.
+    /// as its widest page plus the gaps (in single-page mode, as the page
+    /// shown), and at least as the view.
     pub pages: Vec<[f32; 4]>,
     /// The whole document's size in view points.
     pub size: [f32; 2],
@@ -87,22 +88,28 @@ impl Layout {
         // zoom must not change while scrolling through pages of several
         // sizes.
         let widest = (0..count).map(page_size).fold(turned(fallback, turns), |w, s| if s[0] > w[0] { s } else { w });
-        let fit_page = match mode {
+        // What the view is made for: the widest page, or in single-page
+        // mode the page shown, which the document is then as wide as (a
+        // page narrower than the widest was off to the side of a document
+        // as wide as a cover).
+        let column = match mode {
             ViewMode::Single => page_size(current.min(count.saturating_sub(1))),
             ViewMode::Continuous => widest,
         };
         let scale = match zoom {
             ZoomSetting::Scale(z) => z.clamp(MIN_ZOOM, MAX_ZOOM) * POINT_SCALE,
             ZoomSetting::FitWidth => fit_width_scale(widest, viewport),
-            ZoomSetting::FitPage => fit_page_scale(fit_page, viewport),
+            ZoomSetting::FitPage => fit_page_scale(column, viewport),
         };
         let mut pages = Vec::with_capacity(count);
         let mut y = GAP;
-        let doc_width = (widest[0] * scale + 2.0 * GAP).max(viewport[0]);
+        let doc_width = (column[0] * scale + 2.0 * GAP).max(viewport[0]);
         // Every page has its place in both modes, so that the scroll bar
         // shows where in the document the reader is; single-page mode
         // shows the one page the view's top is on and keeps the scroll
-        // within it (`page_scroll_range`).
+        // within it (`page_scroll_range`). Pages are centred on the
+        // document's axis (in single-page mode a page wider than the one
+        // shown, never drawn, starts left of 0).
         for i in 0..count {
             let s = page_size(i);
             let (w, h) = (s[0] * scale, s[1] * scale);
@@ -360,6 +367,27 @@ mod tests {
         // Continuous mode clamps nothing.
         let flow = Layout::new(ViewMode::Continuous, ZoomSetting::Scale(2.0), 0, &pages(5), A4, [1000.0, 800.0], 1);
         assert_eq!(flow.clamp_scroll(1234.5, 1, 800.0), 1234.5);
+    }
+
+    #[test]
+    fn single_page_mode_is_as_wide_as_the_page_shown() {
+        // A book of narrow pages behind a wide cover.
+        let mut sizes = vec![Some([373.0, 574.0]); 5];
+        sizes[0] = Some([800.0, 1177.0]);
+        let viewport = [900.0, 900.0];
+        let layout = Layout::new(ViewMode::Single, ZoomSetting::FitPage, 0, &sizes, [373.0, 574.0], viewport, 2);
+        // The page fits, so the document is the view, the page in its middle.
+        assert_eq!(layout.size[0], viewport[0]);
+        let p = layout.pages[2];
+        assert!((p[0] + p[2] / 2.0 - viewport[0] / 2.0).abs() < 0.01, "{p:?}");
+        // The cover shown at the same scale is wider than the view: the
+        // document is as wide as it.
+        let scale = ZoomSetting::Scale(zoom_of_scale(layout.scale));
+        let cover = Layout::new(ViewMode::Single, scale, 0, &sizes, [373.0, 574.0], viewport, 0);
+        assert!((cover.size[0] - (cover.pages[0][2] + 2.0 * GAP)).abs() < 0.01);
+        // Continuous mode keeps the widest page's width.
+        let flow = Layout::new(ViewMode::Continuous, scale, 0, &sizes, [373.0, 574.0], viewport, 2);
+        assert_eq!(flow.size[0], cover.size[0]);
     }
 
     #[test]

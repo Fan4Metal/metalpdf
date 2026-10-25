@@ -23,6 +23,9 @@ pub struct ViewState {
     pub anchor: Anchor,
     /// Horizontal scroll offset in points (a page wider than the view).
     pub scroll_x: f32,
+    /// The document's and the view's widths `scroll_x` was last kept for
+    /// (`keep_centre`); zero before the first frame.
+    pub framed: [f32; 2],
     /// The page area's size in points, as last laid out.
     pub viewport: [f32; 2],
     /// Until when renders at a new scale are held back.
@@ -88,6 +91,7 @@ impl ViewState {
             turns: 0,
             anchor: Anchor::default(),
             scroll_x: 0.0,
+            framed: [0.0; 2],
             viewport: [800.0, 600.0],
             settle_until: None,
             forward: true,
@@ -385,7 +389,27 @@ impl ViewState {
         }
         self.anchor = after.anchor_at(new_scroll, self.viewport[1]);
         self.scroll_x = (q[0] + frac[0] * q[2] - cursor[0]).clamp(0.0, (after.size[0] - self.viewport[0]).max(0.0));
+        // Kept for the new width already: `keep_centre` must not move it.
+        self.framed = [after.size[0], self.viewport[0]];
         self.unsettle();
+    }
+
+    /// The horizontal offset kept when the document's or the view's width
+    /// changes (a zoom, a resize, the mode, another page shown in
+    /// single-page mode, page sizes arriving): the point at the view's
+    /// centre stays at the same distance from the document's axis, so that
+    /// pages centred on it stay centred; the first frame starts centred.
+    /// With the offset left as it was, a page narrower than the document
+    /// (a book with a wide cover) stood off to the right.
+    pub fn keep_centre(&mut self, layout: &Layout) {
+        let now = [layout.size[0], self.viewport[0]];
+        if now == self.framed {
+            return;
+        }
+        let room = (now[0] - now[1]).max(0.0);
+        let x = if self.framed[0] <= 0.0 { room / 2.0 } else { self.scroll_x + (now[0] - self.framed[0]) / 2.0 - (now[1] - self.framed[1]) / 2.0 };
+        self.scroll_x = x.clamp(0.0, room);
+        self.framed = now;
     }
 
     /// One step up or down the zoom ladder from the current scale.
@@ -450,6 +474,50 @@ mod tests {
         let frac2 = (doc_y2 - after.pages[page][1]) / after.pages[page][3];
         assert!((frac - frac2).abs() < 1e-3, "{frac} against {frac2}");
         assert!(!view.settled());
+        // The offset was made for the new width: the next frame keeps it.
+        let x = view.scroll_x;
+        view.keep_centre(&after);
+        assert_eq!(view.scroll_x, x);
+    }
+
+    #[test]
+    fn the_view_keeps_its_centre_as_widths_change() {
+        // A wide cover, narrow pages, and a zoom at which the cover is
+        // wider than the view.
+        let mut s = vec![Some([373.0, 574.0]); 6];
+        s[0] = Some([800.0, 1177.0]);
+        let mut view = ViewState::new(ViewMode::Continuous, ZoomSetting::Scale(1.5));
+        view.viewport = [1000.0, 800.0];
+        view.go_to_page(3, 6);
+        let centred = |view: &ViewState, layout: &Layout| {
+            let p = layout.pages[view.anchor.page];
+            (view.scroll_x + view.viewport[0] / 2.0 - (p[0] + p[2] / 2.0)).abs() < 0.01
+        };
+        // The first frame starts centred: the narrow page in the middle.
+        let layout = view.layout(&s, A4);
+        assert!(layout.size[0] > view.viewport[0]);
+        view.keep_centre(&layout);
+        assert!(centred(&view, &layout), "{}", view.scroll_x);
+        // A narrower view keeps the same point at its centre.
+        view.viewport = [700.0, 800.0];
+        let layout = view.layout(&s, A4);
+        view.keep_centre(&layout);
+        assert!(centred(&view, &layout), "{}", view.scroll_x);
+        // Single-page mode shows the narrow page alone, then the cover,
+        // each in the middle.
+        view.current = 3;
+        view.set_mode(ViewMode::Single);
+        let layout = view.layout(&s, A4);
+        view.keep_centre(&layout);
+        assert!(centred(&view, &layout), "{}", view.scroll_x);
+        view.go_to_page(0, 6);
+        let layout = view.layout(&s, A4);
+        view.keep_centre(&layout);
+        assert!(centred(&view, &layout), "{}", view.scroll_x);
+        // Nothing changed: nothing moves (the reader's own scroll stays).
+        view.scroll_x = 10.0;
+        view.keep_centre(&layout);
+        assert_eq!(view.scroll_x, 10.0);
     }
 
     #[test]

@@ -159,6 +159,7 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
         }
     }
     let layout = tab.view.layout(&tab.doc.sizes, tab.doc.fallback);
+    tab.view.keep_centre(&layout);
     // Single-page mode: the offset stays within the page shown; the bar
     // still spans the document, and dragged out of the page it turns it.
     let scroll_y = layout.clamp_scroll(layout.scroll_of(tab.view.anchor), tab.view.anchor.page, area.height());
