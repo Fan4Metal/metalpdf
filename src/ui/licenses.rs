@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 
-use egui::{Color32, FontId, Key, Rect, RichText, Sense, pos2, vec2};
+use egui::{FontId, Key, Rect, RichText, Sense, pos2, vec2};
 
 const METALPDF: &str = include_str!("../../LICENSE");
 const THIRD_PARTY: &str = include_str!("../../THIRD_PARTY_LICENSES.md");
@@ -73,8 +73,21 @@ impl LicensesView {
             let mut list_ui = ui.new_child(egui::UiBuilder::new().max_rect(list));
             list_ui.label(RichText::new(tr!("Licenses", "Лицензии")).size(18.0).strong());
             list_ui.add_space(8.0);
+            // Rows as the sidebar's: the part shown on a bar of the accent
+            // colour, as the current bookmark (egui's selection was a
+            // loud blue in the light theme), a faint one under the pointer.
+            let palette = crate::style::Palette::of(ctx);
             for part in Part::ALL {
-                if list_ui.selectable_label(self.part == part, part.title()).clicked() && self.part != part {
+                let (row, response) = list_ui.allocate_exact_size(vec2(LIST - 12.0, 26.0), Sense::click());
+                let current = self.part == part;
+                if current {
+                    list_ui.painter().rect_filled(row, 4.0, palette.accent.gamma_multiply(0.16));
+                } else if response.hovered() {
+                    list_ui.painter().rect_filled(row, 4.0, palette.muted.gamma_multiply(0.12));
+                }
+                let color = if current { palette.text } else { palette.muted };
+                list_ui.painter().text(pos2(row.left() + 8.0, row.center().y), egui::Align2::LEFT_CENTER, part.title(), FontId::proportional(14.0), color);
+                if response.clicked() && !current {
                     self.part = part;
                     self.lines.clear();
                 }
@@ -92,7 +105,11 @@ impl LicensesView {
             let text = Rect::from_min_max(pos2(list.right() + 12.0, rect.top() + 28.0), rect.max);
             let cross = Rect::from_min_size(pos2(rect.right() - 24.0, rect.top()), vec2(24.0, 24.0));
             let closed = super::close_cross(&mut ui.new_child(egui::UiBuilder::new().max_rect(cross)));
-            ui.painter().rect_filled(text, 4.0, Color32::from_black_alpha(40));
+            // The texts on a field's ground with its edge, as a text field:
+            // white in the light theme (a black wash over the panel was a
+            // heavy grey there), the darker well in the dark one.
+            let visuals = ui.visuals();
+            ui.painter().rect(text, 4.0, visuals.extreme_bg_color, visuals.widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
             let inner = text.shrink(6.0);
             // As many characters as fit beside the scroll bar.
             let font = FontId::monospace(FONT);
