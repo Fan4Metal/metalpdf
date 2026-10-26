@@ -42,6 +42,10 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; A running copy is closed (Restart Manager) before its exe is replaced.
 CloseApplications=yes
+; The exe alone: the DLLs Explorer's surrogate holds, which cannot be
+; closed, are renamed aside ([Code]); with the DLLs in the filter a silent
+; installation aborted.
+CloseApplicationsFilter=*.exe
 ; File associations change: Explorer is told to refresh its icons.
 ChangesAssociations=yes
 
@@ -106,21 +110,25 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--unregister"; RunOnceId: "Unreg
 
 [UninstallDelete]
 Type: files; Name: "{app}\metalpdf_thumbs.dll.old"
+Type: files; Name: "{app}\pdfium.dll.old"
 
 [Code]
-// Explorer's surrogate (dllhost.exe) keeps the thumbnail provider loaded
-// for a while after drawing thumbnails, and a loaded DLL cannot be
-// overwritten, only renamed: the old one is moved aside before the files
-// are copied and deleted at the next installation.
+// Explorer's surrogate (dllhost.exe) keeps the thumbnail provider, and the
+// pdfium.dll it loads, loaded for a while after drawing thumbnails, and a
+// loaded DLL cannot be overwritten, only renamed: the old one is moved
+// aside before the files are copied and deleted at the next installation.
+procedure MoveAside(Dll: String);
+begin
+  DeleteFile(Dll + '.old');
+  if FileExists(Dll) and not DeleteFile(Dll) then
+    RenameFile(Dll, Dll + '.old');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
-var
-  Dll: String;
 begin
   if CurStep = ssInstall then
   begin
-    Dll := ExpandConstant('{app}\metalpdf_thumbs.dll');
-    DeleteFile(Dll + '.old');
-    if FileExists(Dll) and not DeleteFile(Dll) then
-      RenameFile(Dll, Dll + '.old');
+    MoveAside(ExpandConstant('{app}\metalpdf_thumbs.dll'));
+    MoveAside(ExpandConstant('{app}\pdfium.dll'));
   end;
 end;
