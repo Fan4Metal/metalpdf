@@ -748,6 +748,11 @@ impl Worker {
         if self.page(id, page).is_some_and(Page::has_type3_text) {
             return Err("the page has text in a Type 3 font, which PDFium cannot write back".into());
         }
+        // Nor does it tell two fonts of one name apart: the other's
+        // runs would be written in the wrong font.
+        if let Some(name) = self.page(id, page).and_then(Page::clashing_fonts) {
+            return Err(format!("the page has two different fonts named {name}, which PDFium would write as one"));
+        }
         // The page comes from the edited copy from now on.
         self.pages.remove(&(id, page));
         self.page_order.retain(|k| *k != (id, page));

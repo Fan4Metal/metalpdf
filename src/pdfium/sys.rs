@@ -253,6 +253,10 @@ pub const FPDF_PAGEOBJ_PATH: c_int = 2;
 pub const FPDF_PAGEOBJ_IMAGE: c_int = 3;
 pub const FPDF_PAGEOBJ_SHADING: c_int = 4;
 pub const FPDF_PAGEOBJ_FORM: c_int = 5;
+// Text render modes (fpdf_edit.h): fill, stroke, fill and stroke,
+// invisible, then the same four clipping as well.
+pub const FPDF_TEXTRENDERMODE_INVISIBLE: c_int = 3;
+pub const FPDF_TEXTRENDERMODE_CLIP: c_int = 7;
 
 // FPDFPage_Flatten: what for, and what came of it.
 pub const FLAT_PRINT: c_int = 1;
@@ -416,6 +420,10 @@ api! {
     FPDFPageObj_SetMatrix: fn(FPDF_PAGEOBJECT, *const FS_MATRIX) -> FPDF_BOOL;
     FPDFPageObj_GetFillColor: fn(FPDF_PAGEOBJECT, *mut c_uint, *mut c_uint, *mut c_uint, *mut c_uint) -> FPDF_BOOL;
     FPDFPageObj_SetFillColor: fn(FPDF_PAGEOBJECT, c_uint, c_uint, c_uint, c_uint) -> FPDF_BOOL;
+    FPDFPageObj_GetStrokeColor: fn(FPDF_PAGEOBJECT, *mut c_uint, *mut c_uint, *mut c_uint, *mut c_uint) -> FPDF_BOOL;
+    FPDFPageObj_SetStrokeColor: fn(FPDF_PAGEOBJECT, c_uint, c_uint, c_uint, c_uint) -> FPDF_BOOL;
+    FPDFPageObj_GetStrokeWidth: fn(FPDF_PAGEOBJECT, *mut c_float) -> FPDF_BOOL;
+    FPDFPageObj_SetStrokeWidth: fn(FPDF_PAGEOBJECT, c_float) -> FPDF_BOOL;
     FPDFPage_InsertObjectAtIndex: fn(FPDF_PAGE, FPDF_PAGEOBJECT, usize) -> FPDF_BOOL;
     // Marked content: what ties a tagged document's tags to the objects.
     FPDFPageObj_GetMarkedContentID: fn(FPDF_PAGEOBJECT) -> c_int;

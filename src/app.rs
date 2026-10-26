@@ -2380,6 +2380,9 @@ impl App {
                     });
                 }
                 if let Some(text) = out.edit_commit {
+                    // A pasted line break or tab: a font has no glyph for
+                    // it, and a stand-in would draw a box.
+                    let text: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
                     if let Some(editor) = tab.editor.take()
                         && let Some(edit) = editor.line.edit(&text)
                     {

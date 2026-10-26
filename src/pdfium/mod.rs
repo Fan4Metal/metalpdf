@@ -204,7 +204,7 @@ impl Document {
         if !self.inner.form.is_null() {
             unsafe { (self.api().FORM_OnAfterLoadPage)(handle, self.inner.form) };
         }
-        Some(Page { doc: Rc::clone(&self.inner), handle, index: index as c_int, text: RefCell::new(None), rendering: Cell::new(false) })
+        Some(Page { doc: Rc::clone(&self.inner), handle: Cell::new(handle), index: index as c_int, text: RefCell::new(None), rendering: Cell::new(false) })
     }
 
     /// A document information field: `Title`, `Author`, `Subject`,
@@ -434,7 +434,7 @@ unsafe extern "C" fn need_to_pause(this: *mut sys::IFSDK_PAUSE) -> sys::FPDF_BOO
 /// A page of a document, with its text page once it was asked for.
 pub struct Page {
     doc: Rc<DocumentInner>,
-    handle: sys::FPDF_PAGE,
+    handle: Cell<sys::FPDF_PAGE>,
     /// Its index in the document, to parse it again from its content.
     index: c_int,
     text: RefCell<Option<sys::FPDF_TEXTPAGE>>,
@@ -447,15 +447,15 @@ impl Drop for Page {
         let api = self.doc.api;
         unsafe {
             if self.rendering.get() {
-                (api.FPDF_RenderPage_Close)(self.handle);
+                (api.FPDF_RenderPage_Close)(self.handle.get());
             }
             if !self.doc.form.is_null() {
-                (api.FORM_OnBeforeClosePage)(self.handle, self.doc.form);
+                (api.FORM_OnBeforeClosePage)(self.handle.get(), self.doc.form);
             }
             if let Some(text) = self.text.take() {
                 (api.FPDFText_ClosePage)(text);
             }
-            (api.FPDF_ClosePage)(self.handle);
+            (api.FPDF_ClosePage)(self.handle.get());
         }
     }
 }
@@ -467,7 +467,7 @@ impl Page {
 
     /// Width and height in points, /Rotate applied.
     pub fn size(&self) -> [f32; 2] {
-        unsafe { [(self.api().FPDF_GetPageWidthF)(self.handle), (self.api().FPDF_GetPageHeightF)(self.handle)] }
+        unsafe { [(self.api().FPDF_GetPageWidthF)(self.handle.get()), (self.api().FPDF_GetPageHeightF)(self.handle.get())] }
     }
 
     /// Render the whole page (or a tile of it) into `bitmap` in one go.
@@ -475,7 +475,7 @@ impl Page {
         unsafe {
             (self.api().FPDF_RenderPageBitmap)(
                 bitmap.handle,
-                self.handle,
+                self.handle.get(),
                 at.start_x,
                 at.start_y,
                 at.size_x,
@@ -491,7 +491,7 @@ impl Page {
     /// text. Form fields are not drawn: a page printed so is flattened
     /// first (`flatten_for_print`).
     pub fn render_dc(&self, dc: *mut c_void, at: Placement, flags: i32) {
-        unsafe { (self.api().FPDF_RenderPage)(dc, self.handle, at.start_x, at.start_y, at.size_x, at.size_y, at.rotate, flags) };
+        unsafe { (self.api().FPDF_RenderPage)(dc, self.handle.get(), at.start_x, at.start_y, at.size_x, at.size_y, at.rotate, flags) };
     }
 
     /// The page's form fields and printable annotations made part of its
@@ -499,7 +499,7 @@ impl Page {
     /// loaded again to show it. Only for a copy of the document opened to
     /// be printed.
     pub fn flatten_for_print(&self) -> bool {
-        unsafe { (self.api().FPDFPage_Flatten)(self.handle, sys::FLAT_PRINT) == sys::FLATTEN_SUCCESS }
+        unsafe { (self.api().FPDFPage_Flatten)(self.handle.get(), sys::FLAT_PRINT) == sys::FLATTEN_SUCCESS }
     }
 
     /// Start a render that `pause` may interrupt; `scheme` paints
@@ -515,12 +515,12 @@ impl Page {
     ) -> RenderStatus {
         if self.rendering.replace(true) {
             // A second start on a page still rendering fails in PDFium.
-            unsafe { (self.api().FPDF_RenderPage_Close)(self.handle) };
+            unsafe { (self.api().FPDF_RenderPage_Close)(self.handle.get()) };
         }
         let status = unsafe {
             (self.api().FPDF_RenderPageBitmapWithColorScheme_Start)(
                 bitmap.handle,
-                self.handle,
+                self.handle.get(),
                 at.start_x,
                 at.start_y,
                 at.size_x,
@@ -538,14 +538,14 @@ impl Page {
         if !self.rendering.get() {
             return RenderStatus::Failed;
         }
-        let status = unsafe { (self.api().FPDF_RenderPage_Continue)(self.handle, &mut *pause.raw) };
+        let status = unsafe { (self.api().FPDF_RenderPage_Continue)(self.handle.get(), &mut *pause.raw) };
         self.finished(status, bitmap, at, flags)
     }
 
     /// Close a finished or abandoned progressive render.
     pub fn render_close(&self) {
         if self.rendering.replace(false) {
-            unsafe { (self.api().FPDF_RenderPage_Close)(self.handle) };
+            unsafe { (self.api().FPDF_RenderPage_Close)(self.handle.get()) };
         }
     }
 
@@ -575,7 +575,7 @@ impl Page {
             (self.api().FPDF_FFLDraw)(
                 self.doc.form,
                 bitmap.handle,
-                self.handle,
+                self.handle.get(),
                 at.start_x,
                 at.start_y,
                 at.size_x,
@@ -589,7 +589,7 @@ impl Page {
     fn text_page(&self) -> Option<sys::FPDF_TEXTPAGE> {
         let mut text = self.text.borrow_mut();
         if text.is_none() {
-            let handle = unsafe { (self.api().FPDFText_LoadPage)(self.handle) };
+            let handle = unsafe { (self.api().FPDFText_LoadPage)(self.handle.get()) };
             if handle.is_null() {
                 return None;
             }
@@ -693,7 +693,7 @@ impl Page {
         let mut out = Vec::new();
         let mut pos = 0;
         let mut link: sys::FPDF_LINK = std::ptr::null_mut();
-        while unsafe { (api.FPDFLink_Enumerate)(self.handle, &mut pos, &mut link) } != 0 && out.len() < 10_000 {
+        while unsafe { (api.FPDFLink_Enumerate)(self.handle.get(), &mut pos, &mut link) } != 0 && out.len() < 10_000 {
             let mut rect = sys::FS_RECTF::default();
             if unsafe { (api.FPDFLink_GetAnnotRect)(link, &mut rect) } == 0 {
                 continue;
@@ -736,7 +736,7 @@ impl Page {
         let (sx, sy) = ((w as f64 * SCALE).round() as c_int, (h as f64 * SCALE).round() as c_int);
         let map = |x: f64, y: f64| {
             let (mut dx, mut dy) = (0 as c_int, 0 as c_int);
-            unsafe { (api.FPDF_PageToDevice)(self.handle, 0, 0, sx, sy, 0, x, y, &mut dx, &mut dy) };
+            unsafe { (api.FPDF_PageToDevice)(self.handle.get(), 0, 0, sx, sy, 0, x, y, &mut dx, &mut dy) };
             (f64::from(dx) / SCALE, f64::from(dy) / SCALE)
         };
         // Points far apart, so that the integer rounding is small against
@@ -780,6 +780,95 @@ pub struct TextObject {
     /// The direction its text runs in, a unit vector (the matrix's first
     /// column): the lines are gathered by it.
     pub direction: [f32; 2],
+}
+
+/// A font's base name (`ABCDEF+Name` for a subset).
+fn base_font_name(api: &'static Api, font: sys::FPDF_FONT) -> String {
+    // The length (with the terminator) first, then the name.
+    let n = unsafe { (api.FPDFFont_GetBaseFontName)(font, std::ptr::null_mut(), 0) };
+    let mut buf = vec![0u8; n.max(1)];
+    let n = unsafe { (api.FPDFFont_GetBaseFontName)(font, buf.as_mut_ptr().cast(), buf.len()) };
+    String::from_utf8_lossy(&buf[..n.saturating_sub(1).min(buf.len())]).into_owned()
+}
+
+/// How differently two pages of `size` (points, /Rotate applied) look:
+/// each rendered at 72 dpi (the longer side capped), compared in boxes
+/// of `BOX` pixels by their mean colour; the number of boxes whose mean
+/// differs by more than `LEVELS` in a channel, those whose centre lies
+/// in `skip` (page space, an unrotated page) left out. Glyphs, a colour
+/// or a mask lost move a box's mean a lot; text whose edges shifted by
+/// a fraction of a point (`content_changed`) moves it little.
+#[cfg(test)]
+fn page_mismatch(api: &'static Api, a: sys::FPDF_PAGE, b: sys::FPDF_PAGE, size: [f32; 2], skip: Option<[f32; 4]>) -> usize {
+    mismatched_boxes(api, a, b, size, skip).len()
+}
+
+/// The centres (page space) of the boxes `page_mismatch` counts.
+#[cfg(test)]
+fn mismatched_boxes(api: &'static Api, a: sys::FPDF_PAGE, b: sys::FPDF_PAGE, size: [f32; 2], skip: Option<[f32; 4]>) -> Vec<[f32; 2]> {
+    match (check_render(api, a, size), check_render(api, b, size)) {
+        (Some(a), Some(b)) => boxes_apart(&a, &b, size, skip),
+        _ => Vec::new(),
+    }
+}
+
+/// The longest side a page is rendered at for `boxes_apart`: 72 dpi
+/// unless the page is huge.
+const CHECK_SIDE: f32 = 1600.0;
+
+fn check_scale(size: [f32; 2]) -> f32 {
+    (CHECK_SIDE / size[0].max(size[1]).max(1.0)).min(1.0)
+}
+
+/// A page of `size` rendered for `boxes_apart`: on white, no annotations.
+fn check_render(api: &'static Api, page: sys::FPDF_PAGE, size: [f32; 2]) -> Option<Bitmap> {
+    let scale = check_scale(size);
+    let (w, h) = (((size[0] * scale) as u32).max(1), ((size[1] * scale) as u32).max(1));
+    let mut bitmap = Bitmap::new(api, w, h)?;
+    bitmap.fill(0xffff_ffff);
+    unsafe { (api.FPDF_RenderPageBitmap)(bitmap.handle, page, 0, 0, w as c_int, h as c_int, 0, 0) };
+    Some(bitmap)
+}
+
+/// The boxes in which two `check_render`s of a page of `size` differ.
+fn boxes_apart(a: &Bitmap, b: &Bitmap, size: [f32; 2], skip: Option<[f32; 4]>) -> Vec<[f32; 2]> {
+    const BOX: usize = 8;
+    const LEVELS: i64 = 32;
+    let scale = check_scale(size);
+    let (pa, pb) = (a.pixels(), b.pixels());
+    let (w, h) = (a.width as usize, a.height as usize);
+    if (b.width as usize, b.height as usize) != (w, h) {
+        return Vec::new();
+    }
+    let mut boxes = Vec::new();
+    for by in (0..h).step_by(BOX) {
+        for bx in (0..w).step_by(BOX) {
+            let centre = [(bx + BOX / 2) as f32 / scale, size[1] - (by + BOX / 2) as f32 / scale];
+            if let Some([l, bottom, r, t]) = skip
+                && centre[0] >= l
+                && centre[0] <= r
+                && centre[1] >= bottom
+                && centre[1] <= t
+            {
+                continue;
+            }
+            let mut sum = [0i64; 3];
+            let mut n = 0i64;
+            for y in by..(by + BOX).min(h) {
+                for x in bx..(bx + BOX).min(w) {
+                    let i = (y * w + x) * 4;
+                    for (c, s) in sum.iter_mut().enumerate() {
+                        *s += i64::from(pa[i + c]) - i64::from(pb[i + c]);
+                    }
+                    n += 1;
+                }
+            }
+            if sum.iter().any(|s| s.abs() > LEVELS * n) {
+                boxes.push(centre);
+            }
+        }
+    }
+    boxes
 }
 
 /// Gives the stand-in font's bytes for a base font's name and descriptor
@@ -844,10 +933,10 @@ impl Page {
     /// The page's image objects, top level only.
     pub fn image_objects(&self) -> Vec<ImageObject> {
         let api = self.api();
-        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle) }.max(0);
+        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle.get()) }.max(0);
         let mut out = Vec::new();
         for index in 0..count {
-            let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index) };
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index) };
             if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_IMAGE {
                 continue;
             }
@@ -861,7 +950,7 @@ impl Page {
     }
 
     fn object_of_type(&self, index: usize, kind: c_int, what: &str) -> Result<sys::FPDF_PAGEOBJECT, String> {
-        let object = unsafe { (self.api().FPDFPage_GetObject)(self.handle, index as c_int) };
+        let object = unsafe { (self.api().FPDFPage_GetObject)(self.handle.get(), index as c_int) };
         if object.is_null() || unsafe { (self.api().FPDFPageObj_GetType)(object) } != kind {
             return Err(format!("not {what}"));
         }
@@ -870,15 +959,32 @@ impl Page {
 
     /// After a change of the page's objects: the content written anew
     /// from them, the text page (which described the old content)
-    /// closed, and the new content checked to hold every object:
-    /// `FPDFPage_GenerateContent` leaves out text in Type 3 fonts,
-    /// shadings (`sh`) and inline images, which a save would then lose
-    /// (`has_type3_text` says so before an edit; this catches the rest).
-    /// An error leaves the page changed in memory: the caller puts the
+    /// closed, the new content parsed and checked against the objects,
+    /// by count and by look (`page_mismatch`), and the parsed page taking
+    /// the place of the one in memory. `FPDFPage_GenerateContent` leaves
+    /// out text in Type 3 fonts, shadings (`sh`) and inline images, which
+    /// the count catches (`has_type3_text` says so before an edit), and
+    /// writes a pattern fill as black, drops a soft mask and tells fonts
+    /// apart by name alone (`clashing_fonts`), which the look catches. An
+    /// error leaves the page changed in memory: the caller puts the
     /// document back (the engine rebuilds its copy from the log).
     fn content_changed(&self) -> Result<(), String> {
         let api = self.api();
-        if unsafe { (api.FPDFPage_GenerateContent)(self.handle) } == 0 {
+        let size = self.size();
+        // The colours as PDFium reports them are set back as RGB so the
+        // writer keeps them; an object whose reported colour is not what
+        // it draws (a pattern fill reads as a flat grey) looks different
+        // after that, and the edit is refused before anything is written.
+        let before = check_render(api, self.handle.get(), size);
+        self.colours_to_rgb();
+        let after = check_render(api, self.handle.get(), size);
+        if let (Some(before), Some(after)) = (&before, &after) {
+            let changed = boxes_apart(before, after, size, None).len();
+            if changed > 0 {
+                return Err(format!("the page's content cannot be written back as it is ({changed} parts of the page are filled with a pattern, which PDFium's writer does not keep)"));
+            }
+        }
+        if unsafe { (api.FPDFPage_GenerateContent)(self.handle.get()) } == 0 {
             return Err("the page's content could not be regenerated".into());
         }
         if let Some(text) = self.text.take() {
@@ -898,21 +1004,108 @@ impl Page {
             }
             counts
         };
-        let (wanted, written) = (count(self.handle), count(again));
-        unsafe { (api.FPDF_ClosePage)(again) };
-        if wanted == written {
-            return Ok(());
+        let (wanted, written) = (count(self.handle.get()), count(again));
+        if wanted != written {
+            unsafe { (api.FPDF_ClosePage)(again) };
+            const KINDS: [&str; 6] = ["objects", "text", "paths", "pictures", "shadings", "forms"];
+            let lost: Vec<String> = (0..6).filter(|&k| written[k] < wanted[k]).map(|k| format!("{} {}", wanted[k] - written[k], KINDS[k])).collect();
+            return Err(format!("the page's content cannot be written back whole ({} would be lost)", lost.join(", ")));
         }
-        const KINDS: [&str; 6] = ["objects", "text", "paths", "pictures", "shadings", "forms"];
-        let lost: Vec<String> = (0..6).filter(|&k| written[k] < wanted[k]).map(|k| format!("{} {}", wanted[k] - written[k], KINDS[k])).collect();
-        Err(format!("the page's content cannot be written back whole ({} would be lost)", lost.join(", ")))
+        // The same objects, but do they look the same? The writer leaves
+        // out what it does not know (a pattern fill, a soft mask, a
+        // colour not in RGB: `colours_to_rgb`), and tells fonts apart by
+        // name alone (`clashing_fonts`): the page parsed from its content
+        // is compared with the one in memory.
+        let changed = match (&after, check_render(api, again, size)) {
+            (Some(after), Some(parsed)) => boxes_apart(after, &parsed, size, None).len(),
+            _ => 0,
+        };
+        log::debug!("page {}: content written anew, {changed} boxes look different", self.index + 1);
+        if changed > 0 {
+            unsafe { (api.FPDF_ClosePage)(again) };
+            return Err(format!("the page's content cannot be written back as it is ({changed} parts of the page would look different: a soft mask or a font PDFium's writer does not keep)"));
+        }
+        // The parsed page stands in for the one edited in memory from
+        // here on: what is shown is what a save writes. The writer leaves
+        // out the character and word spacing (`Tc`, `Tw`) of every run on
+        // the page, so a run set with them drifts by that spacing a
+        // character, a fraction of a point on a line; shown as it is,
+        // the drift is in sight before the file is saved.
+        unsafe {
+            if !self.doc.form.is_null() {
+                (api.FORM_OnAfterLoadPage)(again, self.doc.form);
+                (api.FORM_OnBeforeClosePage)(self.handle.get(), self.doc.form);
+            }
+            (api.FPDF_ClosePage)(self.handle.replace(again));
+        }
+        Ok(())
+    }
+
+    /// Every object's fill and stroke colour set again as the RGB PDFium
+    /// renders it with: the content writer puts a colour in the stream
+    /// only when it is DeviceRGB, so text in CMYK black, in grey or in a
+    /// spot colour (a book's headings in PANTONE 354) came out black when
+    /// saved. A pattern has no RGB and is left alone (`page_mismatch`
+    /// catches it); a form XObject keeps its own content.
+    fn colours_to_rgb(&self) {
+        let api = self.api();
+        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle.get()) }.max(0);
+        for index in 0..count {
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index) };
+            if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } == sys::FPDF_PAGEOBJ_FORM {
+                continue;
+            }
+            let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 255u32);
+            unsafe {
+                if (api.FPDFPageObj_GetFillColor)(object, &mut r, &mut g, &mut b, &mut a) != 0 {
+                    (api.FPDFPageObj_SetFillColor)(object, r, g, b, a);
+                }
+                if (api.FPDFPageObj_GetStrokeColor)(object, &mut r, &mut g, &mut b, &mut a) != 0 {
+                    (api.FPDFPageObj_SetStrokeColor)(object, r, g, b, a);
+                }
+            }
+        }
+    }
+
+    /// The base font name two different embedded fonts of the page's text
+    /// objects share, if any: PDFium's content writer tells fonts apart by
+    /// that name and writes every run of such a pair in one of them (a
+    /// book made by LibreOffice had two subsets of PTSans-Bold, both
+    /// `BAAAAA+`: the other's letters came out blank). Fonts of one size
+    /// are taken for one font (a stand-in loaded twice); a pair not
+    /// embedded is left to `content_changed`'s look check.
+    pub fn clashing_fonts(&self) -> Option<String> {
+        let api = self.api();
+        let mut seen: std::collections::HashMap<String, (sys::FPDF_FONT, usize)> = std::collections::HashMap::new();
+        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle.get()) }.max(0);
+        for index in 0..count {
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index) };
+            if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
+                continue;
+            }
+            let font = unsafe { (api.FPDFTextObj_GetFont)(object) };
+            if font.is_null() || unsafe { (api.FPDFFont_GetIsEmbedded)(font) } != 1 {
+                continue;
+            }
+            let name = base_font_name(api, font);
+            let mut size = 0usize;
+            unsafe { (api.FPDFFont_GetFontData)(font, std::ptr::null_mut(), 0, &mut size) };
+            match seen.get(&name) {
+                None => {
+                    seen.insert(name, (font, size));
+                }
+                Some(&(other, other_size)) if other != font && other_size != size => return Some(name),
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Remove object `index` (an image) from the page.
     pub fn remove_object(&self, index: usize) -> Result<(), String> {
         let api = self.api();
         let object = self.object_of_type(index, sys::FPDF_PAGEOBJ_IMAGE, "an image")?;
-        if unsafe { (api.FPDFPage_RemoveObject)(self.handle, object) } == 0 {
+        if unsafe { (api.FPDFPage_RemoveObject)(self.handle.get(), object) } == 0 {
             return Err("the object could not be removed".into());
         }
         unsafe { (api.FPDFPageObj_Destroy)(object) };
@@ -930,7 +1123,7 @@ impl Page {
         let data = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let is_jpeg = data.starts_with(&[0xff, 0xd8]);
         let is_png = data.starts_with(b"\x89PNG");
-        let mut pages = [self.handle];
+        let mut pages = [self.handle.get()];
         let (w, h) = if is_jpeg {
             let mut access = sys::FPDF_FILEACCESS {
                 m_FileLen: c_ulong::try_from(data.len()).map_err(|_| "the picture is too large")?,
@@ -997,9 +1190,9 @@ impl Page {
     /// embedded gives its substitute's.
     pub fn has_type3_text(&self) -> bool {
         let api = self.api();
-        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle) }.max(0);
+        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle.get()) }.max(0);
         (0..count).any(|index| {
-            let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index) };
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index) };
             if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
                 return false;
             }
@@ -1019,11 +1212,17 @@ impl Page {
         let Some(text_page) = self.text_page() else {
             return Vec::new();
         };
-        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle) }.max(0);
+        let count = unsafe { (api.FPDFPage_CountObjects)(self.handle.get()) }.max(0);
         let mut out = Vec::new();
         for index in 0..count {
-            let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index) };
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index) };
             if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
+                continue;
+            }
+            // Invisible text (a scan's OCR layer) and text that only clips:
+            // an edit would show nothing.
+            let mode = unsafe { (api.FPDFTextObj_GetTextRenderMode)(object) };
+            if mode == sys::FPDF_TEXTRENDERMODE_INVISIBLE || mode == sys::FPDF_TEXTRENDERMODE_CLIP {
                 continue;
             }
             let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
@@ -1080,7 +1279,7 @@ impl Page {
     pub fn set_line(&self, objects: &[usize], text: &str, followers: &[usize], fallback: FontLookup<'_>) -> Result<Replaced, String> {
         let api = self.api();
         let handle = |index: usize| {
-            let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index as c_int) };
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index as c_int) };
             (!object.is_null() && unsafe { (api.FPDFPageObj_GetType)(object) } == sys::FPDF_PAGEOBJ_TEXT).then_some(object).ok_or("not a text object")
         };
         // The handles first: the indices change as objects go.
@@ -1113,7 +1312,7 @@ impl Page {
         let (replaced, new) = self.replace_text(objects[0], text, span, fallback)?;
         for &object in rest {
             unsafe {
-                if (api.FPDFPage_RemoveObject)(self.handle, object) == 0 {
+                if (api.FPDFPage_RemoveObject)(self.handle.get(), object) == 0 {
                     // Left in place it would show its text over the new
                     // one; the engine rebuilds its copy on the error.
                     return Err("a run of the line could not be removed".into());
@@ -1135,7 +1334,7 @@ impl Page {
     /// content not yet regenerated; the object that shows the text then.
     fn replace_text(&self, index: usize, text: &str, span: Option<(usize, f32)>, fallback: FontLookup<'_>) -> Result<(Replaced, sys::FPDF_PAGEOBJECT), String> {
         let api = self.api();
-        let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index as c_int) };
+        let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index as c_int) };
         if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
             return Err("not a text object".into());
         }
@@ -1243,19 +1442,28 @@ impl Page {
                     }
                     (api.FPDFPageObj_SetFillColor)(new, r, g, b, a);
                     (api.FPDFTextObj_SetTextRenderMode)(new, mode);
+                    // A stroked mode draws with the stroke's colour and width.
+                    let (mut sr, mut sg, mut sb, mut sa) = (0u32, 0u32, 0u32, 255u32);
+                    if (api.FPDFPageObj_GetStrokeColor)(object, &mut sr, &mut sg, &mut sb, &mut sa) != 0 {
+                        (api.FPDFPageObj_SetStrokeColor)(new, sr, sg, sb, sa);
+                    }
+                    let mut stroke_width = 1f32;
+                    if (api.FPDFPageObj_GetStrokeWidth)(object, &mut stroke_width) != 0 {
+                        (api.FPDFPageObj_SetStrokeWidth)(new, stroke_width);
+                    }
                     self.copy_marks(object, new);
                     // In the old one's place: the content's order (the
                     // reading order of an untagged document) and the other
                     // objects' indices stay.
-                    if (api.FPDFPage_RemoveObject)(self.handle, object) == 0 {
+                    if (api.FPDFPage_RemoveObject)(self.handle.get(), object) == 0 {
                         // Both would show, one over the other.
                         (api.FPDFPageObj_Destroy)(new);
                         (api.FPDFFont_Close)(new_font);
                         return Err("the old text could not be removed".into());
                     }
                     (api.FPDFPageObj_Destroy)(object);
-                    if (api.FPDFPage_InsertObjectAtIndex)(self.handle, new, index) == 0 {
-                        (api.FPDFPage_InsertObject)(self.handle, new);
+                    if (api.FPDFPage_InsertObjectAtIndex)(self.handle.get(), new, index) == 0 {
+                        (api.FPDFPage_InsertObject)(self.handle.get(), new);
                     }
                     (api.FPDFFont_Close)(new_font);
                 }
@@ -1324,7 +1532,7 @@ impl Page {
             unsafe {
                 (api.FPDFText_SetCharcodes)(object, [k, code, k].as_ptr(), 3);
                 (api.FPDFPageObj_SetMatrix)(object, &at);
-                (api.FPDFPage_InsertObject)(self.handle, object);
+                (api.FPDFPage_InsertObject)(self.handle.get(), object);
             }
             probes.push((object, code, advance));
         }
@@ -1339,12 +1547,14 @@ impl Page {
                 // The text page may add a space of its own after the run;
                 // the code with ink on either side is no whitespace.
                 let text: Vec<char> = text.trim().chars().collect();
-                (text.len() == 3).then(|| text[1])
+                // A subset's space reads as a no-break space: whatever
+                // whitespace a code reads as, it is the space.
+                (text.len() == 3).then(|| if text[1].is_whitespace() { ' ' } else { text[1] })
             })
             .collect();
         for &(object, ..) in &probes {
             unsafe {
-                (api.FPDFPage_RemoveObject)(self.handle, object);
+                (api.FPDFPage_RemoveObject)(self.handle.get(), object);
                 (api.FPDFPageObj_Destroy)(object);
             }
         }
@@ -1433,7 +1643,7 @@ impl Page {
     /// alpha.
     pub fn image_pixels(&self, index: usize) -> Result<(u32, u32, Vec<u8>), String> {
         let api = self.api();
-        let object = unsafe { (api.FPDFPage_GetObject)(self.handle, index as c_int) };
+        let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index as c_int) };
         if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_IMAGE {
             return Err("not an image object".into());
         }
@@ -1453,7 +1663,7 @@ impl Page {
             let scaled = sys::FS_MATRIX { a: matrix.a * sx, b: matrix.b * sx, c: matrix.c * sy, d: matrix.d * sy, e: matrix.e, f: matrix.f };
             unsafe { (api.FPDFPageObj_SetMatrix)(object, &scaled) };
         }
-        let bitmap = unsafe { (api.FPDFImageObj_GetRenderedBitmap)(self.doc.handle, self.handle, object) };
+        let bitmap = unsafe { (api.FPDFImageObj_GetRenderedBitmap)(self.doc.handle, self.handle.get(), object) };
         if rescaled {
             unsafe { (api.FPDFPageObj_SetMatrix)(object, &matrix) };
         }
@@ -1591,7 +1801,6 @@ impl Bitmap {
     }
 
     /// Fill the whole bitmap with `argb` (0xFFFFFFFF: white).
-    #[cfg(test)]
     pub fn fill(&mut self, argb: u32) {
         unsafe {
             (self.api.FPDFBitmap_FillRect)(self.handle, 0, 0, self.width as c_int, self.height as c_int, argb);
@@ -2070,8 +2279,8 @@ pub mod tests {
             (api.FPDFText_SetText)(obj, wide.as_ptr());
             let m = sys::FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 72.0, f: 500.0 };
             (api.FPDFPageObj_SetMatrix)(obj, &m);
-            (api.FPDFPage_InsertObject)(page.handle, obj);
-            assert_ne!((api.FPDFPage_GenerateContent)(page.handle), 0);
+            (api.FPDFPage_InsertObject)(page.handle.get(), obj);
+            assert_ne!((api.FPDFPage_GenerateContent)(page.handle.get()), 0);
             (api.FPDFFont_Close)(font);
         }
         let subset_file = std::env::temp_dir().join(format!("metalpdf_bold_subset_{}.pdf", std::process::id()));
@@ -2186,8 +2395,8 @@ pub mod tests {
         let api = api();
         let doc = Document::open(api, Path::new(&sample), None).unwrap();
         let mcids = |page: &Page| {
-            let n = unsafe { (api.FPDFPage_CountObjects)(page.handle) };
-            let ids: Vec<i32> = (0..n).map(|i| unsafe { (api.FPDFPageObj_GetMarkedContentID)((api.FPDFPage_GetObject)(page.handle, i)) }).collect();
+            let n = unsafe { (api.FPDFPage_CountObjects)(page.handle.get()) };
+            let ids: Vec<i32> = (0..n).map(|i| unsafe { (api.FPDFPageObj_GetMarkedContentID)((api.FPDFPage_GetObject)(page.handle.get(), i)) }).collect();
             ids
         };
         let tagged = |doc: &Document| unsafe { (api.FPDFCatalog_IsTagged)(doc.inner.handle) } != 0;
@@ -2422,8 +2631,8 @@ pub mod tests {
         let path = std::env::temp_dir().join(format!("metalpdf_type3_{}.pdf", std::process::id()));
         std::fs::write(&path, pdf).unwrap();
         let types = |page: &Page| -> Vec<c_int> {
-            let n = unsafe { (api.FPDFPage_CountObjects)(page.handle) };
-            (0..n).map(|i| unsafe { (api.FPDFPageObj_GetType)((api.FPDFPage_GetObject)(page.handle, i)) }).collect()
+            let n = unsafe { (api.FPDFPage_CountObjects)(page.handle.get()) };
+            (0..n).map(|i| unsafe { (api.FPDFPageObj_GetType)((api.FPDFPage_GetObject)(page.handle.get(), i)) }).collect()
         };
         let doc = Document::open(api, &path, None).unwrap();
         let page = doc.load_page(0).unwrap();
@@ -2512,10 +2721,22 @@ pub mod tests {
             println!("saved as {}", saved.display());
         }
         assert_eq!(before.len(), after.len());
+        // As the editor shows it: the font's hyphen and the Unicode
+        // spaces plain, a run of whitespace one space.
+        let plain = |s: &str| {
+            let plain: String = s.chars().map(|c| match c {
+                '\u{2}' | '\u{ad}' | '\u{2010}' | '\u{2011}' => '-',
+                c if c.is_whitespace() => ' ',
+                c => c,
+            }).collect();
+            plain.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let (wanted, old) = (plain(&wanted), plain(&old));
         let mut lost = 0;
         for (i, (b, a)) in before.iter().zip(&after).enumerate() {
             let (nb, na) = (b.chars().count(), a.chars().count());
             if i == index {
+                let (a, b) = (plain(a), plain(b));
                 assert!(a.contains(&wanted), "page {}: the edited line is not there", i + 1);
                 assert!(!a.contains(&old) || b.matches(&old).count() > 1, "page {}: the old line is still there", i + 1);
             }
@@ -2558,7 +2779,7 @@ pub mod tests {
         let object = page.text_objects().remove(0);
         assert_eq!(object.text, "Hello world");
         // PDFium's own code for a space has no width in this font.
-        let font = unsafe { (api.FPDFTextObj_GetFont)((api.FPDFPage_GetObject)(page.handle, object.index as c_int)) };
+        let font = unsafe { (api.FPDFTextObj_GetFont)((api.FPDFPage_GetObject)(page.handle.get(), object.index as c_int)) };
         let mut width = -1f32;
         unsafe { (api.FPDFFont_GetGlyphWidth)(font, 0x20, 24.0, &mut width) };
         assert_eq!(width, 0.0);
@@ -2581,5 +2802,247 @@ pub mod tests {
         drop(again);
         std::fs::remove_file(path).ok();
         std::fs::remove_file(saved).ok();
+    }
+
+    /// PDFium's content writer puts a fill colour in the stream only when
+    /// it is DeviceRGB: grey text (`g`) and text in a spot colour (a
+    /// Separation, as a book's PANTONE headings) came out black when
+    /// saved. The colours are set again in RGB before the content is
+    /// written (`colours_to_rgb`), so they survive a save.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn grey_and_spot_colours_survive_a_save() {
+        let api = api();
+        let pdf = write_pdf(vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /ColorSpace << /CS0 [/Separation /Spot /DeviceRGB << /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [0 0.6 0] /N 1 >>] >> >> >>".into(),
+            stream("BT /F1 24 Tf 72 700 Td (Hello) Tj ET BT /F1 24 Tf 0.5 g 72 650 Td (Grey) Tj ET BT /F1 24 Tf /CS0 cs 1 scn 72 600 Td (Spot) Tj ET"),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        ]);
+        let path = std::env::temp_dir().join(format!("metalpdf_colours_{}.pdf", std::process::id()));
+        std::fs::write(&path, pdf).unwrap();
+        let colours = |page: &Page| {
+            (0..3)
+                .map(|i| {
+                    let object = unsafe { (api.FPDFPage_GetObject)(page.handle.get(), i) };
+                    let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+                    unsafe { (api.FPDFPageObj_GetFillColor)(object, &mut r, &mut g, &mut b, &mut a) };
+                    [r, g, b]
+                })
+                .collect::<Vec<_>>()
+        };
+        let doc = Document::open(api, &path, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let before = colours(&page);
+        assert_eq!(before, [[0, 0, 0], [128, 128, 128], [0, 153, 0]], "as rendered");
+        assert_eq!(page.set_text(0, "Hallo", &mut |_, _| None).unwrap(), Replaced::SameFont);
+        drop(page);
+        let saved = std::env::temp_dir().join(format!("metalpdf_colours_saved_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(doc);
+        let again = Document::open(api, &saved, None).unwrap();
+        let page = again.load_page(0).unwrap();
+        assert_eq!(colours(&page), before, "saved and read back");
+        assert_eq!(page.text_objects().iter().map(|o| o.text.as_str()).collect::<Vec<_>>(), ["Hallo", "Grey", "Spot"]);
+        drop(page);
+        drop(again);
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(saved).ok();
+    }
+
+    /// Two font dictionaries of one base font name on a page (a book made
+    /// by LibreOffice had two subsets of PTSans-Bold, both `BAAAAA+`):
+    /// PDFium's content generator writes every run with one of them, and
+    /// the other's glyphs come out wrong or not at all when saved. Here
+    /// the second Helvetica's encoding shows code 65 as `B`.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn two_fonts_of_one_name_are_told_apart() {
+        let api = api();
+        let pdf = write_pdf(vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>".into(),
+            stream("BT /F1 24 Tf 72 700 Td (A) Tj ET BT /F2 24 Tf 72 650 Td (A) Tj ET"),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding /Differences [65 /B] >> >>".into(),
+        ]);
+        let path = std::env::temp_dir().join(format!("metalpdf_two_fonts_{}.pdf", std::process::id()));
+        std::fs::write(&path, pdf).unwrap();
+        let doc = Document::open(api, &path, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let texts = |page: &Page| page.text_objects().iter().map(|o| o.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&page), ["A", "B"]);
+        // Neither is embedded, so the names alone do not tell them apart:
+        // the look does (saved, the second read "A").
+        assert_eq!(page.clashing_fonts(), None);
+        let refused = page.set_text(0, "AA", &mut |_, _| None).unwrap_err();
+        println!("the edit: {refused}");
+        assert!(refused.contains("look different"), "{refused}");
+        drop(page);
+        drop(doc);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// A survey, not a check: `METALPDF_FILES` names PDFs (`;` between
+    /// them); for each, the fonts of the first pages (subset, the width
+    /// of a space in PDFium's code for it), the first line with two words
+    /// edited (how), the document saved, and the saved page rendered
+    /// against the original outside the line's box (what the content
+    /// generator changed) and against the page in memory after the edit.
+    /// Run with `--nocapture`.
+    #[test]
+    #[ignore = "needs vendor/pdfium and METALPDF_FILES"]
+    fn fonts_and_fidelity_survey() {
+        let Some(files) = std::env::var_os("METALPDF_FILES") else { return };
+        let api = api();
+        let scale = 2.0;
+        let render = |page: &Page| {
+            let [w, h] = page.size();
+            let (bw, bh) = ((w * scale) as u32, (h * scale) as u32);
+            let mut bitmap = Bitmap::new(api, bw, bh).unwrap();
+            page.render(&mut bitmap, Placement { start_x: 0, start_y: 0, size_x: bw as i32, size_y: bh as i32, rotate: 0 }, 0);
+            (bitmap, bw as usize, bh as usize, h)
+        };
+        // Pixels that differ by more than a little in any channel, outside `skip` (page space).
+        let diff = |a: &Bitmap, b: &Bitmap, bw: usize, bh: usize, h: f32, skip: Option<[f32; 4]>| {
+            let mut n = 0;
+            let (pa, pb) = (a.pixels(), b.pixels());
+            for y in 0..bh {
+                for x in 0..bw {
+                    if let Some([l, bo, r, t]) = skip {
+                        let (px, py) = (x as f32 / scale, h - y as f32 / scale);
+                        if px >= l - 2.0 && px <= r + 2.0 && py >= bo - 2.0 && py <= t + 2.0 {
+                            continue;
+                        }
+                    }
+                    let i = (y * bw + x) * 4;
+                    if (0..3).any(|c| pa[i + c].abs_diff(pb[i + c]) > 40) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        for file in files.to_string_lossy().split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            println!("\n=== {file}");
+            let doc = match Document::open(api, Path::new(file), None) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    println!("cannot open: {e}");
+                    continue;
+                }
+            };
+            let mut fonts_seen = std::collections::BTreeMap::new();
+            let mut edit_target = None;
+            // `METALPDF_SURVEY_PAGE` (1-based) names the page to edit.
+            let only: Option<usize> = std::env::var("METALPDF_SURVEY_PAGE").ok().and_then(|p| p.parse::<usize>().ok()).map(|p| p.saturating_sub(1));
+            for index in only.map_or(0..doc.page_count().min(12), |p| p..(p + 1).min(doc.page_count())) {
+                let Some(page) = doc.load_page(index) else { continue };
+                let objects = page.text_objects();
+                for o in &objects {
+                    if fonts_seen.contains_key(&o.font) {
+                        continue;
+                    }
+                    let object = unsafe { (api.FPDFPage_GetObject)(page.handle.get(), o.index as c_int) };
+                    let font = unsafe { (api.FPDFTextObj_GetFont)(object) };
+                    let mut space = -1f32;
+                    unsafe { (api.FPDFFont_GetGlyphWidth)(font, 0x20, 1000.0, &mut space) };
+                    let glyph_a = !unsafe { (api.FPDFFont_GetGlyphPath)(font, u32::from('a'), 12.0) }.is_null();
+                    let glyph_cyr = !unsafe { (api.FPDFFont_GetGlyphPath)(font, u32::from('а'), 12.0) }.is_null();
+                    let codes = page.char_codes(font);
+                    fonts_seen.insert(o.font.clone(), format!("subset {} space width {space:.0} (code {:?}; {} codes found) glyph a {glyph_a} а {glyph_cyr} flags {:#x}", o.subset, codes.get(&' '), codes.len(), o.flags));
+                }
+                if edit_target.is_none() {
+                    let lines = crate::textline::lines(&objects);
+                    if let Some(line) = lines.into_iter().find(|l| l.text.split_whitespace().count() >= 3 && l.text.chars().all(|c| !c.is_control() || c == '\u{2}')) {
+                        edit_target = Some((index, line));
+                    }
+                }
+            }
+            for (name, info) in &fonts_seen {
+                println!("font {name}: {info}");
+            }
+            let Some((index, line)) = edit_target else {
+                println!("no line of three words in the first pages");
+                continue;
+            };
+            let mut fonts = crate::fonts::Fonts::default();
+            let pristine = Document::open(api, Path::new(file), None).unwrap();
+            let pristine_page = pristine.load_page(index).unwrap();
+            let page = doc.load_page(index).unwrap();
+            let (original, bw, bh, h) = render(&page);
+            let first_word = line.text.split_whitespace().next().unwrap();
+            let replacement = if first_word.chars().any(|c| c.is_alphabetic() && !c.is_ascii()) { "Проба" } else { "Tested" };
+            let wanted = line.text.replacen(first_word, replacement, 1);
+            let edit = line.edit(&wanted).unwrap();
+            println!("page {}: {:?} -> {replacement:?}: {} objects merged, {} followers", index + 1, line.text, edit.objects.len(), edit.followers.len());
+            let how = match page.set_line(&edit.objects, &edit.text, &edit.followers, &mut |name, flags| fonts.get(name, flags)) {
+                Ok(how) => how,
+                Err(e) => {
+                    println!("  refused: {e}");
+                    // Where: the page as left in memory (its content
+                    // written anew) against the one parsed from it.
+                    let parsed = unsafe { (api.FPDF_LoadPage)(doc.inner.handle, index as c_int) };
+                    if !parsed.is_null() {
+                        let boxes = mismatched_boxes(api, page.handle.get(), parsed, page.size(), None);
+                        println!("  differing boxes (page points, from the bottom left): {:?}", &boxes[..boxes.len().min(20)]);
+                        if std::env::var_os("METALPDF_KEEP").is_some() {
+                            let dump = |name: &str, b: &Bitmap| {
+                                let rgba: Vec<u8> = b.pixels().chunks(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+                                crate::bench::write_rgba_png(&std::env::temp_dir().join(name), &rgba, bw as u32, bh as u32).unwrap();
+                            };
+                            let (memory, ..) = render(&page);
+                            dump("metalpdf_survey_memory.png", &memory);
+                            // The parsed page rendered through a page of its own.
+                            let stand_in = Page { doc: Rc::clone(&doc.inner), handle: Cell::new(parsed), index: index as c_int, text: RefCell::new(None), rendering: Cell::new(false) };
+                            let (reparsed, ..) = render(&stand_in);
+                            dump("metalpdf_survey_parsed.png", &reparsed);
+                            println!("  kept the renders in {}", std::env::temp_dir().display());
+                            drop(stand_in);
+                        } else {
+                            unsafe { (api.FPDF_ClosePage)(parsed) };
+                        }
+                    }
+                    continue;
+                }
+            };
+            let after = crate::textline::lines(&page.text_objects()).into_iter().find(|l| l.text.starts_with(replacement)).map(|l| l.text);
+            println!("  {how:?}; the line reads {after:?}");
+            let (memory, ..) = render(&page);
+            let bounds = line.bounds;
+            // The guard's own measure, the page before the edit against
+            // the one parsed from the new content, the line left out.
+            let line_box = [bounds[0] - 1.0, bounds[1] - 1.0, 10_000.0, bounds[3] + 1.0];
+            println!("  look check: {} boxes differ outside the line", page_mismatch(api, pristine_page.handle.get(), page.handle.get(), page.size(), Some(line_box)));
+            drop(page);
+            let saved = std::env::temp_dir().join(format!("metalpdf_survey_{}.pdf", std::process::id()));
+            doc.save_to(&saved).unwrap();
+            let again = Document::open(api, &saved, None).unwrap();
+            let page = again.load_page(index).unwrap();
+            let (reread, ..) = render(&page);
+            println!(
+                "  saved against the original outside the line: {} pixels of {} differ; saved against memory: {} pixels; original against memory outside the line: {}",
+                diff(&original, &reread, bw, bh, h, Some(line_box)),
+                bw * bh,
+                diff(&memory, &reread, bw, bh, h, None),
+                diff(&original, &memory, bw, bh, h, Some(line_box)),
+            );
+            if std::env::var_os("METALPDF_KEEP").is_some() {
+                let dump = |name: &str, b: &Bitmap| {
+                    let rgba: Vec<u8> = b.pixels().chunks(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+                    crate::bench::write_rgba_png(&std::env::temp_dir().join(name), &rgba, bw as u32, bh as u32).unwrap();
+                };
+                dump("metalpdf_survey_original.png", &original);
+                dump("metalpdf_survey_memory.png", &memory);
+                dump("metalpdf_survey_saved.png", &reread);
+                println!("  kept {} and the renders in {}", saved.display(), std::env::temp_dir().display());
+            } else {
+                drop(page);
+                drop(again);
+                std::fs::remove_file(&saved).ok();
+            }
+        }
     }
 }
