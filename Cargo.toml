@@ -5,7 +5,7 @@
 name = "metalpdf"
 # Between releases: the next version with "-dev", the last number raised by
 # one (after 0.1.0, "0.1.1-dev"); a release drops it.
-version = "0.1.0"
+version = "0.1.1-dev"
 authors = ["Fan4_Metal"]
 edition = "2024"
 rust-version = "1.95"
