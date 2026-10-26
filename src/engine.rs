@@ -400,6 +400,23 @@ struct EditState {
     edited: HashSet<usize>,
     /// Pages were put in or removed: every page comes from the copy.
     all_pages: bool,
+    /// An edit failed after changing the copy, and the copy could not be
+    /// made again from the log: it is not saved (what is wrong in it is
+    /// not known) until an undo makes it anew.
+    broken: Option<String>,
+}
+
+impl EditState {
+    fn new(doc: Document) -> EditState {
+        let obstacles = doc.edit_obstacles();
+        EditState { doc, obstacles, log: Vec::new(), edited: HashSet::new(), all_pages: false, broken: None }
+    }
+}
+
+/// The length and the time of the last change of the file at `path`.
+fn stamp_of(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
 }
 
 /// The thread's side.
@@ -413,9 +430,18 @@ struct Worker {
     pages: HashMap<(DocId, usize), Page>,
     page_order: VecDeque<(DocId, usize)>,
     search: Option<SearchState>,
-    /// The documents' paths, for the edited copies.
+    /// The documents' paths, for the edited copies, and the files' length
+    /// and time of change when opened: the copy is opened from the file
+    /// again, which must still be the one shown.
     paths: HashMap<DocId, PathBuf>,
+    stamps: HashMap<DocId, (u64, std::time::SystemTime)>,
     edits: HashMap<DocId, EditState>,
+    /// Copies of the files edits read (a picture, the pages of another
+    /// PDF), in a folder of the engine's: the log is replayed from them
+    /// on an undo, and the originals may be gone by then (a file opened
+    /// from a zip in `%TEMP%`, a download deleted). Removed with the tab.
+    edit_files: HashMap<DocId, Vec<TempFile>>,
+    edit_file_count: u64,
     /// The passwords documents were opened with, for the copy a print job
     /// opens.
     passwords: HashMap<DocId, String>,
@@ -453,7 +479,10 @@ impl Worker {
             page_order: VecDeque::new(),
             search: None,
             paths: HashMap::new(),
+            stamps: HashMap::new(),
             edits: HashMap::new(),
+            edit_files: HashMap::new(),
+            edit_file_count: 0,
             passwords: HashMap::new(),
             printing: None,
             fonts: Default::default(),
@@ -533,6 +562,9 @@ impl Worker {
                         log::debug!("opened {} ({page_count} pages) in {:.1} ms", path.display(), started.elapsed().as_secs_f64() * 1e3);
                         self.docs.insert(id, doc);
                         self.paths.insert(id, path.clone());
+                        if let Some(stamp) = stamp_of(&path) {
+                            self.stamps.insert(id, stamp);
+                        }
                         self.send(Event::Opened { id, result: Ok(DocInfo { page_count, first_size, title, print_scaling }) });
                         if let (Some(first), Some(size)) = (first, first_size) {
                             let page = first.page.min(page_count.saturating_sub(1));
@@ -558,7 +590,9 @@ impl Worker {
                 self.page_order.retain(|k| k.0 != id);
                 self.pages.retain(|k, _| k.0 != id);
                 self.edits.remove(&id);
+                self.edit_files.remove(&id);
                 self.paths.remove(&id);
+                self.stamps.remove(&id);
                 self.passwords.remove(&id);
                 self.docs.remove(&id);
                 if self.search.as_ref().is_some_and(|s| s.id == id) {
@@ -665,11 +699,22 @@ impl Worker {
                             self.send_restructured(id);
                         }
                     }
-                    Err(reason) => self.send(Event::EditFailed { id, reason }),
+                    Err(reason) => {
+                        // The copy is as it was, the edit with it: back in
+                        // the log, which says what the copy holds.
+                        if let Some(state) = self.edits.get_mut(&id) {
+                            state.log.push(undone);
+                        }
+                        self.send(Event::EditFailed { id, reason });
+                    }
                 }
             }
             Request::Save { id, path } => {
                 let result = match self.edits.get(&id) {
+                    Some(EditState { broken: Some(reason), .. }) => Err(tr!(
+                        format!("the edited copy is damaged ({reason}); undoing the last edit makes it anew"),
+                        format!("правленая копия повреждена ({reason}); отмена последней правки соберёт её заново")
+                    )),
                     Some(state) => state.doc.save_to(&path),
                     None => Err("nothing was edited".into()),
                 };
@@ -711,12 +756,11 @@ impl Worker {
         if let Some(state) = self.edits.get(&id) {
             refuse(&state.obstacles)?;
         } else {
-            let path = self.paths.get(&id).cloned().ok_or("no such document")?;
-            let doc = Document::open(self.api, &path, None).map_err(|e| e.to_string())?;
-            let obstacles = doc.edit_obstacles();
-            refuse(&obstacles)?;
-            self.edits.insert(id, EditState { doc, obstacles, log: Vec::new(), edited: HashSet::new(), all_pages: false });
+            let state = EditState::new(self.open_source(id)?);
+            refuse(&state.obstacles)?;
+            self.edits.insert(id, state);
         }
+        let edit = self.keep_files(id, edit)?;
         if edit.restructures() {
             // Every open page of the document is stale (its index may
             // name another page now); every page comes from the copy.
@@ -743,6 +787,9 @@ impl Worker {
                 let log = state.log.clone();
                 if let Err(e) = self.rebuild_edits(id, log) {
                     log::warn!("the edited copy could not be rebuilt after a failed page edit: {e}");
+                    if let Some(state) = self.edits.get_mut(&id) {
+                        state.broken = Some(e);
+                    }
                 }
                 return Err(reason);
             }
@@ -787,6 +834,9 @@ impl Worker {
             let log = self.edits.get(&id).map(|s| s.log.clone()).unwrap_or_default();
             if let Err(e) = self.rebuild_edits(id, log) {
                 log::warn!("the edited copy could not be rebuilt after a failed edit: {e}");
+                if let Some(state) = self.edits.get_mut(&id) {
+                    state.broken = Some(e);
+                }
             }
             return Err(reason);
         }
@@ -863,22 +913,69 @@ impl Worker {
     }
 
     /// The edited copy made again from the file with `log` applied. A
-    /// file that cannot be opened again (moved, taken) leaves the copy
-    /// and its log as they are.
+    /// file that cannot be opened again (moved, taken, changed), or a log
+    /// that does not replay whole, leaves the copy and its log as they
+    /// were: replayed in part, the edits after the one that failed were
+    /// dropped without a word.
     fn rebuild_edits(&mut self, id: DocId, log: Vec<Edit>) -> Result<usize, String> {
-        let path = self.paths.get(&id).cloned().ok_or("no such document")?;
-        let doc = if log.is_empty() { None } else { Some(Document::open(self.api, &path, None).map_err(|e| e.to_string())?) };
+        let doc = if log.is_empty() { None } else { Some(self.open_source(id)?) };
         self.pages.retain(|k, _| k.0 != id);
         self.page_order.retain(|k| k.0 != id);
-        self.edits.remove(&id);
+        let old = self.edits.remove(&id);
         let Some(doc) = doc else { return Ok(0) };
-        let obstacles = doc.edit_obstacles();
-        self.edits.insert(id, EditState { doc, obstacles, log: Vec::new(), edited: HashSet::new(), all_pages: false });
+        self.edits.insert(id, EditState::new(doc));
         let count = log.len();
         for entry in log {
-            self.edit(id, entry)?;
+            if let Err(e) = self.edit(id, entry) {
+                self.pages.retain(|k, _| k.0 != id);
+                self.page_order.retain(|k| k.0 != id);
+                match old {
+                    Some(old) => self.edits.insert(id, old),
+                    None => self.edits.remove(&id),
+                };
+                return Err(e);
+            }
         }
         Ok(count)
+    }
+
+    /// Document `id`'s file opened again, for the edited copy: refused
+    /// when it changed on disk since it was opened (another program saved
+    /// it), as the edits name objects of the pages shown.
+    fn open_source(&self, id: DocId) -> Result<Document, String> {
+        let path = self.paths.get(&id).ok_or("no such document")?;
+        if let Some(stamp) = self.stamps.get(&id)
+            && stamp_of(path).as_ref() != Some(stamp)
+        {
+            return Err(tr!(
+                "the file changed on disk since it was opened; it is to be opened again first",
+                "файл изменился на диске после открытия; его нужно открыть заново"
+            )
+            .into());
+        }
+        Document::open(self.api, path, None).map_err(|e| e.to_string())
+    }
+
+    /// `edit` with the files it reads copied into the engine's folder
+    /// (`edit_files`), so that a replay of the log finds them. An edit
+    /// already reading such a copy (a replay) is left as it is.
+    fn keep_files(&mut self, id: DocId, mut edit: Edit) -> Result<Edit, String> {
+        let dir = std::env::temp_dir().join(format!("metalpdf-edits-{}", std::process::id()));
+        let path = match &mut edit {
+            Edit::ReplaceImage { path, .. } | Edit::InsertPdf { path, .. } | Edit::ReplacePdf { path, .. } => path,
+            _ => return Ok(edit),
+        };
+        if path.starts_with(&dir) {
+            return Ok(edit);
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot keep a copy of {}: {e}", path.display()))?;
+        self.edit_file_count += 1;
+        let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        let copy = dir.join(format!("{}.{ext}", self.edit_file_count));
+        std::fs::copy(&*path, &copy).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        self.edit_files.entry(id).or_default().push(TempFile(copy.clone()));
+        *path = copy;
+        Ok(edit)
     }
 
     /// One page of the search going on, round the document from where it

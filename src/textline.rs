@@ -100,21 +100,37 @@ pub fn lines(objects: &[TextObject]) -> Vec<Line> {
         key(a).cmp(&key(b)).then(b.baseline.total_cmp(&a.baseline)).then(a.start.total_cmp(&b.start))
     });
     // Baselines a little apart sort apart: a line is gathered from every
-    // object still free that continues it, not from neighbours alone.
+    // object still free that continues it, not from neighbours alone. The
+    // objects before `first` are all taken, and those after it in the
+    // sort with a baseline further down than the line can reach (or of
+    // another direction) end the search: a page of 20 000 runs (a chart)
+    // looked through every object for every one.
     let mut used = vec![false; placed.len()];
     let mut out = Vec::new();
+    let direction_of = |p: &Placed| ((p.direction[0] * 100.0).round() as i32, (p.direction[1] * 100.0).round() as i32);
     for first in 0..placed.len() {
         if used[first] {
             continue;
         }
         used[first] = true;
         let mut members = vec![first];
+        let direction = direction_of(&placed[first]);
+        let mut lowest = placed[first].baseline;
+        let mut largest = placed[first].object.font_size.max(0.1);
         loop {
             let last = &placed[*members.last().expect("one at least")];
-            let next = (0..placed.len()).filter(|&j| !used[j] && placed[j].start >= last.start && continues(last, &placed[j])).min_by(|&a, &b| placed[a].start.total_cmp(&placed[b].start));
+            // `continues` takes a baseline within 0.2 of the larger size,
+            // which a size 1.25 times larger widens: half the size bounds it.
+            let floor = lowest - 0.5 * largest * 1.25;
+            let next = (first + 1..placed.len())
+                .take_while(|&j| direction_of(&placed[j]) == direction && placed[j].baseline >= floor)
+                .filter(|&j| !used[j] && placed[j].start >= last.start && continues(last, &placed[j]))
+                .min_by(|&a, &b| placed[a].start.total_cmp(&placed[b].start));
             let Some(next) = next else { break };
             used[next] = true;
             members.push(next);
+            lowest = lowest.min(placed[next].baseline);
+            largest = largest.max(placed[next].object.font_size);
         }
         out.push(join(&members.iter().map(|&m| &placed[m]).collect::<Vec<_>>()));
     }
@@ -288,6 +304,23 @@ mod tests {
         let lines = lines(&objects);
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, ["Answers to even", "Table", "Review Questions"]);
+    }
+
+    #[test]
+    fn a_page_of_many_runs_is_read_in_lines_quickly() {
+        // 200 lines of 100 runs, a chart's labels or a page set glyph by
+        // glyph: each run looked through every other one before.
+        let mut objects = Vec::new();
+        for line in 0..200 {
+            for k in 0..100 {
+                objects.push(run(objects.len(), 10.0 + k as f32 * 9.0, 800.0 - line as f32 * 12.0, "ab"));
+            }
+        }
+        let started = std::time::Instant::now();
+        let lines = lines(&objects);
+        assert_eq!(lines.len(), 200);
+        assert!(lines.iter().all(|l| l.fragments.len() == 100));
+        assert!(started.elapsed().as_secs_f32() < 0.5, "{:?}", started.elapsed());
     }
 
     #[test]

@@ -116,11 +116,23 @@ struct DocumentInner {
     _form_info: Box<sys::FPDF_FORMFILLINFO>,
     _access: Box<sys::FPDF_FILEACCESS>,
     _reader: Box<Reader>,
+    /// The stand-in fonts loaded into the document, by their bytes: each
+    /// loaded once. Loaded again for every edit, each load put another
+    /// font into the file, whole when no run used it any more (an edit of
+    /// a line merging a stand-in run took 0.5 MB, five took 2.3 MB).
+    /// The bytes are held, so their address names no other font.
+    stand_ins: RefCell<std::collections::HashMap<usize, StandIn>>,
 }
+
+/// A stand-in font loaded into a document, and the bytes it came from.
+type StandIn = (std::sync::Arc<Vec<u8>>, sys::FPDF_FONT);
 
 impl Drop for DocumentInner {
     fn drop(&mut self) {
         unsafe {
+            for (_, (_, font)) in self.stand_ins.get_mut().drain() {
+                (self.api.FPDFFont_Close)(font);
+            }
             if !self.form.is_null() {
                 (self.api.FPDFDOC_ExitFormFillEnvironment)(self.form);
             }
@@ -176,7 +188,7 @@ impl Document {
             unsafe { (api.FPDF_SetFormFieldHighlightAlpha)(form, 0) };
         }
         Ok(Document {
-            inner: Rc::new(DocumentInner { api, handle, form, _form_info: form_info, _access: access, _reader: reader }),
+            inner: Rc::new(DocumentInner { api, handle, form, _form_info: form_info, _access: access, _reader: reader, stand_ins: RefCell::default() }),
         })
     }
 
@@ -1216,7 +1228,18 @@ impl Page {
             return Err("the object could not be removed".into());
         }
         unsafe { (api.FPDFPageObj_Destroy)(object) };
+        self.forget_text();
         self.content_changed()
+    }
+
+    /// The text page closed, read again when next asked: it points into
+    /// the page's objects, and one was destroyed (an error after that,
+    /// with the page kept in the engine's cache, left it pointing at freed
+    /// memory).
+    fn forget_text(&self) {
+        if let Some(text) = self.text.take() {
+            unsafe { (self.api().FPDFText_ClosePage)(text) };
+        }
     }
 
     /// Put the picture in `path` (JPEG or PNG) into image object `index`,
@@ -1319,6 +1342,39 @@ impl Page {
         let Some(text_page) = self.text_page() else {
             return Vec::new();
         };
+        // Every object's text in one pass over the text page: the
+        // characters it made up left out (a space where two runs are a
+        // word apart, which `FPDFTextObj_GetText` gave the run before, and
+        // an edit then wrote as a real one), and once for the page, where
+        // `FPDFTextObj_GetText` walks every character of the page for each
+        // object (20 000 runs of a chart took 2 s).
+        let mut texts: std::collections::HashMap<sys::FPDF_PAGEOBJECT, Vec<u16>> = std::collections::HashMap::new();
+        let mut last: Option<(sys::FPDF_PAGEOBJECT, Vec<u16>)> = None;
+        for i in 0..unsafe { (api.FPDFText_CountChars)(text_page) }.max(0) {
+            if unsafe { (api.FPDFText_IsGenerated)(text_page, i) } != 0 {
+                continue;
+            }
+            let object = unsafe { (api.FPDFText_GetTextObject)(text_page, i) };
+            if object.is_null() {
+                continue;
+            }
+            let code = unsafe { (api.FPDFText_GetUnicode)(text_page, i) };
+            // The runs come in order: the one being read is kept aside.
+            if last.as_ref().is_none_or(|(o, _)| *o != object) {
+                if let Some((o, units)) = last.take() {
+                    texts.entry(o).or_default().extend(units);
+                }
+                last = Some((object, Vec::new()));
+            }
+            let units = &mut last.as_mut().expect("set above").1;
+            match char::from_u32(code) {
+                Some(c) if code > 0xFFFF => units.extend(c.encode_utf16(&mut [0; 2]).iter()),
+                _ => units.push(code as u16),
+            }
+        }
+        if let Some((o, units)) = last {
+            texts.entry(o).or_default().extend(units);
+        }
         let count = unsafe { (api.FPDFPage_CountObjects)(self.handle.get()) }.max(0);
         let mut out = Vec::new();
         for index in 0..count {
@@ -1336,7 +1392,7 @@ impl Page {
             if unsafe { (api.FPDFPageObj_GetBounds)(object, &mut l, &mut b, &mut r, &mut t) } == 0 {
                 continue;
             }
-            let text = utf16_text(|buf, len| unsafe { (api.FPDFTextObj_GetText)(object, text_page, buf.cast(), len) }).unwrap_or_default();
+            let text = texts.get(&object).map(|units| String::from_utf16_lossy(units)).unwrap_or_default();
             let mut size = 0f32;
             unsafe { (api.FPDFTextObj_GetFontSize)(object, &mut size) };
             let font = unsafe { (api.FPDFTextObj_GetFont)(object) };
@@ -1425,6 +1481,7 @@ impl Page {
                     return Err("a run of the line could not be removed".into());
                 }
                 (api.FPDFPageObj_Destroy)(object);
+                self.forget_text();
             }
         }
         let delta = reach(new) - old_reach;
@@ -1522,13 +1579,23 @@ impl Page {
                 let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 255u32);
                 unsafe { (api.FPDFPageObj_GetFillColor)(object, &mut r, &mut g, &mut b, &mut a) };
                 let mode = unsafe { (api.FPDFTextObj_GetTextRenderMode)(object) };
-                let new_font = unsafe { (api.FPDFText_LoadFont)(self.doc.handle, bytes.as_ptr(), bytes.len() as u32, sys::FPDF_FONT_TRUETYPE, 1) };
-                if new_font.is_null() {
-                    return Err("the fallback font could not be loaded".into());
-                }
+                // Loaded once per document (`DocumentInner::stand_ins`), kept
+                // open until the document closes.
+                let key = bytes.as_ptr() as usize;
+                let cached = self.doc.stand_ins.borrow().get(&key).map(|(_, font)| *font);
+                let new_font = match cached {
+                    Some(font) => font,
+                    None => {
+                        let font = unsafe { (api.FPDFText_LoadFont)(self.doc.handle, bytes.as_ptr(), bytes.len() as u32, sys::FPDF_FONT_TRUETYPE, 1) };
+                        if font.is_null() {
+                            return Err("the fallback font could not be loaded".into());
+                        }
+                        self.doc.stand_ins.borrow_mut().insert(key, (std::sync::Arc::clone(&bytes), font));
+                        font
+                    }
+                };
                 let new = unsafe { (api.FPDFPageObj_CreateTextObj)(self.doc.handle, new_font, size) };
                 if new.is_null() {
-                    unsafe { (api.FPDFFont_Close)(new_font) };
                     return Err("a text object could not be made".into());
                 }
                 unsafe {
@@ -1565,14 +1632,13 @@ impl Page {
                     if (api.FPDFPage_RemoveObject)(self.handle.get(), object) == 0 {
                         // Both would show, one over the other.
                         (api.FPDFPageObj_Destroy)(new);
-                        (api.FPDFFont_Close)(new_font);
                         return Err("the old text could not be removed".into());
                     }
                     (api.FPDFPageObj_Destroy)(object);
+                    self.forget_text();
                     if (api.FPDFPage_InsertObjectAtIndex)(self.handle.get(), new, index) == 0 {
                         (api.FPDFPage_InsertObject)(self.handle.get(), new);
                     }
-                    (api.FPDFFont_Close)(new_font);
                 }
                 new
             }
@@ -3016,6 +3082,58 @@ pub mod tests {
         drop(page);
         drop(again);
         std::fs::remove_file(path).ok();
+        std::fs::remove_file(saved).ok();
+    }
+
+    /// Three runs of a subset each set in a stand-in: the stand-in is
+    /// loaded into the document once, so the saved file has one font for
+    /// them (loaded for every edit, each load was a font of its own, and
+    /// one no run used any more was saved whole).
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn a_stand_in_font_is_loaded_once() {
+        let api = api();
+        let src = sample_file("stand-in-once");
+        let doc = Document::open(api, &src, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let arial = std::fs::read(r"C:\Windows\Fonts\arial.ttf").unwrap();
+        unsafe {
+            let font = (api.FPDFText_LoadFont)(doc.inner.handle, arial.as_ptr(), arial.len() as u32, sys::FPDF_FONT_TRUETYPE, 1);
+            for (i, text) in ["Ab", "Cd", "Ef"].iter().enumerate() {
+                let obj = (api.FPDFPageObj_CreateTextObj)(doc.inner.handle, font, 14.0);
+                let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+                (api.FPDFText_SetText)(obj, wide.as_ptr());
+                let m = sys::FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 72.0, f: 500.0 - 30.0 * i as f32 };
+                (api.FPDFPageObj_SetMatrix)(obj, &m);
+                (api.FPDFPage_InsertObject)(page.handle.get(), obj);
+            }
+            assert_ne!((api.FPDFPage_GenerateContent)(page.handle.get()), 0);
+            (api.FPDFFont_Close)(font);
+        }
+        let subset_file = std::env::temp_dir().join(format!("metalpdf_stand_in_once_{}.pdf", std::process::id()));
+        doc.save_to(&subset_file).unwrap();
+        drop(page);
+        drop(doc);
+        let doc = Document::open(api, &subset_file, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let mut fonts = crate::fonts::Fonts::default();
+        for text in ["Ab", "Cd", "Ef"] {
+            let run = page.text_objects().into_iter().find(|o| o.text.trim() == text).expect("the run");
+            assert!(run.subset);
+            // Cyrillic: the subset has none of it.
+            assert_eq!(page.set_text(run.index, "Привет", &mut |name, flags| fonts.get(name, flags)).unwrap(), Replaced::FallbackFont);
+        }
+        drop(page);
+        let saved = std::env::temp_dir().join(format!("metalpdf_stand_in_once_saved_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(doc);
+        let bytes = std::fs::read(&saved).unwrap();
+        let files = bytes.windows(10).filter(|w| w == b"/FontFile2").count();
+        println!("{} bytes, {files} embedded fonts", bytes.len());
+        // The first subset (the runs' own font, unused now) and one stand-in.
+        assert!(files <= 2, "{files} embedded fonts");
+        std::fs::remove_file(src).ok();
+        std::fs::remove_file(subset_file).ok();
         std::fs::remove_file(saved).ok();
     }
 
