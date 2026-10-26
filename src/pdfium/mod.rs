@@ -1020,7 +1020,10 @@ impl Page {
         if let (Some(before), Some(after)) = (&before, &after) {
             let changed = boxes_apart(before, after, size, None).len();
             if changed > 0 {
-                return Err(format!("the page's content cannot be written back as it is ({changed} parts of the page are filled with a pattern, which PDFium's writer does not keep)"));
+                return Err(tr!(
+                    format!("the page's content cannot be written back as it is ({changed} parts of the page are filled with a pattern, which PDFium's writer does not keep)"),
+                    format!("содержимое страницы нельзя записать как есть (частей страницы с заливкой узором, который PDFium не сохраняет: {changed})")
+                ));
             }
         }
         if unsafe { (api.FPDFPage_GenerateContent)(self.handle.get()) } == 0 {
@@ -1047,8 +1050,13 @@ impl Page {
         if wanted != written {
             unsafe { (api.FPDF_ClosePage)(again) };
             const KINDS: [&str; 6] = ["objects", "text", "paths", "pictures", "shadings", "forms"];
-            let lost: Vec<String> = (0..6).filter(|&k| written[k] < wanted[k]).map(|k| format!("{} {}", wanted[k] - written[k], KINDS[k])).collect();
-            return Err(format!("the page's content cannot be written back whole ({} would be lost)", lost.join(", ")));
+            const KINDS_RU: [&str; 6] = ["объекты", "текст", "контуры", "изображения", "градиенты", "формы"];
+            let kinds = tr!(KINDS, KINDS_RU);
+            let lost: Vec<String> = (0..6).filter(|&k| written[k] < wanted[k]).map(|k| format!("{} {}", wanted[k] - written[k], kinds[k])).collect();
+            return Err(tr!(
+                format!("the page's content cannot be written back whole ({} would be lost)", lost.join(", ")),
+                format!("содержимое страницы нельзя записать целиком (потерялось бы: {})", lost.join(", "))
+            ));
         }
         // The writer leaves out the character and word spacing (`Tc`,
         // `Tw`) and keeps the `TJ` kerning: a run set with them parses
@@ -1080,7 +1088,10 @@ impl Page {
         log::debug!("page {}: content written anew, {changed} boxes look different", self.index + 1);
         if changed > 0 {
             unsafe { (api.FPDF_ClosePage)(again) };
-            return Err(format!("the page's content cannot be written back as it is ({changed} parts of the page would look different: a soft mask or a font PDFium's writer does not keep)"));
+            return Err(tr!(
+                format!("the page's content cannot be written back as it is ({changed} parts of the page would look different: a soft mask or a font PDFium's writer does not keep)"),
+                format!("содержимое страницы нельзя записать как есть (изменились бы части страницы: {changed}; мягкая маска или шрифт, которые PDFium не сохраняет)")
+            ));
         }
         // The parsed page stands in for the one edited in memory from
         // here on: what is shown is what a save writes. The writer leaves

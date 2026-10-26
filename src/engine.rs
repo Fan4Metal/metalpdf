@@ -37,9 +37,11 @@ pub fn too_large(width: u32, height: u32, max_side: u64) -> bool {
 }
 
 /// The height in pixels of a page of `turned` size rendered `width` wide
-/// (the sum `Worker::render` makes).
+/// (the sum `Worker::render` makes). Bounded far above any page in view
+/// (a page is placed at that height for a tile, an `int`): at 1e5 a long
+/// receipt at a high zoom rendered squeezed, its tiles off the text boxes.
 pub fn pixel_height(turned: [f32; 2], width: u32) -> u32 {
-    ((width as f32) * turned[1] / turned[0].max(1.0)).round().clamp(1.0, 1.0e5) as u32
+    ((width as f32) * turned[1] / turned[0].max(1.0)).round().clamp(1.0, 1.0e8) as u32
 }
 /// Page sizes are read in batches of this many.
 pub const SIZE_BATCH: usize = 128;
@@ -380,7 +382,12 @@ impl Edit {
 /// Whether the document's `obstacles` (`Document::edit_obstacles`) rule
 /// edits out: a signed or encrypted document takes none.
 fn refuse(obstacles: &[&'static str]) -> Result<(), String> {
-    if obstacles.is_empty() { Ok(()) } else { Err(format!("the document is {}", obstacles.join(" and "))) }
+    if obstacles.is_empty() {
+        return Ok(());
+    }
+    // Shown in the toolbar's note: in the interface's language.
+    let ru: Vec<&str> = obstacles.iter().map(|&o| if o == "signed" { "подписан" } else { "зашифрован" }).collect();
+    Err(tr!(format!("the document is {}", obstacles.join(" and ")), format!("документ {}", ru.join(" и "))))
 }
 
 struct EditState {
@@ -726,7 +733,7 @@ impl Worker {
                     .and_then(|source| doc.import_pages(&source, *page + 1))
                     .and_then(|_| doc.delete_page(*page)),
                 Edit::DeletePage { page } => {
-                    if doc.page_count() <= 1 { Err("the last page stays".into()) } else { doc.delete_page(*page) }
+                    if doc.page_count() <= 1 { Err(tr!("the last page stays", "последняя страница остаётся").into()) } else { doc.delete_page(*page) }
                 }
                 _ => unreachable!("not a page edit"),
             };
@@ -746,12 +753,15 @@ impl Worker {
         // leaves out text in Type 3 fonts: such a page takes no edit, or
         // that text would be lost when saved.
         if self.page(id, page).is_some_and(Page::has_type3_text) {
-            return Err("the page has text in a Type 3 font, which PDFium cannot write back".into());
+            return Err(tr!("the page has text in a Type 3 font, which PDFium cannot write back", "на странице есть текст шрифтом Type 3, который PDFium не умеет записать").into());
         }
         // Nor does it tell two fonts of one name apart: the other's
         // runs would be written in the wrong font.
         if let Some(name) = self.page(id, page).and_then(Page::clashing_fonts) {
-            return Err(format!("the page has two different fonts named {name}, which PDFium would write as one"));
+            return Err(tr!(
+                format!("the page has two different fonts named {name}, which PDFium would write as one"),
+                format!("на странице два разных шрифта с именем {name}, PDFium записал бы их как один")
+            ));
         }
         // The page comes from the edited copy from now on.
         self.pages.remove(&(id, page));

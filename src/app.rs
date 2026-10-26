@@ -411,6 +411,9 @@ pub struct App {
     printing: Option<(DocId, usize, usize)>,
     /// The reader chose to quit with unsaved edits: the close goes on.
     quitting: bool,
+    /// `logic` answered the root's close this pass (it was minimized):
+    /// `window_ui` leaves it alone.
+    root_close_handled: bool,
     /// The tab to close once its Save As (asked when closing it) is done.
     close_after_save: Option<u64>,
     /// The window About, the print dialog and the confirmations are drawn
@@ -622,6 +625,7 @@ impl App {
             printing: None,
             sidebar_before_search: None,
             quitting: false,
+            root_close_handled: false,
             close_after_save: None,
             modal_window: None,
         };
@@ -728,8 +732,12 @@ impl App {
             let w = self.win();
             (w.id, w.tabs[index].id, w.tabs[index].doc.modified)
         };
-        if modified && self.confirm.is_none() {
-            self.confirm = Some(Confirm::CloseTab { window, tab: tab_id });
+        // Edits are never dropped unasked: with another question open (in
+        // another window) the tab stays.
+        if modified {
+            if self.confirm.is_none() {
+                self.confirm = Some(Confirm::CloseTab { window, tab: tab_id });
+            }
             return;
         }
         let tab = self.win().remove_tab(index);
@@ -824,6 +832,8 @@ impl App {
                 t.editor = None;
                 t.image = None;
                 t.selection = None;
+                // Keyed by the old document: waited for, they never came.
+                t.tiles.clear();
                 t.find.close();
                 return;
             }
@@ -988,8 +998,11 @@ impl App {
         self.confirm = None;
         match (confirm, choice) {
             (Confirm::CloseTab { window, tab }, 0) => {
-                // Closed once saved (not when the dialog is cancelled).
-                self.close_after_save = Some(tab);
+                // Closed once saved (not when the dialog is cancelled; and
+                // not marked when no dialog opens, another being open).
+                if !self.dialogs.open() {
+                    self.close_after_save = Some(tab);
+                }
                 self.save_as(ctx, window, tab);
             }
             (Confirm::CloseTab { window, tab }, 1) => self.force_close_tab(window, tab),
@@ -1137,17 +1150,27 @@ impl App {
                         let mut reopen = false;
                         // The tab was being closed when it asked to save.
                         let mut close = None;
-                        let close_after_save = self.close_after_save.take();
                         if let Some((window, tab)) = self.windows.iter_mut().flat_map(|w| {
                             let id = w.id;
                             w.tabs.iter_mut().map(move |t| (id, t))
                         }).find(|(_, t)| t.doc.id == doc) {
+                            // Only this tab's save answers its close.
+                            let closing = self.close_after_save == Some(tab.id);
+                            if closing {
+                                self.close_after_save = None;
+                            }
                             match result {
                                 Ok(()) => {
                                     tab.doc.modified = false;
                                     tab.notify(tr!(format!("Saved to {}", path.display()), format!("Сохранено в {}", path.display())));
-                                    reopen = same_path(path, &tab.path);
-                                    if close_after_save == Some(tab.id) {
+                                    // The tab goes on with the file saved, which
+                                    // has the edits: kept on the original, the
+                                    // session opened that one without them.
+                                    if !same_path(path, &tab.path) {
+                                        tab.path = path.clone();
+                                    }
+                                    reopen = true;
+                                    if closing {
                                         close = Some((window, tab.id));
                                     }
                                 }
@@ -1157,6 +1180,8 @@ impl App {
                         if let Some((window, tab)) = close {
                             self.force_close_tab(window, tab);
                         } else if reopen {
+                            self.settings.add_recent(path);
+                            self.settings_dirty = true;
                             self.reopen_tab(doc);
                         }
                         continue;
@@ -1433,17 +1458,19 @@ impl App {
         {
             tab.find.open();
         }
-        if consume(Modifiers::NONE, Key::F3)
-            && let Some(tab) = self.win().active_tab_mut()
-            && tab.find.open
-        {
-            tab.find.step(true);
-        }
+        // egui's `consume_key` lets an extra Shift through: the Shift
+        // variants come first, else the plain one takes them.
         if consume(Modifiers::SHIFT, Key::F3)
             && let Some(tab) = self.win().active_tab_mut()
             && tab.find.open
         {
             tab.find.step(false);
+        }
+        if consume(Modifiers::NONE, Key::F3)
+            && let Some(tab) = self.win().active_tab_mut()
+            && tab.find.open
+        {
+            tab.find.step(true);
         }
         // The page field takes its own Escape (the text put back).
         let page_field = self.win().page_field.typing;
@@ -1480,8 +1507,9 @@ impl App {
             && let Some(tab) = self.win().active_tab_mut() {
                 tab.go_forward();
             }
-        if consume(Modifiers::COMMAND, Key::A)
-            && !typing
+        // Typing, Ctrl+A is the text field's.
+        if !typing
+            && consume(Modifiers::COMMAND, Key::A)
             && let Some(tab) = self.win().active_tab_mut()
         {
             let page = tab.view.current;
@@ -1544,13 +1572,13 @@ impl App {
         }
         let count = self.win().tabs.len();
         if count > 1 {
-            if consume(Modifiers::COMMAND, Key::Tab) {
-                let w = self.win();
-                w.active = (w.active + 1) % count;
-            }
             if consume(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab) {
                 let w = self.win();
                 w.active = (w.active + count - 1) % count;
+            }
+            if consume(Modifiers::COMMAND, Key::Tab) {
+                let w = self.win();
+                w.active = (w.active + 1) % count;
             }
         }
         if typing {
@@ -1569,11 +1597,11 @@ impl App {
         let sizes = tab.doc.sizes.clone();
         let fallback = tab.doc.fallback;
         let view = &mut tab.view;
-        if consume(Modifiers::NONE, Key::PageDown) || consume(Modifiers::NONE, Key::Space) {
-            view.page_step(&layout, true, count);
-        }
         if consume(Modifiers::NONE, Key::PageUp) || consume(Modifiers::SHIFT, Key::Space) {
             view.page_step(&layout, false, count);
+        }
+        if consume(Modifiers::NONE, Key::PageDown) || consume(Modifiers::NONE, Key::Space) {
+            view.page_step(&layout, true, count);
         }
         if consume(Modifiers::NONE, Key::Home) || consume(Modifiers::COMMAND, Key::Home) {
             view.go_to_page(0, count);
@@ -1632,11 +1660,11 @@ impl App {
         if consume(Modifiers::COMMAND, Key::Minus) {
             view.zoom_step(false, None, &sizes, fallback);
         }
-        if consume(Modifiers::NONE, Key::R) {
-            view.rotate(true);
-        }
         if consume(Modifiers::SHIFT, Key::R) {
             view.rotate(false);
+        }
+        if consume(Modifiers::NONE, Key::R) {
+            view.rotate(true);
         }
         if let Some(zoom) = chosen {
             self.remember_zoom(zoom);
@@ -1743,17 +1771,18 @@ impl App {
                     log::info!("link to {uri} not followed");
                 }
             }
-            Target::Page { index, y, .. } => {
+            Target::Page { index, x, y } => {
                 let engine = &self.engine;
                 if let Some(tab) = self.windows[self.current].active_tab_mut() {
                     let count = tab.doc.page_count;
                     tab.remember();
-                    match (y, tab.doc.text.get(&index)) {
-                        // The point on the page, through the page's transform.
-                        (Some(y), Some(text)) => {
-                            let p = text.to_page_points(0.0, y);
-                            let h = tab.doc.size_of(index)[1];
-                            tab.view.go_to_point(index, p[1], count, h);
+                    match (x, y, tab.doc.text.get(&index)) {
+                        // The point on the page, through the page's transform;
+                        // turned on its side, the page's top without an `x`.
+                        (x, Some(y), Some(text)) if x.is_some() || tab.view.turns % 2 == 0 => {
+                            let p = text.to_page_points(x.unwrap_or(0.0), y);
+                            let size = tab.doc.size_of(index);
+                            tab.view.go_to_point(index, [p[0], p[1], 0.0, 0.0], size, 0.0, count);
                         }
                         _ => tab.view.go_to_page(index, count),
                     }
@@ -1884,12 +1913,12 @@ impl App {
             Some(text) => {
                 let r = text.rect_to_page(rect);
                 let count = tab.doc.page_count;
-                let h = tab.doc.size_of(page)[1];
+                let size = tab.doc.size_of(page);
                 tab.find.jump = false;
                 tab.remember();
                 // The hit a third of the way down the view.
                 let above = tab.view.viewport[1] / 3.0 / tab.layout().scale.max(0.01);
-                tab.view.go_to_point(page, r[1] - above, count, h);
+                tab.view.go_to_point(page, r, size, above, count);
                 tab.doc.need_sizes_near(engine, page);
             }
             None => tab.doc.need_text(engine, page),
@@ -2273,12 +2302,44 @@ impl App {
         self.focused = id;
     }
 
+    /// The root window was told to close (its button, or the taskbar's
+    /// while it is minimized). With other windows open, it closes its own
+    /// tabs and takes over another window's (asking first about its
+    /// edits); alone, it quits, which asks about every document and a
+    /// print job.
+    fn root_close(&mut self, ctx: &egui::Context, maximized: bool) {
+        let window = self.windows[0].id;
+        let unsaved = self.windows[0].tabs.iter().any(|t| t.doc.modified);
+        let others = self.windows.len() > 1;
+        if self.quitting {
+            // Confirmed: the window goes.
+        } else if others && unsaved {
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::CancelClose);
+            self.confirm = Some(Confirm::CloseTabs { window, keep: None });
+        } else if others {
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::CancelClose);
+            self.adopt_window(ctx, maximized);
+        } else if self.all_tabs().any(|t| t.doc.modified) || self.printing.is_some() {
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::CancelClose);
+            self.confirm = Some(Confirm::Quit);
+        }
+    }
+
     /// The root window was told to close while detached windows exist: its
     /// tabs close, and it takes the place and the tabs of the window the
     /// reader used last, which goes away. Child viewports cannot outlive
     /// the root, so this keeps that window open as the reader expects.
     fn adopt_window(&mut self, ctx: &egui::Context, root_maximized: bool) {
-        let child = self.window_index(self.focused).filter(|&i| i != 0).unwrap_or(1);
+        let Some(child) = self.window_index(self.focused).filter(|&i| i != 0).or((self.windows.len() > 1).then_some(1)) else {
+            // No other window any more (it closed while the question was
+            // open): the root's tabs close and the program quits.
+            for tab in std::mem::take(&mut self.windows[0].tabs) {
+                self.drop_tab(tab);
+            }
+            self.quitting = true;
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+            return;
+        };
         let closed = std::mem::take(&mut self.windows[0].tabs);
         for tab in closed {
             self.drop_tab(tab);
@@ -2608,21 +2669,8 @@ impl App {
             let window = self.windows[cur].id;
             let unsaved = self.windows[cur].tabs.iter().any(|t| t.doc.modified);
             if cur == 0 {
-                // With other windows open, closing the root closes its
-                // own tabs and takes over another window's; alone, it
-                // quits, which asks about every document and a print job.
-                let others = self.windows.len() > 1;
-                if self.quitting {
-                    // Confirmed: the window goes.
-                } else if others && unsaved {
-                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                    self.confirm = Some(Confirm::CloseTabs { window, keep: None });
-                } else if others {
-                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                    self.adopt_window(&ctx, maximized);
-                } else if self.all_tabs().any(|t| t.doc.modified) || self.printing.is_some() {
-                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                    self.confirm = Some(Confirm::Quit);
+                if !self.root_close_handled {
+                    self.root_close(&ctx, maximized);
                 }
             } else if unsaved && self.confirm.is_none() {
                 self.confirm = Some(Confirm::CloseTabs { window, keep: None });
@@ -2801,6 +2849,18 @@ impl eframe::App for App {
         }
         if self.raise.swap(false, Ordering::Acquire) {
             self.raise_window(ctx);
+        }
+        // Closed from the taskbar while minimized: eframe runs no `ui`
+        // then, and without an answer here the program quit, edits and
+        // print job unasked. The question needs the window shown.
+        self.root_close_handled = false;
+        let (close, minimized, maximized) = ctx.input(|i| (i.viewport().close_requested(), i.viewport().minimized.unwrap_or(false), i.viewport().maximized.unwrap_or(false)));
+        if close && minimized {
+            self.root_close_handled = true;
+            self.root_close(ctx, maximized);
+            if self.confirm.is_some() {
+                self.raise_window(ctx);
+            }
         }
     }
 

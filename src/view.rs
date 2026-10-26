@@ -144,12 +144,24 @@ impl ViewState {
         self.anchor = Layout::anchor_to_page(page);
     }
 
-    /// Go to `page` with the point `y` points down the page (unrotated
-    /// page points) at the top of the view.
-    pub fn go_to_point(&mut self, page: usize, y_points: f32, count: usize, page_height_points: f32) {
+    /// Go to `page` with the top of `rect` (`[x, y, w, h]` on the
+    /// unrotated page, points, y down) `above` points (of the page as
+    /// turned) below the top of the view; `size` is the unrotated page's.
+    /// The anchor counts down the page as it is drawn, turned: the top of
+    /// a rectangle is its least `y` upright, its least `x` a quarter turn
+    /// clockwise, and so on.
+    pub fn go_to_point(&mut self, page: usize, rect: [f32; 4], size: [f32; 2], above: f32, count: usize) {
         let page = page.min(count.saturating_sub(1));
         self.forward = page >= self.anchor.page;
-        let offset = if page_height_points > 0.0 { (y_points / page_height_points).clamp(-0.01, 1.0) } else { 0.0 };
+        let [w, h] = size;
+        let [x, y, rw, rh] = rect;
+        let (top, height) = match self.turns % 4 {
+            0 => (y, h),
+            1 => (x, w),
+            2 => (h - (y + rh), h),
+            _ => (w - (x + rw), w),
+        };
+        let offset = if height > 0.0 { ((top - above) / height).clamp(-0.01, 1.0) } else { 0.0 };
         self.anchor = Anchor { page, offset };
     }
 
@@ -374,8 +386,10 @@ impl ViewState {
         let cursor = cursor.unwrap_or([self.viewport[0] / 2.0, self.viewport[1] / 2.0]);
         let scroll = before.scroll_of(self.anchor);
         let doc = [self.scroll_x + cursor[0], scroll + cursor[1]];
-        // The page under the cursor and the point's share of it.
-        let page = before.anchor_at(doc[1], self.viewport[1]).page;
+        // The page under the cursor and the point's share of it; in
+        // single-page mode the page shown, as the layout has the next one
+        // under it where the view shows the backdrop.
+        let page = if self.mode == ViewMode::Single { self.anchor.page } else { before.anchor_at(doc[1], self.viewport[1]).page };
         let p = before.pages.get(page).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
         let frac = [(doc[0] - p[0]) / p[2].max(1.0), (doc[1] - p[1]) / p[3].max(1.0)];
         self.zoom = zoom;
@@ -535,6 +549,34 @@ mod tests {
         // In, with the pointer at the area's top.
         view.set_zoom(ZoomSetting::Scale(2.0), Some([500.0, 2.0]), &s, A4);
         assert_eq!(view.anchor.page, 3);
+        // Out with the pointer under a page that is shorter than the view,
+        // where the layout has the next page and the view the backdrop.
+        view.set_zoom(ZoomSetting::Scale(0.4), None, &s, A4);
+        view.set_zoom(ZoomSetting::Scale(0.3), Some([500.0, 790.0]), &s, A4);
+        assert_eq!(view.anchor.page, 3);
+    }
+
+    #[test]
+    fn a_point_is_gone_to_on_the_page_as_turned() {
+        let mut view = ViewState::new(ViewMode::Continuous, ZoomSetting::Scale(1.0));
+        view.viewport = [1000.0, 800.0];
+        let [w, h] = A4;
+        // A box near the top left of the upright page.
+        let rect = [50.0, 100.0, 20.0, 10.0];
+        let offsets: Vec<f32> = (0..4)
+            .map(|turns| {
+                view.turns = turns;
+                view.go_to_point(2, rect, A4, 0.0, 5);
+                view.anchor.offset
+            })
+            .collect();
+        // Upright, down by its y; a quarter turn clockwise puts the page's
+        // left edge at the top; upside down, its bottom; three quarters,
+        // its right edge.
+        let want = [100.0 / h, 50.0 / w, (h - 110.0) / h, (w - 70.0) / w];
+        for (got, want) in offsets.iter().zip(want) {
+            assert!((got - want).abs() < 1e-4, "{offsets:?}");
+        }
     }
 
     #[test]

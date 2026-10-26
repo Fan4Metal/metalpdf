@@ -342,8 +342,23 @@ impl Settings {
         location()
             .file
             .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|path| {
+                let bytes = std::fs::read(path).ok()?;
+                // The portable zip ships the file empty.
+                if bytes.iter().all(u8::is_ascii_whitespace) {
+                    return None;
+                }
+                match serde_json::from_slice(&bytes) {
+                    Ok(settings) => Some(settings),
+                    Err(e) => {
+                        // Not written over unseen by the defaults at the
+                        // next save: kept beside it as `.bad`.
+                        log::warn!("settings unreadable ({e}): kept as .bad, the defaults used");
+                        let _ = std::fs::copy(path, path.with_extension("json.bad"));
+                        None
+                    }
+                }
+            })
             .map(|mut s: Settings| {
                 if let ZoomSetting::Scale(z) = s.zoom
                     && !(crate::layout::MIN_ZOOM..=crate::layout::MAX_ZOOM).contains(&z)

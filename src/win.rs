@@ -78,6 +78,24 @@ pub fn double_click_time() -> f64 {
     unsafe { GetDoubleClickTime() as f64 / 1000.0 }
 }
 
+/// Whether `path` is on the network: a UNC path (`\\server\share`, and
+/// `\\?\UNC\…`) or a mapped drive. Asking such a path whether its file is
+/// there waits for the share's timeout when the share is away.
+pub fn is_remote(path: &std::path::Path) -> bool {
+    use std::path::{Component, Prefix};
+    let Some(Component::Prefix(prefix)) = path.components().next() else { return false };
+    match prefix.kind() {
+        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            // DRIVE_REMOTE (winbase.h; its feature is not worth one constant).
+            const DRIVE_REMOTE: u32 = 4;
+            let root = wide(format!("{}:\\", letter as char));
+            unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
+        }
+        _ => false,
+    }
+}
+
 /// The mouse pointer's position in the client area of `hwnd`, in
 /// physical pixels, as the system has it now.
 pub fn cursor_pos(hwnd: isize) -> Option<[f32; 2]> {
@@ -196,5 +214,21 @@ fn winhttp_error() -> String {
         12029 | 12030 => "the connection to the server failed".into(),
         12175 => "the secure connection failed".into(),
         _ => format!("WinHTTP error {code}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn network_paths_are_told_apart() {
+        assert!(is_remote(Path::new(r"\\server\share\a.pdf")));
+        assert!(is_remote(Path::new(r"\\?\UNC\server\share\a.pdf")));
+        assert!(!is_remote(Path::new(r"relative\a.pdf")));
+        // The system drive is local.
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        assert!(!is_remote(Path::new(&format!(r"{system}\Windows"))));
     }
 }

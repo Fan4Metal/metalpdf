@@ -240,7 +240,9 @@ impl PrintDialog {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 let text = |s: &str| RichText::new(s).size(16.0);
-                let ready = self.state.is_some() && chosen.is_ok() && self.properties.is_none();
+                // Not while a printer or its settings are being asked: the
+                // state is still the one before (another printer, maybe).
+                let ready = self.state.is_some() && chosen.is_ok() && self.properties.is_none() && self.pending.is_none();
                 if ui.add_enabled(ready, egui::Button::new(text(tr!("Print", "Печать"))).min_size(vec2(160.0, 34.0))).clicked() {
                     print = true;
                 }

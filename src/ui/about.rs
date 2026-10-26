@@ -69,8 +69,8 @@ impl AboutDialog {
                 // One sentence, the same as Cargo.toml's description and
                 // the README tagline; the Russian one is written by hand.
                 ui.label(tr!(
-                    "Short description of the program for Windows.",
-                    "Краткое описание программы для Windows."
+                    "Fast PDF viewer for Windows",
+                    "Быстрый просмотрщик PDF для Windows"
                 ));
                 ui.add_space(8.0);
                 if !AUTHORS.is_empty() {

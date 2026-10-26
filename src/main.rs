@@ -196,9 +196,10 @@ fn main() -> eframe::Result {
     // Without files, the last session's tabs (those still there).
     let (tabs, active, restored) = if files.is_empty() {
         // A network share that is away blocks `is_file` for its timeout,
-        // before the window: a UNC path is taken on trust (a file gone
-        // makes a tab with the error).
-        let session: Vec<PathBuf> = settings.session.iter().filter(|p| p.starts_with(r"\\") || p.is_file()).cloned().collect();
+        // before the window: a path on the network is taken on trust (a
+        // file gone makes a tab with the error). `Path::starts_with(r"\\")`
+        // compares components and never matched a UNC path.
+        let session: Vec<PathBuf> = settings.session.iter().filter(|p| win::is_remote(p) || p.is_file()).cloned().collect();
         let active = settings.session_active.min(session.len().saturating_sub(1));
         (session, active, true)
     } else {
