@@ -196,11 +196,17 @@ pub fn first_page(read: &mut Read, len: u64, side: u32) -> Option<Picture> {
     picture
 }
 
+/// The longest side a thumbnail is drawn at.
+const MAX_SIDE: u32 = 4096;
+
 fn render(api: &Api, doc: FPDF_DOCUMENT, side: u32) -> Option<Picture> {
     let mut size = FS_SIZEF::default();
     if unsafe { (api.FPDF_GetPageSizeByIndexF)(doc, 0, &mut size) } == 0 || !(size.width > 0.0 && size.height > 0.0) {
         return None;
     }
+    // Explorer asks at most 2560; another caller may ask any size, and a
+    // buffer of gigabytes would end the surrogate (`panic = "abort"`).
+    let side = side.min(MAX_SIDE);
     let scale = side as f32 / size.width.max(size.height);
     let width = ((size.width * scale).round() as u32).clamp(1, side);
     let height = ((size.height * scale).round() as u32).clamp(1, side);

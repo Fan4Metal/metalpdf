@@ -70,9 +70,9 @@ Name: "assoc"; Description: "{cm:AssocTask}"; GroupDescription: "{cm:AssocGroup}
 [Files]
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; The rendering engine (PDFium), loaded from the program's folder.
-Source: "..\target\release\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion; BeforeInstall: MoveAside
 ; The thumbnail provider Explorer loads for PDF files (registered by --register).
-Source: "..\target\release\metalpdf_thumbs.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\metalpdf_thumbs.dll"; DestDir: "{app}"; Flags: ignoreversion; BeforeInstall: MoveAside
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\licenses\PDFium-LICENSE.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
@@ -116,19 +116,16 @@ Type: files; Name: "{app}\pdfium.dll.old"
 // Explorer's surrogate (dllhost.exe) keeps the thumbnail provider, and the
 // pdfium.dll it loads, loaded for a while after drawing thumbnails, and a
 // loaded DLL cannot be overwritten, only renamed: the old one is moved
-// aside before the files are copied and deleted at the next installation.
-procedure MoveAside(Dll: String);
+// aside just before its file is copied (BeforeInstall: done for both at
+// the start, an installation stopped at the exe, which comes first, left
+// the old exe without its DLLs, as the rollback does not undo [Code]),
+// and deleted at the next installation.
+procedure MoveAside;
+var
+  Dll: String;
 begin
+  Dll := ExpandConstant(CurrentFileName);
   DeleteFile(Dll + '.old');
   if FileExists(Dll) and not DeleteFile(Dll) then
     RenameFile(Dll, Dll + '.old');
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssInstall then
-  begin
-    MoveAside(ExpandConstant('{app}\metalpdf_thumbs.dll'));
-    MoveAside(ExpandConstant('{app}\pdfium.dll'));
-  end;
 end;
