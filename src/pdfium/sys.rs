@@ -437,6 +437,7 @@ api! {
     FPDFPageObj_NewTextObj: fn(FPDF_DOCUMENT, FPDF_BYTESTRING, c_float) -> FPDF_PAGEOBJECT;
     FPDFPageObj_CreateTextObj: fn(FPDF_DOCUMENT, FPDF_FONT, c_float) -> FPDF_PAGEOBJECT;
     FPDFText_SetText: fn(FPDF_PAGEOBJECT, FPDF_WIDESTRING) -> FPDF_BOOL;
+    FPDFText_SetCharcodes: fn(FPDF_PAGEOBJECT, *const u32, usize) -> FPDF_BOOL;
     FPDFText_LoadFont: fn(FPDF_DOCUMENT, *const u8, u32, c_int, FPDF_BOOL) -> FPDF_FONT;
     FPDFText_LoadStandardFont: fn(FPDF_DOCUMENT, FPDF_BYTESTRING) -> FPDF_FONT;
     FPDFFont_Close: fn(FPDF_FONT);
@@ -455,6 +456,9 @@ api! {
     // The glyph's path for a character (Unicode), or null when the font
     // has no glyph for it; the path is the font's, never freed.
     FPDFFont_GetGlyphPath: fn(FPDF_FONT, u32, c_float) -> *const c_void;
+    // The advance of a character (Unicode) in the code the font encodes
+    // it with, at the size given.
+    FPDFFont_GetGlyphWidth: fn(FPDF_FONT, u32, c_float, *mut c_float) -> FPDF_BOOL;
     // Pages: fpdf_edit.h, fpdf_ppo.h
     FPDFPage_Delete: fn(FPDF_DOCUMENT, c_int);
     FPDFPage_New: fn(FPDF_DOCUMENT, c_int, c_double, c_double) -> FPDF_PAGE;

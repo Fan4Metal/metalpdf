@@ -1167,13 +1167,31 @@ impl Page {
         // outline, so no glyph path: it is left to the reading back, or
         // every edit with a space went to the stand-in.
         let has_glyph = |c: char| c.is_whitespace() || !font.is_null() && !unsafe { (api.FPDFFont_GetGlyphPath)(font, u32::from(c), 12.0) }.is_null();
+        // The code PDFium encodes a space with may have no width (below,
+        // `char_codes`): the words ran together.
+        let has_width = |c: char| {
+            let mut width = 0f32;
+            !font.is_null() && unsafe { (api.FPDFFont_GetGlyphWidth)(font, u32::from(c), 1.0, &mut width) } != 0 && width > 0.0
+        };
+        let mut codes = None;
         if !subset || text.chars().all(has_glyph) {
             // A subset font written by PDFium maps its space to U+00A0
             // and drops U+0020: the no-break space is tried after.
             let attempts = if text.contains(' ') { vec![text.to_owned(), text.replace(' ', "\u{a0}")] } else { vec![text.to_owned()] };
             for attempt in &attempts {
-                let attempt_wide: Vec<u16> = attempt.encode_utf16().chain(std::iter::once(0)).collect();
-                if unsafe { (api.FPDFText_SetText)(object, attempt_wide.as_ptr()) } == 0 {
+                let set = if attempt.chars().filter(|c| c.is_whitespace()).all(has_width) {
+                    let attempt_wide: Vec<u16> = attempt.encode_utf16().chain(std::iter::once(0)).collect();
+                    unsafe { (api.FPDFText_SetText)(object, attempt_wide.as_ptr()) }
+                } else {
+                    // A whitespace with no width: the font's codes found
+                    // by trying them, a whitespace without its own code
+                    // given the space's.
+                    let codes = codes.get_or_insert_with(|| self.char_codes(font));
+                    let encoded: Option<Vec<u32>> = attempt.chars().map(|c| codes.get(&c).or_else(|| c.is_whitespace().then(|| codes.get(&' ')).flatten()).copied()).collect();
+                    let Some(encoded) = encoded else { continue };
+                    unsafe { (api.FPDFText_SetCharcodes)(object, encoded.as_ptr(), encoded.len()) }
+                };
+                if set == 0 {
                     return Err("the text could not be set".into());
                 }
                 if same_text(&self.object_text(object), text) {
@@ -1255,6 +1273,97 @@ impl Page {
             unsafe { (api.FPDFText_ClosePage)(text) };
         }
         self.text_page().and_then(|tp| utf16_text(|buf, len| unsafe { (api.FPDFTextObj_GetText)(object, tp, buf.cast(), len) })).unwrap_or_default()
+    }
+
+    /// The codes of `font`'s characters among codes 0 to 255, each with
+    /// an advance. PDFium encodes a character with the first code its
+    /// reverse lookup of the ToUnicode map finds, and a map may give a
+    /// character two: a book's PetersburgC has its space at code 30 and
+    /// maps code 32, no glyph and width 0, to U+0020 too, so `FPDFText_
+    /// SetText` wrote every space with no width. So every code is tried
+    /// in a scratch object, between two copies of a code with ink, which
+    /// gives its advance (the box's growth) and, through the text page,
+    /// its character (a space alone reads as nothing); of the codes of a
+    /// character, the one as wide as PDFium's own wins, else the widest.
+    /// A font with two-byte codes gives only what it has in that range.
+    fn char_codes(&self, font: sys::FPDF_FONT) -> std::collections::HashMap<char, u32> {
+        const SIZE: f32 = 10.0;
+        let api = self.api();
+        let mut out = std::collections::HashMap::new();
+        if font.is_null() {
+            return out;
+        }
+        let scratch = unsafe { (api.FPDFPageObj_CreateTextObj)(self.doc.handle, font, SIZE) };
+        if scratch.is_null() {
+            return out;
+        }
+        let bounds = |codes: &[u32]| {
+            let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+            let ok = unsafe { (api.FPDFText_SetCharcodes)(scratch, codes.as_ptr(), codes.len()) != 0 && (api.FPDFPageObj_GetBounds)(scratch, &mut l, &mut b, &mut r, &mut t) != 0 };
+            ok.then_some([l, b, r, t])
+        };
+        let ink = (0..=255u32).find(|&c| bounds(&[c]).is_some_and(|[l, b, r, t]| r - l > 0.01 && t - b > 0.01));
+        let base = ink.and_then(|k| bounds(&[k, k]));
+        let (Some(k), Some(base)) = (ink, base) else {
+            unsafe { (api.FPDFPageObj_Destroy)(scratch) };
+            return out;
+        };
+        let advances: Vec<(u32, f32)> = (0..=255u32).filter_map(|c| bounds(&[k, c, k]).map(|b| (c, b[2] - base[2]))).filter(|&(_, advance)| advance > 0.01).collect();
+        unsafe { (api.FPDFPageObj_Destroy)(scratch) };
+        // Each in its own place on the page, as the text page drops a run
+        // drawn over another.
+        let [width, _] = self.size();
+        let columns = ((width / (4.0 * SIZE)) as usize).max(1);
+        let mut probes = Vec::new();
+        for (i, &(code, advance)) in advances.iter().enumerate() {
+            let object = unsafe { (api.FPDFPageObj_CreateTextObj)(self.doc.handle, font, SIZE) };
+            if object.is_null() {
+                continue;
+            }
+            let at = sys::FS_MATRIX { a: 1.0, d: 1.0, e: (i % columns) as f32 * 4.0 * SIZE, f: (i / columns) as f32 * 1.5 * SIZE, ..Default::default() };
+            unsafe {
+                (api.FPDFText_SetCharcodes)(object, [k, code, k].as_ptr(), 3);
+                (api.FPDFPageObj_SetMatrix)(object, &at);
+                (api.FPDFPage_InsertObject)(self.handle, object);
+            }
+            probes.push((object, code, advance));
+        }
+        if let Some(text) = self.text.take() {
+            unsafe { (api.FPDFText_ClosePage)(text) };
+        }
+        let text_page = self.text_page();
+        let read: Vec<Option<char>> = probes
+            .iter()
+            .map(|&(object, ..)| {
+                let text = text_page.and_then(|tp| utf16_text(|buf, len| unsafe { (api.FPDFTextObj_GetText)(object, tp, buf.cast(), len) })).unwrap_or_default();
+                // The text page may add a space of its own after the run;
+                // the code with ink on either side is no whitespace.
+                let text: Vec<char> = text.trim().chars().collect();
+                (text.len() == 3).then(|| text[1])
+            })
+            .collect();
+        for &(object, ..) in &probes {
+            unsafe {
+                (api.FPDFPage_RemoveObject)(self.handle, object);
+                (api.FPDFPageObj_Destroy)(object);
+            }
+        }
+        // The text page saw the probes: read again when next asked.
+        if let Some(text) = self.text.take() {
+            unsafe { (api.FPDFText_ClosePage)(text) };
+        }
+        let mut best: std::collections::HashMap<char, (bool, f32, u32)> = std::collections::HashMap::new();
+        for (&(_, code, advance), c) in probes.iter().zip(read) {
+            let Some(c) = c else { continue };
+            let mut own = 0f32;
+            let own = unsafe { (api.FPDFFont_GetGlyphWidth)(font, u32::from(c), SIZE, &mut own) } != 0 && (own - advance).abs() < 0.01;
+            let entry = best.entry(c).or_insert((own, advance, code));
+            if (own, advance) > (entry.0, entry.1) {
+                *entry = (own, advance, code);
+            }
+        }
+        out.extend(best.into_iter().map(|(c, (.., code))| (c, code)));
+        out
     }
 
     /// The marked content `from` is in, put on `to`: a tagged document's
@@ -2417,5 +2526,60 @@ pub mod tests {
             }
         }
         assert_eq!(lost, 0, "{lost} pages lost text");
+    }
+
+    /// A font whose ToUnicode gives U+0020 two codes, its space (30, with
+    /// a width) and code 32 (no width), as a book's PetersburgC does:
+    /// PDFium encodes a typed space with code 32 and the edited words ran
+    /// together; the space's own code is written, and kept on saving.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn a_space_keeps_its_width_when_the_font_gives_it_two_codes() {
+        let api = api();
+        let widths: Vec<&str> = ["278", "0", "0"].into_iter().chain((33..=122).map(|_| "556")).collect();
+        let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Adobe-Identity-UCS def /CMapType 2 def \
+            1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfrange <21> <7A> <0021> endbfrange \
+            2 beginbfchar <1E> <0020> <0020> <0020> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+        let pdf = write_pdf(vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".into(),
+            stream("BT /F1 24 Tf 72 700 Td (Hello\\036world) Tj ET"),
+            format!(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 30 /LastChar 122 /Widths [{}] /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [30 /space] >> /ToUnicode 6 0 R >>",
+                widths.join(" ")
+            ),
+            stream(cmap),
+        ]);
+        let path = std::env::temp_dir().join(format!("metalpdf_two_spaces_{}.pdf", std::process::id()));
+        std::fs::write(&path, pdf).unwrap();
+        let doc = Document::open(api, &path, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let object = page.text_objects().remove(0);
+        assert_eq!(object.text, "Hello world");
+        // PDFium's own code for a space has no width in this font.
+        let font = unsafe { (api.FPDFTextObj_GetFont)((api.FPDFPage_GetObject)(page.handle, object.index as c_int)) };
+        let mut width = -1f32;
+        unsafe { (api.FPDFFont_GetGlyphWidth)(font, 0x20, 24.0, &mut width) };
+        assert_eq!(width, 0.0);
+        assert_eq!(page.set_text(object.index, "Hello big world", &mut |_, _| None).unwrap(), Replaced::SameFont);
+        // 12 letters and 2 spaces before the last letter, 24 pt: 173.5
+        // points to its origin, 160.1 with spaces of no width; its ink
+        // reaches about 12 points further.
+        let reach = |page: &Page| {
+            let edited = page.text_objects().remove(0);
+            assert_eq!(edited.text, "Hello big world");
+            edited.bounds[2] - edited.origin[0]
+        };
+        assert!(reach(&page) > 180.0, "{}", reach(&page));
+        drop(page);
+        let saved = std::env::temp_dir().join(format!("metalpdf_two_spaces_saved_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(doc);
+        let again = Document::open(api, &saved, None).unwrap();
+        assert!(reach(&again.load_page(0).unwrap()) > 180.0);
+        drop(again);
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(saved).ok();
     }
 }
