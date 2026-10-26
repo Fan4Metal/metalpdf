@@ -446,6 +446,11 @@ api! {
     FPDFPageObj_CreateTextObj: fn(FPDF_DOCUMENT, FPDF_FONT, c_float) -> FPDF_PAGEOBJECT;
     FPDFText_SetText: fn(FPDF_PAGEOBJECT, FPDF_WIDESTRING) -> FPDF_BOOL;
     FPDFText_SetCharcodes: fn(FPDF_PAGEOBJECT, *const u32, usize) -> FPDF_BOOL;
+    // The positions of a text object's characters but the first, along
+    // the text's direction, relative to the object's origin, in text
+    // space (the font size applied, the matrix not); one fewer than the
+    // characters.
+    FPDFText_SetPositions: fn(FPDF_PAGEOBJECT, *const c_float, usize) -> FPDF_BOOL;
     FPDFText_LoadFont: fn(FPDF_DOCUMENT, *const u8, u32, c_int, FPDF_BOOL) -> FPDF_FONT;
     FPDFText_LoadStandardFont: fn(FPDF_DOCUMENT, FPDF_BYTESTRING) -> FPDF_FONT;
     FPDFFont_Close: fn(FPDF_FONT);

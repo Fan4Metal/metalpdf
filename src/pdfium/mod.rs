@@ -812,6 +812,45 @@ fn mismatched_boxes(api: &'static Api, a: sys::FPDF_PAGE, b: sys::FPDF_PAGE, siz
     }
 }
 
+/// Every text object's characters' origins (page space), by the object's
+/// index, read through a text page loaded for it; the characters the
+/// text page makes up (a space in a wide gap) are left out.
+fn char_origins(api: &'static Api, page: sys::FPDF_PAGE) -> Vec<Vec<[f64; 2]>> {
+    let count = unsafe { (api.FPDFPage_CountObjects)(page) }.max(0);
+    let handles: Vec<sys::FPDF_PAGEOBJECT> = (0..count).map(|i| unsafe { (api.FPDFPage_GetObject)(page, i) }).collect();
+    let mut out = vec![Vec::new(); count as usize];
+    let text_page = unsafe { (api.FPDFText_LoadPage)(page) };
+    if text_page.is_null() {
+        return out;
+    }
+    let mut last = None;
+    for i in 0..unsafe { (api.FPDFText_CountChars)(text_page) }.max(0) {
+        // A character the text page made up (a space in a wide gap) is
+        // given the object after it.
+        if unsafe { (api.FPDFText_IsGenerated)(text_page, i) } != 0 {
+            continue;
+        }
+        let object = unsafe { (api.FPDFText_GetTextObject)(text_page, i) };
+        if object.is_null() {
+            continue;
+        }
+        // The runs come in order: the one before is tried first.
+        let k = match last {
+            Some((h, k)) if h == object => k,
+            _ => match handles.iter().position(|&h| h == object) {
+                Some(k) => k,
+                None => continue,
+            },
+        };
+        last = Some((object, k));
+        let (mut x, mut y) = (0f64, 0f64);
+        unsafe { (api.FPDFText_GetCharOrigin)(text_page, i, &mut x, &mut y) };
+        out[k].push([x, y]);
+    }
+    unsafe { (api.FPDFText_ClosePage)(text_page) };
+    out
+}
+
 /// The longest side a page is rendered at for `boxes_apart`: 72 dpi
 /// unless the page is huge.
 const CHECK_SIDE: f32 = 1600.0;
@@ -991,7 +1030,7 @@ impl Page {
             unsafe { (api.FPDFText_ClosePage)(text) };
         }
         // The page parsed again from the content just written.
-        let again = unsafe { (api.FPDF_LoadPage)(self.doc.handle, self.index) };
+        let mut again = unsafe { (api.FPDF_LoadPage)(self.doc.handle, self.index) };
         if again.is_null() {
             return Err("the page's new content could not be read".into());
         }
@@ -1010,6 +1049,24 @@ impl Page {
             const KINDS: [&str; 6] = ["objects", "text", "paths", "pictures", "shadings", "forms"];
             let lost: Vec<String> = (0..6).filter(|&k| written[k] < wanted[k]).map(|k| format!("{} {}", wanted[k] - written[k], KINDS[k])).collect();
             return Err(format!("the page's content cannot be written back whole ({} would be lost)", lost.join(", ")));
+        }
+        // The writer leaves out the character and word spacing (`Tc`,
+        // `Tw`) and keeps the `TJ` kerning: a run set with them parses
+        // with its characters closer or further by the spacing each (a
+        // book's 8 pt lines by 4.5 pt at their ends). Measured on the
+        // parsed page and undone in memory, the content is written once
+        // more and parses to where the characters were.
+        let shifted = self.undo_drift(again);
+        if shifted > 0 {
+            unsafe { (api.FPDF_ClosePage)(again) };
+            if unsafe { (api.FPDFPage_GenerateContent)(self.handle.get()) } == 0 {
+                return Err("the page's content could not be regenerated".into());
+            }
+            again = unsafe { (api.FPDF_LoadPage)(self.doc.handle, self.index) };
+            if again.is_null() {
+                return Err("the page's new content could not be read".into());
+            }
+            log::debug!("page {}: {shifted} runs set with character spacing, which the writer leaves out, written at their places", self.index + 1);
         }
         // The same objects, but do they look the same? The writer leaves
         // out what it does not know (a pattern fill, a soft mask, a
@@ -1039,6 +1096,45 @@ impl Page {
             (api.FPDF_ClosePage)(self.handle.replace(again));
         }
         Ok(())
+    }
+
+    /// The drift of every text run between this page and `parsed`, the
+    /// same page parsed from the content written anew, undone: where a
+    /// character's origin moved along the run (the writer leaves out
+    /// `Tc` and `Tw`), the run's positions in memory are shifted the
+    /// other way (`FPDFText_SetPositions`, relative to the run's origin
+    /// in text space), so that the content written again parses to the
+    /// origins the run had. How many runs were shifted. The page in
+    /// memory is wrong by that shift until it is parsed again.
+    fn undo_drift(&self, parsed: sys::FPDF_PAGE) -> usize {
+        let api = self.api();
+        let before = char_origins(api, self.handle.get());
+        let after = char_origins(api, parsed);
+        let mut shifted = 0;
+        for (k, (b, a)) in before.iter().zip(&after).enumerate() {
+            if b.len() < 2 || b.len() != a.len() {
+                continue;
+            }
+            let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), k as c_int) };
+            if object.is_null() || unsafe { (api.FPDFPageObj_GetType)(object) } != sys::FPDF_PAGEOBJ_TEXT {
+                continue;
+            }
+            let mut matrix = sys::FS_MATRIX { a: 1.0, ..Default::default() };
+            unsafe { (api.FPDFPageObj_GetMatrix)(object, &mut matrix) };
+            let scale = (matrix.a * matrix.a + matrix.b * matrix.b).sqrt().max(1e-6);
+            let along = |p: &[f64; 2], q: &[f64; 2]| ((q[0] - p[0]) as f32 * matrix.a + (q[1] - p[1]) as f32 * matrix.b) / scale;
+            let drift: Vec<f32> = b.iter().zip(a).map(|(p, q)| along(p, q)).collect();
+            if drift.iter().all(|x| x.abs() < 0.002) {
+                continue;
+            }
+            // Each character's distance from the first, in text space,
+            // less its drift.
+            let positions: Vec<f32> = b.iter().zip(&drift).skip(1).map(|(p, x)| (along(&b[0], p) - x) / scale).collect();
+            if unsafe { (api.FPDFText_SetPositions)(object, positions.as_ptr(), positions.len()) } != 0 {
+                shifted += 1;
+            }
+        }
+        shifted
     }
 
     /// Every object's fill and stroke colour set again as the RGB PDFium
@@ -2804,6 +2900,67 @@ pub mod tests {
         std::fs::remove_file(saved).ok();
     }
 
+    /// The writer leaves out `Tc` and `Tw`: a run set with them came out
+    /// with its characters closer or further by the spacing each when
+    /// another run of the page was edited (the whole content is written
+    /// anew). `undo_drift` puts the characters back where they were, in
+    /// the parsed page and in the file.
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn character_spacing_survives_an_edit() {
+        let api = api();
+        let pdf = write_pdf(vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".into(),
+            stream("BT /F1 24 Tf 72 700 Td (Hello) Tj ET BT /F1 24 Tf 3 Tc 5 Tw 72 650 Td (Sp aced) Tj ET BT /F1 1 Tf 3 Tc 24 0 0 24 72 600 Tm (Tm run) Tj ET"),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        ]);
+        let path = std::env::temp_dir().join(format!("metalpdf_tc_{}.pdf", std::process::id()));
+        std::fs::write(&path, pdf).unwrap();
+        // The advances between each run's letters, in points (a space in
+        // a wide gap reads as made up by the text page once the run is
+        // written as a `TJ` array, so the spaces are left out).
+        let advances = |page: &Page| -> Vec<Vec<f32>> {
+            let text_page = page.text_page().unwrap();
+            let count = unsafe { (api.FPDFPage_CountObjects)(page.handle.get()) };
+            (0..count)
+                .map(|k| {
+                    let object = unsafe { (api.FPDFPage_GetObject)(page.handle.get(), k) };
+                    let xs: Vec<f64> = (0..unsafe { (api.FPDFText_CountChars)(text_page) })
+                        .filter(|&i| unsafe { (api.FPDFText_GetTextObject)(text_page, i) } == object && !char::from_u32(unsafe { (api.FPDFText_GetUnicode)(text_page, i) }).is_some_and(char::is_whitespace))
+                        .map(|i| {
+                            let (mut x, mut y) = (0f64, 0f64);
+                            unsafe { (api.FPDFText_GetCharOrigin)(text_page, i, &mut x, &mut y) };
+                            x
+                        })
+                        .collect();
+                    xs.windows(2).map(|w| ((w[1] - w[0]) as f32 * 1000.0).round() / 1000.0).collect()
+                })
+                .collect()
+        };
+        let doc = Document::open(api, &path, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let before = advances(&page);
+        // S 667, p 556 and the space 278 with 5 of Tw, 3 of Tc each; "Tm
+        // run" at 1 pt under a matrix of 24: 3 of Tc is 72 pt.
+        assert_eq!(before[1], [19.008, 31.016, 16.344, 15.0, 16.344]);
+        assert_eq!(before[2][0], 86.664);
+        assert_eq!(page.set_text(0, "Hallo", &mut |_, _| None).unwrap(), Replaced::SameFont);
+        let after = advances(&page);
+        assert_eq!(after[1..], before[1..], "the runs set with Tc and Tw, parsed from the content written anew");
+        assert_eq!(after[0], [17.328, 13.344, 5.328, 5.328]);
+        drop(page);
+        let saved = std::env::temp_dir().join(format!("metalpdf_tc_saved_{}.pdf", std::process::id()));
+        doc.save_to(&saved).unwrap();
+        drop(doc);
+        let again = Document::open(api, &saved, None).unwrap();
+        assert_eq!(advances(&again.load_page(0).unwrap()), after, "saved and read back");
+        drop(again);
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(saved).ok();
+    }
+
     /// PDFium's content writer puts a fill colour in the stream only when
     /// it is DeviceRGB: grey text (`g`) and text in a spot colour (a
     /// Separation, as a book's PANTONE headings) came out black when
@@ -3010,6 +3167,19 @@ pub mod tests {
             };
             let after = crate::textline::lines(&page.text_objects()).into_iter().find(|l| l.text.starts_with(replacement)).map(|l| l.text);
             println!("  {how:?}; the line reads {after:?}");
+            // The runs that did not move (not the line's): their
+            // characters where they were?
+            let (pristine_origins, parsed_origins) = (char_origins(api, pristine_page.handle.get()), char_origins(api, page.handle.get()));
+            let mut drift = 0f64;
+            for (b, a) in pristine_origins.iter().zip(&parsed_origins) {
+                if b.len() < 2 || b.len() != a.len() || (b[0][0] - a[0][0]).abs() > 0.01 || (b[0][1] - a[0][1]).abs() > 0.01 {
+                    continue;
+                }
+                for (p, q) in b.iter().zip(a) {
+                    drift = drift.max((q[0] - p[0]).abs().max((q[1] - p[1]).abs()));
+                }
+            }
+            println!("  the runs that stayed: characters at most {drift:.4} pt from where they were");
             let (memory, ..) = render(&page);
             let bounds = line.bounds;
             // The guard's own measure, the page before the edit against
