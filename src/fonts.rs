@@ -320,6 +320,39 @@ impl Fonts {
         self.names.insert(base_font.to_owned(), name.clone());
         name
     }
+
+    /// The font Word and PowerPoint are to show a run of `base_font` in
+    /// (the export): the installed family that has it, bold and italic
+    /// as its face or the name says, else Arial, Times New Roman or
+    /// Courier New in that style. A heavy `weight` (600 and up) or a run
+    /// stroked to look bold makes it bold. A family whose name carries
+    /// the weight or the slant ("Segoe UI Semibold") is not made bold or
+    /// italic again on top.
+    pub fn face(&mut self, base_font: &str, flags: i32, weight: i32, faux_bold: bool) -> crate::export::Face {
+        let mut style = style_of(base_font, flags);
+        if weight >= 600 || faux_bold {
+            style.bold = true;
+        }
+        if let Some(found) = find(self.installed(), base_font, style) {
+            let family = found.names.family.clone();
+            let lower = family.to_ascii_lowercase();
+            let weighty = ["semibold", "demibold", "bold", "black", "heavy", "medium", "light", "thin"].iter().any(|w| lower.contains(w));
+            let slanted = lower.contains("italic") || lower.contains("oblique");
+            return crate::export::Face {
+                family,
+                bold: found.names.bold() || style.bold && !weighty,
+                italic: found.names.italic() || style.italic && !slanted,
+            };
+        }
+        let family = if style.mono {
+            "Courier New"
+        } else if style.serif {
+            "Times New Roman"
+        } else {
+            "Arial"
+        };
+        crate::export::Face { family: family.into(), bold: style.bold, italic: style.italic }
+    }
 }
 
 impl Fonts {

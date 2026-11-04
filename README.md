@@ -33,6 +33,7 @@ MetalPDF is a PDF viewer built around one idea: a document should be on screen t
 - **Printed page numbers**: a book whose page 1 is the file's 17th is navigated and printed by the numbers on its pages (see [Page numbers](#page-numbers)).
 - **Editing** (experimental): the text of a line changed in place, pictures moved, resized, replaced or removed, pages inserted, replaced or deleted, and the document saved (see [Editing text, pictures and pages](#editing-text-pictures-and-pages)).
 - **Printing** with a preview of each sheet: the printer, its paper, orientation and sides, the pages, copies and scale, the printer's own settings behind Properties (see [Printing](#printing)).
+- **Saving as Word or PowerPoint**: a document is written as an editable `.docx` (flowing paragraphs, headings, lists, columns, tables, pictures) or `.pptx` (a slide a page, laid out as the page), by the program itself, without Office (see [Saving as Word or PowerPoint](#saving-as-word-or-powerpoint)).
 - **Explorer thumbnails**: with MetalPDF the default program for PDF files, Explorer shows the files' first pages instead of icons.
 - **Forms** are drawn with their field contents; **encrypted** documents ask for their password.
 - **Light, dark or system theme**; the dark theme grey or near black.
@@ -68,8 +69,8 @@ The toolbar under the tabs (not shown on the start page) holds:
 - the zoom with its menu, and the three zoom presets: actual size, fit width, fit page (keys `1`, `2`, `3`); the one in force is lit, and a preset chosen is the zoom new documents open at;
 - the two turn buttons;
 - the view mode: continuous pages, or one page at a time, where the scroll bar still spans the document and dragging it turns the pages;
-- the text tool and the hand, the pencil of the editing mode and the printer, which opens the print dialog;
-- on the right, a note that says when an edit was refused or a file saved, and the progress of a print job with a cross to cancel it.
+- the text tool and the hand, the pencil of the editing mode, the printer, which opens the print dialog, and the page with an arrow, whose menu saves the document as Word or PowerPoint;
+- on the right, a note that says when an edit was refused or a file saved, and the progress of a print job or a save as Word or PowerPoint with a cross to cancel it.
 
 The tab bar holds the sidebar toggle, Open, the tabs, and on the right the theme switch (its context menu chooses between a grey and a near-black dark theme), the update button when a newer version exists, and About.
 
@@ -89,6 +90,7 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 | `--new-instance file.pdf` | Starts a copy of its own instead of handing the files over |
 | `--register`, `--unregister` | Offer MetalPDF for `.pdf` files in Windows' "Open with", and withdraw it (the installer runs them) |
 | `--bench file.pdf` | Prints the engine's timings for a file |
+| `--export file.pdf out.docx` | Saves the document as a Word document (`out.pptx`: a PowerPoint presentation) without a window |
 | `--screenshot file.png file.pdf` | Writes the window's picture after a few frames and exits |
 | `--export-icon file.ico` | Writes the application icon |
 | `--version`, `--help` | The version, the options |
@@ -195,6 +197,22 @@ A run keeps its font, and so its look, whenever that font can show the new text;
 - **The scale**: a page larger than the printable area is shrunk to it by default; it may instead be fitted to the sheet, printed at its actual size or at a custom scale (10–800 %, centred and cut off where the sheet ends), and a document that asks not to be scaled starts at its actual size. A landscape page on a portrait sheet is turned, and the reverse, unless this is switched off.
 - **Vectors or pictures**: the pages go to the printer as vectors, drawn by PDFium, with form fields as filled in. **Print as an image** sends each page as a picture of 300 dpi instead, for a printer that prints the vector output wrong; it is slower and larger.
 - A document with unsaved edits is printed as shown; quitting while a job goes on asks first. Text printed to a PDF printer comes out as outlines, not as text that can be selected.
+
+</details>
+
+### Saving as Word or PowerPoint
+
+The page with an arrow on the toolbar offers **Word document (.docx)** and **PowerPoint presentation (.pptx)**; the file is proposed beside the PDF under its name. The document is written in the background, a page at a time, with its progress and a cross to stop it on the right of the toolbar; a document with unsaved edits is saved as shown. Office is not needed: the files are made by MetalPDF, and open in Word, PowerPoint, LibreOffice and the like.
+
+<details>
+<summary>What Word gets, and what PowerPoint gets</summary>
+
+A PDF holds characters at places, not paragraphs: MetalPDF gathers the characters into lines, finds the columns and the reading order, and makes paragraphs of the lines, with their alignment, indents, line spacing and the space between them. The fonts are the installed ones of the same family, else Arial, Times New Roman or Courier New in the same weight and slant.
+
+- **Word** gets flowing text that wraps again when edited: headings by their size (Word's Heading 1–3, so that the navigation pane lists them), lists with a hanging indent, columns as Word's columns, tables as Word's tables (with their rules when the PDF draws them), a line with parts at the left and the right (a running head) as one line with tabs, pictures and drawings as pictures where they were in the reading order, with the labels inside them. Each page of the PDF starts a page in Word, with the PDF's page size and margins; a page whose text runs sideways is turned so that it reads across.
+- **PowerPoint** gets a slide a page, laid out as the page: a text box a paragraph where the paragraph was, the page's pictures as pictures, and what is neither (drawings, rules, shadings, text at an angle) as one picture of the page behind them, so that the slide looks as the page did. The slides take the first page's size; a page of another size is fitted to the slide.
+
+The conversion is a reconstruction, as with any converter: a page laid out simply (text in one or two columns, headings, lists, pictures, plain tables) comes out close to the original, a complex one (headings in a margin beside the text, tables over several pages, text set around pictures) less so. The text of a scan is taken only where the PDF has a recognised text layer (Word gets it; PowerPoint shows the scan as it is). Text in a font that is not installed is shown in a font of the same kind, so lines may wrap at other words and a Word page may run over to the next one.
 
 </details>
 

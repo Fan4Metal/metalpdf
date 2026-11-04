@@ -122,6 +122,12 @@ pub enum Request {
     Print { id: DocId, job: PrintJob },
     /// Abandon the print job under way.
     CancelPrint,
+    /// Save the document as a Word document or a PowerPoint presentation
+    /// (`Event::ExportProgress`, then `Event::Exported`); a page per turn
+    /// of the loop, after the print job's sheets.
+    Export { id: DocId, path: PathBuf, format: crate::export::Format },
+    /// Abandon the export under way (its half-written file goes).
+    CancelExport,
 }
 
 /// A print job as the dialog sets it up.
@@ -153,6 +159,14 @@ impl std::fmt::Debug for PrintJob {
 pub enum Printed {
     /// Every sheet went to the spooler: how many.
     Done(usize),
+    Cancelled,
+    Failed(String),
+}
+
+/// How an export ended.
+#[derive(Debug, PartialEq)]
+pub enum Exported {
+    Done,
     Cancelled,
     Failed(String),
 }
@@ -189,6 +203,9 @@ pub enum Event {
     /// `done` sheets of `total` sent to the printer.
     PrintProgress { id: DocId, done: usize, total: usize },
     Printed { id: DocId, outcome: Printed },
+    /// `done` pages of `total` exported.
+    ExportProgress { id: DocId, done: usize, total: usize },
+    Exported { id: DocId, path: PathBuf, outcome: Exported },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -447,6 +464,8 @@ struct Worker {
     passwords: HashMap<DocId, String>,
     /// The print job under way.
     printing: Option<Printing>,
+    /// The export under way.
+    exporting: Option<Exporting>,
     /// A TrueType font every character can be set in (Arial), read when
     /// an edit first needs it.
     /// The stand-in fonts for replaced text (`fonts::Fonts`).
@@ -485,6 +504,7 @@ impl Worker {
             edit_file_count: 0,
             passwords: HashMap::new(),
             printing: None,
+            exporting: None,
             fonts: Default::default(),
         };
         worker.serve();
@@ -527,6 +547,9 @@ impl Worker {
                     if self.printing.is_some() {
                         break Work::PrintPage;
                     }
+                    if self.exporting.is_some() {
+                        break Work::ExportPage;
+                    }
                     if self.search.is_some() {
                         break Work::SearchPage;
                     }
@@ -541,6 +564,7 @@ impl Worker {
                 }
                 Work::SearchPage => self.search_page(),
                 Work::PrintPage => self.print_page(),
+                Work::ExportPage => self.export_page(),
             }
         }
     }
@@ -741,6 +765,31 @@ impl Worker {
                     self.send(Event::Printed { id: printing.id, outcome: Printed::Cancelled });
                 }
             }
+            Request::Export { id, path, format } => {
+                if let Some(old) = self.exporting.take() {
+                    let path = old.job.path().to_owned();
+                    self.send(Event::Exported { id: old.id, path, outcome: Exported::Cancelled });
+                }
+                let started = self.job_copy(id, "export").and_then(|(doc, temp)| crate::export::Job::start(self.api, doc, &path, format).map(|job| Exporting { id, job, _temp: temp }));
+                match started {
+                    Ok(exporting) => {
+                        log::info!("exporting document {id} to {} ({format:?}, {} pages)", path.display(), exporting.job.count);
+                        self.send(Event::ExportProgress { id, done: 0, total: exporting.job.count });
+                        self.exporting = Some(exporting);
+                    }
+                    Err(e) => {
+                        log::warn!("export not started: {e}");
+                        self.send(Event::Exported { id, path, outcome: Exported::Failed(e) });
+                    }
+                }
+            }
+            Request::CancelExport => {
+                if let Some(exporting) = self.exporting.take() {
+                    log::info!("export cancelled after {} of {} pages", exporting.job.next, exporting.job.count);
+                    let path = exporting.job.path().to_owned();
+                    self.send(Event::Exported { id: exporting.id, path, outcome: Exported::Cancelled });
+                }
+            }
         }
     }
 
@@ -867,21 +916,59 @@ impl Worker {
         if job.sheets.is_empty() {
             return Err("no pages to print".into());
         }
-        let path = self.paths.get(&id).cloned().ok_or("no such document")?;
-        let (doc, temp) = match self.edits.get(&id) {
-            Some(state) if !state.log.is_empty() => {
-                let temp = TempFile(std::env::temp_dir().join(format!("metalpdf-print-{}-{id}.pdf", std::process::id())));
-                state.doc.save_to(&temp.0)?;
-                (Document::open(self.api, &temp.0, None).map_err(|e| e.to_string())?, Some(temp))
-            }
-            _ => (Document::open(self.api, &path, self.passwords.get(&id).map(String::as_str)).map_err(|e| e.to_string())?, None),
-        };
+        let (doc, temp) = self.job_copy(id, "print")?;
         if job.sheets.iter().any(|&p| p >= doc.page_count()) {
             return Err("a page past the document's end".into());
         }
         let printer = crate::print::Job::start(&job.printer, job.devmode.as_ref(), &job.title, job.output.as_deref())?;
         log::info!("printing {} sheets on {} ({:?})", job.sheets.len(), job.printer, printer.sheet());
         Ok(Printing { id, doc, job: printer, sheets: job.sheets, next: 0, scale: job.scale, percent: job.percent, auto_rotate: job.auto_rotate, as_image: job.as_image, _temp: temp })
+    }
+
+    /// A copy of the document of a job's own (printing, an export: their
+    /// pages are flattened, the PowerPoint export hides their text): the
+    /// edited one, saved to a temporary file removed with the job, when
+    /// there are edits (what the job takes is what is shown), else the
+    /// file opened again with the password it was opened with.
+    fn job_copy(&self, id: DocId, purpose: &str) -> Result<(Document, Option<TempFile>), String> {
+        let path = self.paths.get(&id).cloned().ok_or("no such document")?;
+        Ok(match self.edits.get(&id) {
+            Some(state) if !state.log.is_empty() => {
+                let temp = TempFile(std::env::temp_dir().join(format!("metalpdf-{purpose}-{}-{id}.pdf", std::process::id())));
+                state.doc.save_to(&temp.0)?;
+                (Document::open(self.api, &temp.0, None).map_err(|e| e.to_string())?, Some(temp))
+            }
+            _ => (Document::open(self.api, &path, self.passwords.get(&id).map(String::as_str)).map_err(|e| e.to_string())?, None),
+        })
+    }
+
+    /// The next page of the export; the file finished after the last.
+    fn export_page(&mut self) {
+        let fonts = &mut self.fonts;
+        let Some(exporting) = self.exporting.as_mut() else { return };
+        let started = Instant::now();
+        let result = exporting.job.step(fonts);
+        log::debug!("page {} exported in {:.1} ms", exporting.job.next, started.elapsed().as_secs_f64() * 1e3);
+        let (id, done, total) = (exporting.id, exporting.job.next, exporting.job.count);
+        match result {
+            Ok(false) => self.send(Event::ExportProgress { id, done, total }),
+            Ok(true) => {
+                let Some(Exporting { job, _temp, .. }) = self.exporting.take() else { return };
+                let path = job.path().to_owned();
+                let outcome = match job.finish(&mut self.fonts) {
+                    Ok(()) => Exported::Done,
+                    Err(e) => Exported::Failed(e),
+                };
+                log::info!("export to {} ended: {outcome:?}", path.display());
+                self.send(Event::Exported { id, path, outcome });
+            }
+            Err(e) => {
+                log::warn!("export failed: {e}");
+                let Some(exporting) = self.exporting.take() else { return };
+                let path = exporting.job.path().to_owned();
+                self.send(Event::Exported { id, path, outcome: Exported::Failed(e) });
+            }
+        }
     }
 
     /// The next sheet of the print job; the job finished after the last.
@@ -1185,6 +1272,14 @@ struct Printing {
     _temp: Option<TempFile>,
 }
 
+/// An export under way: the job (dropped first) and the temporary copy
+/// of an edited document it reads.
+struct Exporting {
+    id: DocId,
+    job: crate::export::Job,
+    _temp: Option<TempFile>,
+}
+
 /// A file removed when dropped.
 struct TempFile(PathBuf);
 
@@ -1233,6 +1328,7 @@ enum Work {
     Render(RenderKey),
     SearchPage,
     PrintPage,
+    ExportPage,
 }
 
 /// How many pages the numbering is read from, and how many characters at

@@ -26,6 +26,9 @@ pub enum Ask {
     /// A PDF whose pages go in at `page` of a tab's document, or replace
     /// that page.
     ImportPdf { tab: u64, page: usize, replace: bool },
+    /// Where to save a tab's document as a Word document or a PowerPoint
+    /// presentation.
+    Export { tab: u64, format: crate::export::Format },
 }
 
 impl Ask {
@@ -36,6 +39,7 @@ impl Ask {
             Ask::SaveAs { .. } => "save as",
             Ask::ReplaceImage { .. } => "replace image",
             Ask::ImportPdf { .. } => "import pages",
+            Ask::Export { .. } => "export",
         }
     }
 }

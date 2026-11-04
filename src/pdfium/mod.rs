@@ -5,6 +5,7 @@
 //! thread (`engine.rs`); the UI only ever sees the plain data these
 //! functions return.
 
+pub mod extract;
 pub mod sys;
 
 use std::cell::{Cell, RefCell};

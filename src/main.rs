@@ -16,6 +16,7 @@ mod caption;
 mod dialog;
 mod document;
 mod engine;
+mod export;
 mod fonts;
 mod icon;
 mod layout;
@@ -110,6 +111,7 @@ fn main() -> eframe::Result {
                 println!("  --register | --unregister   offer MetalPDF for .pdf files in Windows (per user) / withdraw it");
                 println!("  --new-instance              a window of its own instead of a tab in the running one");
                 println!("  --bench FILE.pdf            the engine's timings for one file, no window");
+                println!("  --export FILE.pdf OUT.docx|OUT.pptx   save as a Word document or a PowerPoint presentation, no window");
                 println!("  --export-icon FILE.ico|png  the app icon");
                 println!("  --screenshot FILE.png       the window's picture after a few frames, then exit");
                 println!("  --version, --help");
@@ -123,6 +125,26 @@ fn main() -> eframe::Result {
                     std::process::exit(2);
                 };
                 std::process::exit(bench::run(Path::new(&file)));
+            }
+            Some("--export") => {
+                // Saved as a Word document or a PowerPoint presentation,
+                // without a window.
+                win::attach_parent_console();
+                let (Some(input), Some(output)) = (args.next(), args.next()) else {
+                    eprintln!("--export needs a PDF file and a .docx or .pptx file");
+                    std::process::exit(2);
+                };
+                let started = std::time::Instant::now();
+                match export::run(Path::new(&input), Path::new(&output), None) {
+                    Ok(pages) => {
+                        println!("{pages} pages written to {} in {:.2} s", output.to_string_lossy(), started.elapsed().as_secs_f64());
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!("cannot export: {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
             Some("--register" | "--unregister") => {
                 let register = arg.to_str() == Some("--register");

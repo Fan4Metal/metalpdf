@@ -8,6 +8,7 @@
 use egui::{Align, Key, Layout, RichText, Ui};
 
 use super::icons::Icon;
+use crate::export::Format;
 use crate::settings::{Tool, ViewMode, ZoomSetting};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -30,6 +31,10 @@ pub enum ToolbarAction {
     Print,
     /// The print job under way abandoned.
     CancelPrint,
+    /// Save the document as a Word document or a PowerPoint presentation.
+    Export(Format),
+    /// The export under way abandoned.
+    CancelExport,
 }
 
 /// What the bar shows of the document.
@@ -52,6 +57,8 @@ pub struct ToolbarInfo {
     pub note_is_error: bool,
     /// A print job under way: sheets sent, sheets in all.
     pub printing: Option<(usize, usize)>,
+    /// An export under way: to what, pages done, pages in all.
+    pub exporting: Option<(Format, usize, usize)>,
 }
 
 /// The page field's text between frames, and whether it is to take the
@@ -238,7 +245,32 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         if ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Print, false, tr!("Print (Ctrl+P)", "Печать (Ctrl+P)"))).inner.clicked() {
             actions.push(ToolbarAction::Print);
         }
+        // Save as Word or PowerPoint: a menu of the two.
+        let export_tip = tr!("Save as a Word document or a PowerPoint presentation", "Сохранить как документ Word или презентацию PowerPoint");
+        let export = ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Export, false, export_tip)).inner;
+        egui::Popup::menu(&export).show(|ui| {
+            ui.set_min_width(230.0);
+            if ui.button(tr!("Word document (.docx)…", "Документ Word (.docx)…")).clicked() {
+                actions.push(ToolbarAction::Export(Format::Docx));
+                ui.close();
+            }
+            if ui.button(tr!("PowerPoint presentation (.pptx)…", "Презентация PowerPoint (.pptx)…")).clicked() {
+                actions.push(ToolbarAction::Export(Format::Pptx));
+                ui.close();
+            }
+        });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if let Some((format, done, total)) = info.exporting {
+                if super::icon_button(ui, Icon::Close, false, tr!("Stop saving", "Остановить сохранение")).clicked() {
+                    actions.push(ToolbarAction::CancelExport);
+                }
+                let text = match format {
+                    Format::Docx => tr!(format!("Saving as Word: {done} of {total}"), format!("Сохранение в Word: {done} из {total}")),
+                    Format::Pptx => tr!(format!("Saving as PowerPoint: {done} of {total}"), format!("Сохранение в PowerPoint: {done} из {total}")),
+                };
+                ui.label(RichText::new(text).size(12.0));
+                ui.add_space(8.0);
+            }
             if let Some((done, total)) = info.printing {
                 if super::icon_button(ui, Icon::Close, false, tr!("Cancel printing", "Отменить печать")).clicked() {
                     actions.push(ToolbarAction::CancelPrint);

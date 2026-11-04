@@ -37,8 +37,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "6.0"
 interprocess = "2.4"
-# The PNG the --bench mode writes, to look at a rendered page.
+# The PNG the --bench mode writes, to look at a rendered page; the
+# pictures of the export to Word and PowerPoint.
 png = "0.18"
+# Deflate for the export's ZIP archives (.docx and .pptx are ZIP files);
+# already in the tree through png.
+flate2 = "1"
 log = "0.4"
 env_logger = "0.11"
 

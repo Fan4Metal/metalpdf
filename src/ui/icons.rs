@@ -144,6 +144,9 @@ pub enum Icon {
     /// A printer, its paper going in at the top and coming out at the
     /// front (MetalMD's print button).
     Print,
+    /// A page with an arrow out of its right side: save as another format
+    /// (MetalPDF: Word, PowerPoint).
+    Export,
 }
 
 impl Icon {
@@ -214,6 +217,7 @@ impl Icon {
         Icon::Move,
         Icon::SelectText,
         Icon::Print,
+        Icon::Export,
     ];
 }
 
@@ -463,6 +467,15 @@ pub fn paint(painter: &Painter, icon: Icon, c: Pos2, size: f32, color: Color32, 
             painter.line_segment([p(-2.0, -5.0), p(-2.0, 5.0)], line);
             painter.line_segment([p(-5.0, -2.0), p(-3.5, -2.0)], pen(1.0));
             painter.line_segment([p(-5.0, 0.0), p(-3.5, 0.0)], pen(1.0));
+        }
+        Icon::Export => {
+            // The page, its fold at the top right; the arrow's shaft cut
+            // through the right side (with `fill`), out to its head.
+            painter.add(closed(&[(-6.5, -6.0), (-1.5, -6.0), (2.0, -2.5), (2.0, 6.0), (-6.5, 6.0)]));
+            painter.add(polyline(&[(-1.5, -6.0), (-1.5, -2.5), (2.0, -2.5)]));
+            painter.rect_filled(rect(1.0, 0.6, 2.0, 2.8), 0.0, fill);
+            round_line(painter, vec![p(-3.0, 2.0), p(6.3, 2.0)], line);
+            round_line(painter, rounded(&[p(3.6, -0.7), p(6.3, 2.0), p(3.6, 4.7)], &[0.0, 0.6 * k, 0.0]), line);
         }
         Icon::File => {
             // A page with its top right corner folded.

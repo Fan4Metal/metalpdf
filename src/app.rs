@@ -20,7 +20,8 @@ use egui::{
 use crate::cache::Textures;
 use crate::dialog::{Ask, Dialogs};
 use crate::document::{DocState, Status};
-use crate::engine::{DocId, Edit, Engine, Event, Printed, RenderKey, Request};
+use crate::engine::{DocId, Edit, Engine, Event, Exported, Printed, RenderKey, Request};
+use crate::export::Format;
 use crate::pdfium::Target;
 use crate::pixels::Pixels;
 use crate::settings::{FilePosition, Settings, ThemeSetting, ViewMode, WindowGeometry, ZoomSetting, same_path};
@@ -409,6 +410,8 @@ pub struct App {
     print: Option<crate::ui::print::PrintDialog>,
     /// The print job under way: the document, sheets sent, sheets in all.
     printing: Option<(DocId, usize, usize)>,
+    /// The export under way: the document, to what, pages done, in all.
+    exporting: Option<(DocId, Format, usize, usize)>,
     /// The reader chose to quit with unsaved edits: the close goes on.
     quitting: bool,
     /// `logic` answered the root's close this pass (it was minimized):
@@ -623,6 +626,7 @@ impl App {
             confirm: None,
             print: None,
             printing: None,
+            exporting: None,
             sidebar_before_search: None,
             quitting: false,
             root_close_handled: false,
@@ -772,6 +776,37 @@ impl App {
                 }
                 if let Some(name) = edited_name(&path) {
                     dialog = dialog.set_file_name(name);
+                }
+                dialog
+            },
+            crate::dialog::save_file,
+        );
+    }
+
+    /// Ask where to save the active tab's document as a Word document or a
+    /// PowerPoint presentation: beside the PDF, under its name.
+    fn export_dialog(&mut self, ctx: &egui::Context, format: Format) {
+        let w = &self.windows[self.current];
+        let Some(tab) = w.active_tab() else { return };
+        if !tab.doc.ready() {
+            return;
+        }
+        let (path, hwnd, id) = (tab.path.clone(), w.hwnd, tab.id);
+        self.dialogs.start(
+            ctx,
+            hwnd,
+            Ask::Export { tab: id, format },
+            move || {
+                let (name, ext) = match format {
+                    Format::Docx => (tr!("Word document", "Документ Word"), "docx"),
+                    Format::Pptx => (tr!("PowerPoint presentation", "Презентация PowerPoint"), "pptx"),
+                };
+                let mut dialog = rfd::FileDialog::new().add_filter(name, &[ext]);
+                if let Some(folder) = path.parent() {
+                    dialog = dialog.set_directory(folder);
+                }
+                if let Some(stem) = path.file_stem() {
+                    dialog = dialog.set_file_name(format!("{}.{ext}", stem.to_string_lossy()));
                 }
                 dialog
             },
@@ -1112,6 +1147,27 @@ impl App {
                     }
                 }
                 Event::PrintProgress { id, done, total } => self.printing = Some((id, done, total)),
+                Event::ExportProgress { id, done, total } => {
+                    if let Some((doc, _, d, t)) = self.exporting.as_mut()
+                        && *doc == id
+                    {
+                        (*d, *t) = (done, total);
+                    }
+                }
+                Event::Exported { id, path, outcome } => {
+                    let format = self.exporting.take().map_or(Format::Docx, |e| e.1);
+                    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    let text = match (&outcome, format) {
+                        (Exported::Done, _) => tr!(format!("Saved as {name}"), format!("Сохранено как {name}")),
+                        (Exported::Cancelled, Format::Docx) => tr!("Saving as Word stopped", "Сохранение в Word остановлено").to_owned(),
+                        (Exported::Cancelled, Format::Pptx) => tr!("Saving as PowerPoint stopped", "Сохранение в PowerPoint остановлено").to_owned(),
+                        (Exported::Failed(e), Format::Docx) => tr!(format!("Could not save as Word: {e}"), format!("Не удалось сохранить в Word: {e}")),
+                        (Exported::Failed(e), Format::Pptx) => tr!(format!("Could not save as PowerPoint: {e}"), format!("Не удалось сохранить в PowerPoint: {e}")),
+                    };
+                    if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == id) {
+                        tab.notify(text);
+                    }
+                }
                 Event::Printed { id, outcome } => {
                     self.printing = None;
                     let text = match &outcome {
@@ -1682,6 +1738,9 @@ impl App {
         if actions.iter().any(|a| matches!(a, ToolbarAction::CancelPrint)) {
             self.engine.request(Request::CancelPrint);
         }
+        if actions.iter().any(|a| matches!(a, ToolbarAction::CancelExport)) {
+            self.engine.request(Request::CancelExport);
+        }
         let engine = &self.engine;
         let mut mode_change = None;
         let mut zoom_change = None;
@@ -1728,7 +1787,7 @@ impl App {
                         tab.image = None;
                         tab.selection = None;
                     }
-                    ToolbarAction::Print | ToolbarAction::CancelPrint => {}
+                    ToolbarAction::Print | ToolbarAction::CancelPrint | ToolbarAction::Export(_) | ToolbarAction::CancelExport => {}
                 }
             }
         }
@@ -2606,6 +2665,7 @@ impl App {
                     note,
                     note_is_error: false,
                     printing: self.printing.map(|(_, done, total)| (done, total)),
+                    exporting: self.exporting.map(|(_, format, done, total)| (format, done, total)),
                 };
                 (info, page_resolver(&tab.doc))
             }
@@ -2622,6 +2682,7 @@ impl App {
                     note: String::new(),
                     note_is_error: false,
                     printing: self.printing.map(|(_, done, total)| (done, total)),
+                    exporting: self.exporting.map(|(_, format, done, total)| (format, done, total)),
                 },
                 Box::new(|_: &str| None),
             ),
@@ -2629,6 +2690,9 @@ impl App {
         let actions = crate::ui::toolbar::show(ui, &info, &mut self.windows[cur].page_field, resolve);
         if actions.iter().any(|a| matches!(a, ToolbarAction::Print)) {
             self.open_print(ui.ctx());
+        }
+        if let Some(&ToolbarAction::Export(format)) = actions.iter().find(|a| matches!(a, ToolbarAction::Export(_))) {
+            self.export_dialog(ui.ctx(), format);
         }
         if !actions.is_empty() {
             self.apply_toolbar(actions);
@@ -2691,7 +2755,7 @@ impl App {
         let wid = self.windows[cur].id;
         // No toolbar on the start page, where it has nothing to act on;
         // a print job under way keeps it for its progress and its cross.
-        if self.windows[cur].active_tab().is_some() || self.printing.is_some() {
+        if self.windows[cur].active_tab().is_some() || self.printing.is_some() || self.exporting.is_some() {
             Panel::top(Id::unique(("toolbar", wid)))
                 .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(Margin::symmetric(8, 4)))
                 .show(ui, |ui| self.toolbar(ui));
@@ -2898,6 +2962,21 @@ impl eframe::App for App {
                                 };
                                 self.engine.request(Request::Edit { id: t.doc.id, edit });
                             }
+                        }
+                    }
+                }
+                Ask::Export { tab, format } => {
+                    if let Some(path) = answer.paths.first() {
+                        // The format the name asks for; none named, the one
+                        // chosen, its extension added.
+                        let (path, format) = match Format::of(path) {
+                            Some(f) => (path.clone(), f),
+                            None => (path.with_extension(format.extension()), format),
+                        };
+                        let found = self.all_tabs().find(|t| t.id == tab).map(|t| (t.doc.id, t.doc.page_count));
+                        if let Some((id, count)) = found {
+                            self.engine.request(Request::Export { id, path, format });
+                            self.exporting = Some((id, format, 0, count));
                         }
                     }
                 }

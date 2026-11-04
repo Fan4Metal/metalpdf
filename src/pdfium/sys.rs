@@ -36,6 +36,7 @@ pub type FPDF_FORMHANDLE = *mut c_void;
 pub type FPDF_PAGEOBJECT = *mut c_void;
 pub type FPDF_FONT = *mut c_void;
 pub type FPDF_PAGEOBJECTMARK = *mut c_void;
+pub type FPDF_PATHSEGMENT = *mut c_void;
 
 pub type FPDF_BOOL = c_int;
 pub type FPDF_DWORD = c_ulong;
@@ -258,6 +259,14 @@ pub const FPDF_PAGEOBJ_FORM: c_int = 5;
 pub const FPDF_TEXTRENDERMODE_INVISIBLE: c_int = 3;
 pub const FPDF_TEXTRENDERMODE_CLIP: c_int = 7;
 
+// Path segment types (FPDFPathSegment_GetType).
+pub const FPDF_SEGMENT_LINETO: c_int = 1;
+pub const FPDF_SEGMENT_BEZIERTO: c_int = 2;
+pub const FPDF_SEGMENT_MOVETO: c_int = 0;
+
+// Fill and stroke: how some generators make a regular font look bold.
+pub const FPDF_TEXTRENDERMODE_FILL_STROKE: c_int = 2;
+
 // FPDFPage_Flatten: what for, and what came of it.
 pub const FLAT_PRINT: c_int = 1;
 pub const FLATTEN_SUCCESS: c_int = 1;
@@ -379,6 +388,13 @@ api! {
     FPDFText_GetSchCount: fn(FPDF_SCHHANDLE) -> c_int;
     FPDFText_FindClose: fn(FPDF_SCHHANDLE);
     FPDFText_GetTextObject: fn(FPDF_TEXTPAGE, c_int) -> FPDF_PAGEOBJECT;
+    // A character's font (name in UTF-8, the length with the terminator
+    // returned; descriptor flags), weight, fill colour and matrix: what
+    // the export to Word and PowerPoint styles its runs with.
+    FPDFText_GetFontInfo: fn(FPDF_TEXTPAGE, c_int, *mut c_void, c_ulong, *mut c_int) -> c_ulong;
+    FPDFText_GetFontWeight: fn(FPDF_TEXTPAGE, c_int) -> c_int;
+    FPDFText_GetFillColor: fn(FPDF_TEXTPAGE, c_int, *mut c_uint, *mut c_uint, *mut c_uint, *mut c_uint) -> FPDF_BOOL;
+    FPDFText_GetMatrix: fn(FPDF_TEXTPAGE, c_int, *mut FS_MATRIX) -> FPDF_BOOL;
     FPDFLink_LoadWebLinks: fn(FPDF_TEXTPAGE) -> FPDF_PAGELINK;
     FPDFLink_CountWebLinks: fn(FPDF_PAGELINK) -> c_int;
     FPDFLink_GetURL: fn(FPDF_PAGELINK, c_int, *mut c_ushort, c_int) -> c_int;
@@ -412,6 +428,14 @@ api! {
     FPDFPageObj_GetType: fn(FPDF_PAGEOBJECT) -> c_int;
     FPDFPageObj_GetBounds: fn(FPDF_PAGEOBJECT, *mut c_float, *mut c_float, *mut c_float, *mut c_float) -> FPDF_BOOL;
     FPDFPageObj_Transform: fn(FPDF_PAGEOBJECT, c_double, c_double, c_double, c_double, c_double, c_double);
+    // The export's look at the graphics: a path's segments (straight and
+    // square, or curves), a form XObject's objects.
+    FPDFPath_CountSegments: fn(FPDF_PAGEOBJECT) -> c_int;
+    FPDFPath_GetPathSegment: fn(FPDF_PAGEOBJECT, c_int) -> FPDF_PATHSEGMENT;
+    FPDFPathSegment_GetPoint: fn(FPDF_PATHSEGMENT, *mut c_float, *mut c_float) -> FPDF_BOOL;
+    FPDFPathSegment_GetType: fn(FPDF_PATHSEGMENT) -> c_int;
+    FPDFFormObj_CountObjects: fn(FPDF_PAGEOBJECT) -> c_int;
+    FPDFFormObj_GetObject: fn(FPDF_PAGEOBJECT, c_ulong) -> FPDF_PAGEOBJECT;
     FPDFImageObj_LoadJpegFileInline: fn(*mut FPDF_PAGE, c_int, FPDF_PAGEOBJECT, *mut FPDF_FILEACCESS) -> FPDF_BOOL;
     FPDFImageObj_SetBitmap: fn(*mut FPDF_PAGE, c_int, FPDF_PAGEOBJECT, FPDF_BITMAP) -> FPDF_BOOL;
     FPDFImageObj_SetMatrix: fn(FPDF_PAGEOBJECT, c_double, c_double, c_double, c_double, c_double, c_double) -> FPDF_BOOL;
