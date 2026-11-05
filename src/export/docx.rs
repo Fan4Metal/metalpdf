@@ -476,10 +476,15 @@ fn line_xml(x: &mut String, l: &Line, heading: Option<usize>, out: &mut Out) {
         tw(l.width.max(1.0) + l.size.max(2.0)),
         tw(l.x)
     );
+    line_runs_xml(x, l, out.fonts, out.lookup, &mut out.faces, &mut out.measurements, &mut out.id);
+    x.push_str("</w:p>");
+}
+
+fn line_runs_xml(x: &mut String, l: &Line, fonts: &[FontInfo], lookup: &mut crate::fonts::Fonts, faces: &mut Faces, measurements: &mut Measurements, id: &mut usize) {
     for run in &l.runs {
-        let face = out.faces.get(run.font, out.fonts, out.lookup);
-        out.id += 1;
-        let id = out.id;
+        let face = faces.get(run.font, fonts, lookup);
+        *id += 1;
+        let run_id = *id;
         let f = esc(&face.family);
         let _ = write!(
             x,
@@ -496,8 +501,7 @@ fn line_xml(x: &mut String, l: &Line, heading: Option<usize>, out: &mut Out) {
         }
         let [r, g, b] = run.color;
         let hp = ((run.size * 2.0).round() as i64).clamp(2, 3276);
-        let scale = out
-            .measurements
+        let scale = measurements
             .width(run.font, &face, &run.text, hp as f32 / 2.0)
             .map_or(100, |width| {
                 (100.0 * run.width / width).round().clamp(1.0, 600.0) as i64
@@ -505,12 +509,49 @@ fn line_xml(x: &mut String, l: &Line, heading: Option<usize>, out: &mut Out) {
         let shift = ((l.baseline - run.baseline) * 2.0).round() as i64;
         let _ = write!(
             x,
-            r#"<w:color w:val="{r:02X}{g:02X}{b:02X}"/><w:w w:val="{scale}"/><w:position w:val="{shift}"/><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/><w:fitText w:val="{}" w:id="{id}"/></w:rPr><w:t xml:space="preserve">{}</w:t></w:r>"#,
+            r#"<w:color w:val="{r:02X}{g:02X}{b:02X}"/><w:w w:val="{scale}"/><w:position w:val="{shift}"/><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/><w:fitText w:val="{}" w:id="{run_id}"/></w:rPr><w:t xml:space="preserve">{}</w:t></w:r>"#,
             tw(run.width).max(1),
             esc(&run.text)
         );
     }
-    x.push_str("</w:p>");
+}
+
+/// Positioned editable labels inside a DrawingML group. The group moves
+/// and scales with its background, including when it is an inline figure.
+pub(super) struct TextBoxes {
+    faces: Faces,
+    measurements: Measurements,
+    id: usize,
+}
+
+impl TextBoxes {
+    pub(super) fn new() -> Self {
+        Self { faces: Faces::default(), measurements: Measurements::new(), id: 0 }
+    }
+
+    pub(super) fn write(&mut self, x: &mut String, line: &layout::Line, rect: [f32; 4], fonts: &[FontInfo], lookup: &mut crate::fonts::Fonts) {
+        let origin = [rect[0],rect[1]];
+        let mut l = line_out(line, 1.0, None, false);
+        l.x -= origin[0];
+        l.baseline -= origin[1];
+        for run in &mut l.runs { run.baseline -= origin[1]; }
+        let height = tw(2.0 * l.size).max(20);
+        // Keep each child's geometry inside the group's viewport. Word
+        // otherwise normalises the group to its oversized line boxes and
+        // changes both the artwork position and inline pagination. The
+        // roomy exact line box may overflow its tight, transparent shape;
+        // run positioning retains the source baseline without clipping ink.
+        let box_top = (line.rect[1]-origin[1]).max(0.0);
+        let box_bottom = (line.rect[3]-origin[1]).min(rect[3]-origin[1]);
+        let top = emu(box_top);
+        let left = emu(l.x.max(0.0));
+        let cx = emu((l.width + l.size).min(rect[2]-origin[0]-l.x).max(1.0));
+        let cy = emu((box_bottom-box_top).max(1.0));
+        l.baseline = box_top + height as f32 / 25.0;
+        let _ = write!(x, r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="{left}" y="{top}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:widowControl w:val="0"/><w:suppressAutoHyphens/><w:snapToGrid w:val="0"/><w:spacing w:before="0" w:after="0" w:line="{height}" w:lineRule="exact"/><w:ind w:left="0" w:right="0" w:firstLine="0"/><w:jc w:val="left"/></w:pPr>"#);
+        line_runs_xml(x, &l, fonts, lookup, &mut self.faces, &mut self.measurements, &mut self.id);
+        x.push_str(r#"</w:p></w:txbxContent></wps:txbx><wps:bodyPr rot="0" vertOverflow="overflow" horzOverflow="overflow" wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp>"#);
+    }
 }
 
 fn sect_pr(size: [f32; 2]) -> String {

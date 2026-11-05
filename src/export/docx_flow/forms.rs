@@ -336,7 +336,7 @@ mod tests {
         table.rows[0].cells[0].fill = [212; 3];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = super::super::Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: Default::default(), margin_left: 20.0 };
+        let mut out = super::super::Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: Default::default(), margin_left: 20.0, textboxes:crate::export::docx::TextBoxes::new() };
         let mut xml = String::new();
         write(&mut xml, &table, 20.0, &mut out);
         assert!(xml.contains(r#"w:fill="D4D4D4""#));

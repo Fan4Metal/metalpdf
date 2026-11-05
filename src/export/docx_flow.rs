@@ -27,6 +27,7 @@ use crate::pdfium::{Page, sys::Api};
 mod toc;
 mod artwork;
 mod forms;
+mod overlay;
 
 struct InlinePicture {
     marker: char,
@@ -38,7 +39,7 @@ struct InlinePicture {
 
 struct Decoration {
     rel: usize,
-    rect: [f32; 4],
+    region: overlay::Region,
 }
 
 struct Tab {
@@ -91,7 +92,7 @@ struct DocPara {
 
 enum Block {
     Para(DocPara),
-    Picture { rel: usize, width: f32, height: f32, align: Align, left: f32, top: f32, bottom: f32 },
+    Picture { rel: usize, width: f32, height: f32, align: Align, left: f32, top: f32, bottom: f32, region: overlay::Region },
     Grid(forms::Table),
 }
 
@@ -213,12 +214,18 @@ impl Writer {
         }
         let (items, drop_caps) = flowing_items(&prepared.content);
         let mut render: Option<Option<crate::pdfium::Bitmap>> = None;
+        let decoration_regions: Vec<_> = prepared.decorations.iter().chain(form.iter().flat_map(|f| &f.decorations)).copied().collect();
+        let regions = decoration_regions.iter().copied().chain(items.iter().filter_map(|item| match item {
+            Item::Figure(f) if !form.as_ref().is_some_and(|form| (0..4).all(|k| (form.table.rect[k]-f.rect[k]).abs()<1.0)) => Some(f.rect),
+            _ => None,
+        })).collect();
+        let mut layers = overlay::Layers::prepare(page, content, regions, &mut render)?;
         let mut blocks: Vec<Option<Block>> = Vec::with_capacity(items.len());
         let mut extent: Option<[f32; 4]> = None;
         let mut decorations = Vec::new();
-        for &rect in prepared.decorations.iter().chain(form.iter().flat_map(|f|&f.decorations)) {
-            let png = render_crop(page, content, rect, &mut render)?;
-            decorations.push(Decoration { rel: self.picture(&png)?, rect });
+        for rect in decoration_regions {
+            let (png, region) = layers.take(page, content, rect, &mut render)?;
+            decorations.push(Decoration { rel: self.picture(&png)?, region });
         }
         for item in &items {
             let r = item.rect();
@@ -264,7 +271,7 @@ impl Writer {
                         continue;
                     }
                     let (fw, fh) = (f.rect[2] - f.rect[0], f.rect[3] - f.rect[1]);
-                    let png = render_crop(page, content, f.rect, &mut render)?;
+                    let (png, region) = layers.take(page, content, f.rect, &mut render)?;
                     let rel = self.picture(&png)?;
                     let mid = (f.column[0] + f.column[1]) / 2.0;
                     let col_w = (f.column[1] - f.column[0]).max(1.0);
@@ -279,7 +286,7 @@ impl Writer {
                     // Leave room for Word's margins and the inline picture's
                     // paragraph on image-only pages, including landscape scans.
                     let fit = if fw > 0.95 * w && fh > 0.95 * h { ((h - 64.0).max(1.0) / fh).min(1.0) } else { 1.0 };
-                    blocks.push(Some(Block::Picture { rel, width: fw * fit, height: fh * fit, align, left: (f.rect[0] - f.column[0]).max(0.0), top: f.rect[1], bottom: f.rect[3] }));
+                    blocks.push(Some(Block::Picture { rel, width: fw * fit, height: fh * fit, align, left: (f.rect[0] - f.column[0]).max(0.0), top: f.rect[1], bottom: f.rect[3], region }));
                 }
             }
         }
@@ -407,7 +414,7 @@ impl Writer {
                 scales.insert(*font, (100.0 * ratio).round().min(100.0) as i64);
             }
         }
-        let mut out = Out { fonts, lookup, faces: &mut faces, doc_pr: 0, scales, margin_left:0.0 };
+        let mut out = Out { fonts, lookup, faces: &mut faces, doc_pr: 0, scales, margin_left:0.0, textboxes:docx::TextBoxes::new() };
         let mut body = String::new();
         let mut last_sect = String::new();
         for &(from, to, margins) in &runs {
@@ -531,7 +538,7 @@ fn picture_page_size(size: [f32; 2]) -> [f32; 2] {
 /// picture padding, shrinking to text margins, and an extra blank page.
 fn picture_page_xml(x: &mut String, rel: usize, size: [f32; 2], out: &mut Out) {
     x.push_str(r#"<w:p><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr>"#);
-    decoration_xml(x, &Decoration { rel, rect: [0.0, 0.0, size[0], size[1]] }, out);
+    decoration_xml(x, &Decoration { rel, region:overlay::Region { rect: [0.0, 0.0, size[0], size[1]], lines:Vec::new() } }, out);
     x.push_str("</w:p>");
 }
 
@@ -539,10 +546,13 @@ fn decoration_xml(x: &mut String, d: &Decoration, out: &mut Out) {
     out.doc_pr += 1;
     let n = out.doc_pr;
     let rel = d.rel;
-    let (cx, cy) = (emu(d.rect[2] - d.rect[0]), emu(d.rect[3] - d.rect[1]));
-    let (left, top) = (emu(d.rect[0]), emu(d.rect[1]));
+    let r = d.region.rect;
+    let (cx, cy) = (emu(r[2] - r[0]), emu(r[3] - r[1]));
+    let (left, top) = (emu(r[0]), emu(r[1]));
     let _ = write!(x,
-        r#"<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="1" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>{left}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>{top}</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:wrapNone/><wp:docPr id="{n}" name="Page image {n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#);
+        r#"<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="1" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>{left}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>{top}</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:wrapNone/><wp:docPr id="{n}" name="Page image {n}"/>"#);
+    overlay::graphic(x, rel, n, [cx,cy], &d.region, out);
+    x.push_str("</wp:anchor></w:drawing></w:r>");
 }
 
 fn render_crop(page: &Page, content: &PageContent, r: [f32; 4], render: &mut Option<Option<crate::pdfium::Bitmap>>) -> Result<Vec<u8>, String> {
@@ -673,6 +683,7 @@ struct Out<'a> {
     doc_pr: usize,
     scales: HashMap<u16, i64>,
     margin_left: f32,
+    textboxes: docx::TextBoxes,
 }
 
 /// Where the block before ended, for the space before the next: its last
@@ -738,7 +749,7 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             paragraph_runs(x, p, out);
             *prev = Prev { baseline: Some(p.last_baseline), bottom: Some(p.bottom) };
         }
-        Block::Picture { rel, width, height, align, left, top, bottom } => {
+        Block::Picture { rel, width, height, align, left, top, bottom, region } => {
             let k = (col_w / width).min(1.0);
             let (cx, cy) = (emu(width * k), emu(height * k));
             let before = paragraph_gap(prev.bottom.map_or(0.0, |b| top - b), 10.0);
@@ -754,8 +765,10 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             }
             let _ = write!(
                 x,
-                r#"<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{n}" name="Picture {n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+                r#"<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{n}" name="Picture {n}"/>"#
             );
+            overlay::graphic(x, *rel, n, [cx,cy], region, out);
+            x.push_str("</wp:inline></w:drawing></w:r>");
             *prev = Prev { baseline: None, bottom: Some(*bottom) };
         }
     }
@@ -872,7 +885,19 @@ fn close_section(body: &mut String, sect: &str) {
         body.push_str(&format!("<w:p><w:pPr>{sect}</w:pPr></w:p>"));
         return;
     }
-    let Some(start) = body.rfind("<w:p>") else {
+    // Text boxes contain nested paragraphs. The section belongs to the
+    // surrounding body paragraph, never the last label inside a drawing.
+    let mut depth = 0usize;
+    let start = body.rmatch_indices('<').find_map(|(at, _)| {
+        let tag = &body[at..];
+        if tag.starts_with("</w:p>") { depth += 1; }
+        if tag.starts_with("<w:p>") {
+            if depth <= 1 { return Some(at); }
+            depth -= 1;
+        }
+        None
+    });
+    let Some(start) = start else {
         body.push_str(&format!("<w:p><w:pPr>{sect}</w:pPr></w:p>"));
         return;
     };
@@ -1083,6 +1108,14 @@ mod tests {
     use crate::export::{Graphic, GraphicKind};
 
     #[test]
+    fn section_break_follows_the_body_instead_of_a_nested_textbox() {
+        let mut body = String::from("<w:p><w:pPr/></w:p><w:p><w:pPr></w:pPr><w:r><w:drawing><w:txbxContent><w:p><w:pPr></w:pPr><w:r><w:t>Label</w:t></w:r></w:p></w:txbxContent></w:drawing></w:r></w:p>");
+        close_section(&mut body,"<w:sectPr/>");
+        assert!(body.contains("<w:pPr><w:sectPr/></w:pPr><w:r><w:drawing>"));
+        assert!(!body.contains("<w:txbxContent><w:p><w:pPr><w:sectPr/>"));
+    }
+
+    #[test]
     fn outlined_pages_are_pictures_but_visible_and_ocr_text_stay_editable() {
         let mut page = PageContent { size: [600.0, 800.0], ..Default::default() };
         assert!(!graphics_page(&page));
@@ -1184,7 +1217,7 @@ mod tests {
         let fonts = [FontInfo { name: "PetersburgC".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0 };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0, textboxes:docx::TextBoxes::new() };
         let mut xml = String::new();
         let mut prev = Prev { baseline: Some(60.0), bottom: Some(62.0) };
         block_xml(&mut xml, &Block::Para(doc_para(p, Some(&caps[0]))), &mut prev, 340.0, false, &|_| None, &mut out);
@@ -1232,7 +1265,7 @@ mod tests {
         let fonts = [FontInfo { name: "Tahoma".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0 };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0, textboxes:docx::TextBoxes::new() };
         let mut xml = String::new();
         let mut prev = Prev { baseline: Some(94.0), bottom: Some(100.0) };
         assert!(para_before(&para, &prev) > 80.0);
