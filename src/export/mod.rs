@@ -9,12 +9,10 @@
 //! and finds the figures (pictures and drawings, with the labels inside
 //! them). The two formats use this differently:
 //!
-//! - **Word** gets flowing text: paragraphs that wrap again when edited,
-//!   headings by size (Word's Heading 1–3 styles, so the navigation pane
-//!   shows them), lists with a hanging indent, the figures as pictures
-//!   where they were in the reading order, a page break where a page of
-//!   the PDF began, the page size and margins of the PDF. Columns become
-//!   one column; a table becomes its cells' paragraphs.
+//! - **Word** gets editable lines in page-anchored text frames, with their
+//!   original positions and word advances. The artwork is rendered without
+//!   that text, behind the frames. Page sizes, orientations and breaks are
+//!   preserved; font substitution cannot reflow text onto another page.
 //! - **PowerPoint** gets one slide a page, laid out as the page: a text
 //!   box a paragraph where the paragraph was, the pictures as pictures,
 //!   and what is neither (the drawings, rules, shadings, text at an
@@ -24,7 +22,7 @@
 //! The job runs on the engine thread a page per turn of its loop, as
 //! printing does (`engine::Worker::export_page`), on a copy of the
 //! document of its own: its pages are flattened (form fields made
-//! content) and, for PowerPoint, have their text hidden for the picture.
+//! content) and have their exported text hidden for the artwork picture.
 
 pub mod docx;
 pub mod layout;
@@ -67,6 +65,8 @@ impl Format {
 /// top left corner of the page as shown, y down).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Glyph {
+    /// Index in PDFium's text page; -1 in geometry-only fixtures.
+    pub source: i32,
     /// U+00AD for a hyphen PDFium found at a line's end.
     pub ch: char,
     /// left, top, right, bottom: the loose box (the font's ascent and
@@ -270,7 +270,7 @@ impl Job {
         }
         let index = self.next;
         let page = self.doc.load_page(index).and_then(|p| p.flattened()).ok_or_else(|| format!("page {} could not be loaded", index + 1))?;
-        let content = page.export_content(&mut self.fonts, matches!(self.writer, Some(Writer::Docx(_))));
+        let content = page.export_content(&mut self.fonts, false);
         let result = match self.writer.as_mut() {
             Some(Writer::Docx(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
             Some(Writer::Pptx(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
@@ -363,6 +363,29 @@ pub fn run(input: &Path, output: &Path, password: Option<&str>) -> Result<usize,
 mod tests {
     use super::zip::read_entry;
 
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn pdfium_docx_hides_only_fully_exported_text_objects() {
+        let input = crate::pdfium::tests::sample_file("export-complete-objects");
+        let api = crate::pdfium::init().unwrap();
+        let doc = crate::pdfium::Document::open(api, &input, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let content = page.export_content(&mut Default::default(), false);
+        let before = page.render_whole(595, 842, 0).unwrap();
+        // One letter of a text object is insufficient: the remaining letters
+        // must not disappear from the artwork when a label is not exported.
+        let partial = [content.glyphs[0].source].into_iter().collect();
+        assert!(page.hide_selected_text(&partial).is_empty());
+        let after = page.render_whole(595, 842, 0).unwrap();
+        assert_eq!(before.pixels(), after.pixels());
+        let all = content.glyphs.iter().map(|g| g.source).collect();
+        assert_eq!(page.hide_selected_text(&all), all);
+        assert!(super::all_white(page.render_whole(595, 842, 0).unwrap().pixels()));
+        drop(page);
+        drop(doc);
+        std::fs::remove_file(input).unwrap();
+    }
+
     /// The hand-written sample (`pdfium::tests::sample_pdf`: text on an A4
     /// page, a landscape page by /Rotate 90 with a picture) as a Word
     /// document and as a presentation: the archives hold their parts, the
@@ -377,13 +400,14 @@ mod tests {
         let bytes = std::fs::read(&out).unwrap();
         let _ = std::fs::remove_file(&out);
         let doc = text(&bytes, "word/document.xml");
-        assert!(doc.contains("Hello MetalPDF") && doc.contains("Second line of text") && doc.contains("Page two"), "{doc}");
-        // The 24 pt title is a heading; page 2 starts a new page, turned
-        // back so that its text, sideways on the landscape page, runs
-        // across a portrait one.
+        let plain: String = doc.split("<w:t ").skip(1).filter_map(|s| s.split_once('>').and_then(|(_, s)| s.split_once("</w:t>").map(|(t, _)| t))).collect();
+        assert!(plain.contains("Hello MetalPDF") && plain.contains("Second line of text"), "{plain}");
+        // The title is editable and a heading; the rotated landscape
+        // page retains its paper orientation and sideways text as artwork.
         assert!(doc.contains(r#"<w:pStyle w:val="Heading1"/>"#));
         assert_eq!(doc.matches(r#"<w:type w:val="nextPage"/>"#).count(), 2);
-        assert!(!doc.contains(r#"w:orient="landscape""#));
+        assert!(doc.contains(r#"w:orient="landscape""#));
+        assert!(doc.contains("<w:framePr") && doc.contains("<w:fitText"));
         assert!(doc.contains("<w:drawing>") && read_entry(&bytes, "word/media/image1.png").is_some_and(|png| png.starts_with(b"\x89PNG")));
         for part in ["[Content_Types].xml", "_rels/.rels", "word/styles.xml", "word/_rels/document.xml.rels", "docProps/core.xml"] {
             assert!(read_entry(&bytes, part).is_some(), "no {part}");

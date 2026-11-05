@@ -257,6 +257,7 @@ pub const FPDF_PAGEOBJ_FORM: c_int = 5;
 // Text render modes (fpdf_edit.h): fill, stroke, fill and stroke,
 // invisible, then the same four clipping as well.
 pub const FPDF_TEXTRENDERMODE_INVISIBLE: c_int = 3;
+pub const FPDF_TEXTRENDERMODE_FILL: c_int = 0;
 pub const FPDF_TEXTRENDERMODE_CLIP: c_int = 7;
 
 // Path segment types (FPDFPathSegment_GetType).

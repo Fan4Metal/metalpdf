@@ -242,6 +242,7 @@ impl Page {
                 let (mut r, mut g, mut b, mut a): (c_uint, c_uint, c_uint, c_uint) = (0, 0, 0, 255);
                 unsafe { (api.FPDFText_GetFillColor)(text, index, &mut r, &mut g, &mut b, &mut a) };
                 content.glyphs.push(Glyph {
+                    source: index,
                     ch,
                     rect,
                     x: origin[0],
@@ -356,6 +357,41 @@ impl Page {
         }
     }
 
+    /// Hide complete text objects represented by the selected character
+    /// indices. Partial objects (figure labels, shadows, unmapped glyphs)
+    /// stay in the artwork in their entirety. Return the indices hidden.
+    pub fn hide_selected_text(&self, selected: &std::collections::HashSet<i32>) -> std::collections::HashSet<i32> {
+        let Some(text) = self.text_page() else { return Default::default() };
+        let api = self.api();
+        let count = unsafe { (api.FPDFText_CountChars)(text) }.max(0);
+        let mut objects: HashMap<sys::FPDF_PAGEOBJECT, (bool, Vec<i32>)> = HashMap::new();
+        for i in 0..count {
+            let code = unsafe { (api.FPDFText_GetUnicode)(text, i) };
+            if unsafe { (api.FPDFText_IsGenerated)(text, i) } == 1 || char::from_u32(code).is_some_and(char::is_whitespace) || matches!(code, 0xDC00..=0xDFFF) {
+                continue;
+            }
+            let object = unsafe { (api.FPDFText_GetTextObject)(text, i) };
+            if object.is_null() {
+                continue;
+            }
+            let entry = objects.entry(object).or_insert_with(|| {
+                let mode = unsafe { (api.FPDFTextObj_GetTextRenderMode)(object) };
+                (matches!(mode, sys::FPDF_TEXTRENDERMODE_FILL | sys::FPDF_TEXTRENDERMODE_FILL_STROKE | sys::FPDF_TEXTRENDERMODE_INVISIBLE), Vec::new())
+            });
+            entry.0 &= selected.contains(&i);
+            let (mut r, mut g, mut b, mut alpha) = (0, 0, 0, 0);
+            entry.0 &= unsafe { (api.FPDFText_GetFillColor)(text, i, &mut r, &mut g, &mut b, &mut alpha) } != 0 && alpha == 255;
+            entry.1.push(i);
+        }
+        let mut hidden = std::collections::HashSet::new();
+        for (object, (complete, indices)) in objects {
+            if complete && unsafe { (api.FPDFTextObj_SetTextRenderMode)(object, sys::FPDF_TEXTRENDERMODE_INVISIBLE) } != 0 {
+                hidden.extend(indices);
+            }
+        }
+        hidden
+    }
+
     /// For the picture of the page under PowerPoint's text: the text that
     /// goes out as text made invisible (what `export_content` took: real,
     /// horizontal, visible characters) and the top-level image objects
@@ -397,5 +433,28 @@ impl Page {
         let mut bitmap = Bitmap::new(self.api(), width, height)?;
         self.render(&mut bitmap, Placement { start_x: 0, start_y: 0, size_x: width as i32, size_y: height as i32, rotate: i32::from(turns % 4) }, sys::FPDF_ANNOT);
         Some(bitmap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn pdfium_docx_preserves_translucent_text_in_artwork() {
+        let input = crate::pdfium::tests::sample_file("export-translucent");
+        let api = crate::pdfium::init().unwrap();
+        let doc = crate::pdfium::Document::open(api, &input, None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let object = unsafe { (api.FPDFPage_GetObject)(page.handle.get(), 0) };
+        assert_ne!(unsafe { (api.FPDFPageObj_SetFillColor)(object, 0, 0, 0, 96) }, 0);
+        let content = page.export_content(&mut Default::default(), false);
+        let selected = content.glyphs.iter().map(|g| g.source).collect();
+        let hidden = page.hide_selected_text(&selected);
+        assert!(!hidden.is_empty()); // the ordinary second line is editable
+        assert!(content.glyphs.iter().filter(|g| g.size > 20.0).all(|g| !hidden.contains(&g.source)));
+        assert_eq!(unsafe { (api.FPDFTextObj_GetTextRenderMode)(object) }, super::sys::FPDF_TEXTRENDERMODE_FILL);
+        drop(page);
+        drop(doc);
+        std::fs::remove_file(input).unwrap();
     }
 }

@@ -132,15 +132,6 @@ pub enum Item {
     Figure(Figure),
 }
 
-impl Item {
-    pub fn rect(&self) -> Rect {
-        match self {
-            Item::Para(p) => p.rect,
-            Item::Figure(f) => f.rect,
-        }
-    }
-}
-
 /// What a format wants of the page.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -770,196 +761,6 @@ pub fn alignment(lines: &[Line], column: [f32; 2], size: f32) -> Align {
     Align::Left
 }
 
-/// A part of a page in columns side by side (a newspaper's, a paper's
-/// two), or in one: Word gets a section of that many columns for it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Segment {
-    /// The columns, left to right: left and right edges.
-    pub columns: Vec<[f32; 2]>,
-    /// The items in reading order: the column each is in, its index.
-    pub items: Vec<(usize, usize)>,
-    /// The columns' items line up in rows, and are short: a table.
-    pub table: Option<Table>,
-    /// One line read left to right (a running head with the title at the
-    /// left and the chapter at the right): one paragraph, its parts
-    /// parted by tabs.
-    pub line: bool,
-}
-
-/// A table found in a segment: its columns' edges and its rows, each a
-/// cell a column with the items in it (none in an empty cell).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Table {
-    pub columns: Vec<[f32; 2]>,
-    /// Per row: the top and bottom of what is in it, and the cells.
-    pub rows: Vec<([f32; 2], Vec<Vec<usize>>)>,
-}
-
-/// The rows of a segment's items when they make a table. A row starts
-/// with an item whose top is below the row's first by more than half an
-/// em; an item lower in a column than the row's is in its cell still
-/// when the row has not ended (a cell's second paragraph). A table has
-/// two rows at least, three in five of them with two cells or more, and
-/// either its rules drawn (as many paths in it as it has rows) or one
-/// line in each cell: columns of text line their tops up now and then,
-/// but their paragraphs are longer and nothing rules them.
-fn table_of(items: &[Item], columns: &[[f32; 2]], members: &[(usize, usize)], graphics: &[super::Graphic]) -> Option<Table> {
-    if members.iter().any(|&(_, k)| !matches!(items[k], Item::Para(_)) || items[k].lines() > 5) {
-        return None;
-    }
-    let mut sorted = members.to_vec();
-    sorted.sort_by(|a, b| items[a.1].rect()[1].total_cmp(&items[b.1].rect()[1]));
-    let mut rows: Vec<([f32; 2], Vec<Vec<usize>>)> = Vec::new();
-    for (c, k) in sorted {
-        let r = items[k].rect();
-        let size = match &items[k] {
-            Item::Para(p) => p.size,
-            Item::Figure(_) => 10.0,
-        };
-        match rows.last_mut() {
-            // Level with the row's top, or under its own cell's text
-            // within the row's height.
-            Some((span, cells)) if r[1] < span[0] + 0.5 * size || (!cells[c].is_empty() && r[1] < span[1] + 0.5 * size && cells.iter().enumerate().all(|(o, cell)| o == c || cell.iter().all(|&m| items[m].rect()[3] >= r[1]))) => {
-                span[1] = span[1].max(r[3]);
-                cells[c].push(k);
-            }
-            _ => {
-                let mut cells = vec![Vec::new(); columns.len()];
-                cells[c].push(k);
-                rows.push(([r[1], r[3]], cells));
-            }
-        }
-    }
-    // Rows of one cell at its ends (a page number under a table, a caption
-    // over it) are not the table's.
-    let filled = |cells: &Vec<Vec<usize>>| cells.iter().filter(|c| !c.is_empty()).count();
-    while rows.last().is_some_and(|(_, cells)| filled(cells) < 2) {
-        rows.pop();
-    }
-    while rows.first().is_some_and(|(_, cells)| filled(cells) < 2) {
-        rows.remove(0);
-    }
-    let full = rows.iter().filter(|(_, cells)| filled(cells) >= 2).count();
-    if rows.len() < 2 || full * 5 < rows.len() * 3 {
-        return None;
-    }
-    let rect = [columns[0][0], rows[0].0[0], columns[columns.len() - 1][1], rows[rows.len() - 1].0[1]];
-    let ruled = graphics
-        .iter()
-        .filter(|g| matches!(g.kind, super::GraphicKind::Path { .. }) && g.rect[0] >= rect[0] - 12.0 && g.rect[2] <= rect[2] + 12.0 && g.rect[1] >= rect[1] - 12.0 && g.rect[3] <= rect[3] + 12.0)
-        .count()
-        >= rows.len();
-    let one_line = members.iter().all(|&(_, k)| items[k].lines() == 1);
-    (ruled || one_line && rows.len() >= 3).then(|| Table { columns: columns.to_vec(), rows })
-}
-
-impl Item {
-    pub fn column(&self) -> [f32; 2] {
-        match self {
-            Item::Para(p) => p.column,
-            Item::Figure(f) => f.column,
-        }
-    }
-
-    fn lines(&self) -> usize {
-        match self {
-            Item::Para(p) => p.lines.len(),
-            Item::Figure(_) => 3,
-        }
-    }
-}
-
-/// The page's items in segments: runs of items whose columns have
-/// another beside them make a segment of those columns, read left to
-/// right (two to four, each with two lines at least: else a row of a
-/// table, kept in one column); the rest one-column segments.
-pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
-    let same = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1.0 && (a[1] - b[1]).abs() < 1.0;
-    let apart = |a: [f32; 2], b: [f32; 2]| a[1] <= b[0] + 1.0 || a[0] >= b[1] - 1.0;
-    let columns: Vec<[f32; 2]> = items.iter().map(Item::column).collect();
-    let side = |c: [f32; 2]| columns.iter().any(|&o| apart(o, c));
-    let single = |range: std::ops::Range<usize>| {
-        let column = range.clone().map(|k| columns[k]).fold([f32::INFINITY, f32::NEG_INFINITY], |a, c| [a[0].min(c[0]), a[1].max(c[1])]);
-        Segment { columns: vec![column], items: range.map(|k| (0, k)).collect(), table: None, line: false }
-    };
-    let mut out: Vec<Segment> = Vec::new();
-    let mut i = 0;
-    while i < items.len() {
-        if !side(columns[i]) {
-            let mut j = i + 1;
-            while j < items.len() && !side(columns[j]) {
-                j += 1;
-            }
-            out.push(single(i..j));
-            i = j;
-            continue;
-        }
-        let mut cols = vec![columns[i]];
-        let mut members = vec![(0, i)];
-        let mut j = i + 1;
-        while j < items.len() && side(columns[j]) {
-            let c = columns[j];
-            let cur = cols.len() - 1;
-            if same(c, cols[cur]) {
-                members.push((cur, j));
-            } else if c[0] >= cols[cur][1] - 1.0 {
-                cols.push(c);
-                members.push((cur + 1, j));
-            } else {
-                break;
-            }
-            j += 1;
-        }
-        let lines_in = |col: usize| members.iter().filter(|m| m.0 == col).map(|m| items[m.1].lines()).sum::<usize>();
-        let first_top = items[members[0].1].rect()[1];
-        let one_line = cols.len() >= 2
-            && members.iter().all(|&(_, k)| match &items[k] {
-                Item::Para(p) => p.lines.len() == 1 && (p.rect[1] - first_top).abs() < 0.5 * p.size,
-                Item::Figure(_) => false,
-            });
-        if one_line {
-            out.push(Segment { columns: cols, items: members, table: None, line: true });
-        } else if cols.len() >= 2
-            && let Some(table) = table_of(items, &cols, &members, graphics)
-        {
-            // What the table left out goes before or after it, by place.
-            let inside: std::collections::HashSet<usize> = table.rows.iter().flat_map(|(_, cells)| cells.iter().flatten().copied()).collect();
-            let top = table.rows[0].0[0];
-            let (mut before, mut after): (Vec<usize>, Vec<usize>) = members.iter().map(|m| m.1).filter(|k| !inside.contains(k)).partition(|&k| items[k].rect()[1] < top);
-            before.sort_by(|&a, &b| items[a].rect()[1].total_cmp(&items[b].rect()[1]));
-            after.sort_by(|&a, &b| items[a].rect()[1].total_cmp(&items[b].rect()[1]));
-            let loose = |ks: Vec<usize>| {
-                let column = ks.iter().map(|&k| columns[k]).fold([f32::INFINITY, f32::NEG_INFINITY], |a, c| [a[0].min(c[0]), a[1].max(c[1])]);
-                Segment { columns: vec![column], items: ks.into_iter().map(|k| (0, k)).collect(), table: None, line: false }
-            };
-            if !before.is_empty() {
-                out.push(loose(before));
-            }
-            out.push(Segment { columns: cols, items: inside.iter().map(|&k| (0, k)).collect(), table: Some(table), line: false });
-            if !after.is_empty() {
-                out.push(loose(after));
-            }
-        } else if (2..=4).contains(&cols.len()) && (0..cols.len()).all(|c| lines_in(c) >= 2) {
-            out.push(Segment { columns: cols, items: members, table: None, line: false });
-        } else {
-            out.push(single(i..j));
-        }
-        i = j;
-    }
-    // Neighbouring one-column segments are one.
-    let mut merged: Vec<Segment> = Vec::new();
-    for s in out {
-        match merged.last_mut() {
-            Some(last) if last.columns.len() == 1 && s.columns.len() == 1 && last.table.is_none() && s.table.is_none() && !last.line && !s.line => {
-                last.columns[0] = [last.columns[0][0].min(s.columns[0][0]), last.columns[0][1].max(s.columns[0][1])];
-                last.items.extend(s.items);
-            }
-            _ => merged.push(s),
-        }
-    }
-    merged
-}
-
 /// How a span sits against its line's baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vert {
@@ -1054,7 +855,8 @@ mod tests {
                 space = true;
                 continue;
             }
-            out.push(Glyph { ch: c, rect: [at, baseline - 9.0, at + 5.0, baseline + 2.5], x: at, baseline, size: 10.0, font: 0, color: [0; 3], space_before: std::mem::take(&mut space), invisible: false });
+            out.push(Glyph {
+                source: -1, ch: c, rect: [at, baseline - 9.0, at + 5.0, baseline + 2.5], x: at, baseline, size: 10.0, font: 0, color: [0; 3], space_before: std::mem::take(&mut space), invisible: false });
             at += 5.0;
         }
         out
@@ -1114,46 +916,6 @@ mod tests {
         assert_eq!(t.len(), 3, "{t:?}");
         assert!(t[1].starts_with("left column line 0") && t[1].ends_with("line 4 goes on"), "{t:?}");
         assert!(t[2].starts_with("right column line 0"), "{t:?}");
-    }
-
-    #[test]
-    fn a_title_over_two_columns_makes_two_segments() {
-        let mut g = text("A title across the whole page width, long enough to span", 40.0, 60.0);
-        for k in 0..4 {
-            g.extend(text(&format!("left column line {k} goes on"), 40.0, 100.0 + 12.0 * k as f32));
-            g.extend(text(&format!("right column line {k} goes on"), 320.0, 100.0 + 12.0 * k as f32));
-        }
-        let items = analyse(&page(g), OPTS);
-        let segs = segments(&items, &[]);
-        assert_eq!(segs.len(), 2, "{segs:?}");
-        assert_eq!(segs[0].columns.len(), 1);
-        assert_eq!(segs[1].columns.len(), 2);
-        assert_eq!(segs[1].items.iter().map(|m| m.0).collect::<Vec<_>>(), [0, 1]);
-    }
-
-    #[test]
-    fn cells_in_rows_make_a_table_and_columns_of_text_do_not() {
-        let mut g = text("A paragraph above the table that runs across the page", 40.0, 60.0);
-        for (k, (a, b)) in [("Name", "Value"), ("Width", "12 pt"), ("Height", "40 pt")].into_iter().enumerate() {
-            let y = 100.0 + 30.0 * k as f32;
-            g.extend(text(a, 50.0, y));
-            g.extend(text(b, 250.0, y));
-        }
-        let content = page(g);
-        let segs = segments(&analyse(&content, OPTS), &content.graphics);
-        let table = segs.iter().find_map(|s| s.table.as_ref()).expect("a table");
-        assert_eq!(table.columns.len(), 2);
-        assert_eq!(table.rows.len(), 3);
-        assert!(table.rows.iter().all(|(_, cells)| cells.iter().all(|c| c.len() == 1)));
-        // Two columns of long paragraphs are columns.
-        let mut g = Vec::new();
-        for k in 0..8 {
-            g.extend(text(&format!("left column line {k} goes on"), 40.0, 100.0 + 12.0 * k as f32));
-            g.extend(text(&format!("right column line {k} goes on"), 320.0, 100.0 + 12.0 * k as f32));
-        }
-        let content = page(g);
-        let segs = segments(&analyse(&content, OPTS), &content.graphics);
-        assert!(segs.iter().all(|s| s.table.is_none()), "{segs:?}");
     }
 
     #[test]
