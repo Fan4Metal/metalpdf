@@ -115,6 +115,8 @@ struct PageOut {
     segments: Vec<SegmentOut>,
     /// The extent of what is on it: left, top, right, bottom.
     extent: Option<[f32; 4]>,
+    /// A graphics-only page, including titles drawn as letter outlines.
+    picture: Option<usize>,
 }
 
 pub struct Writer {
@@ -151,9 +153,21 @@ impl Writer {
     }
 
     pub fn page(&mut self, _api: &'static Api, page: &Page, content: &PageContent, _fonts: &[FontInfo], _faces: &mut crate::fonts::Fonts) -> Result<(), String> {
-        let (items, drop_caps) = flowing_items(content);
         let [w, h] = content.size;
         let scale = super::PICTURE_DPI / 72.0;
+        if graphics_page(content) {
+            // Letter outlines have no editable paragraphs. Clustering them
+            // into inline figures tears a designed cover into separate words
+            // or letters. Keep the entire composition, including its margins.
+            let size = picture_page_size(content.size);
+            let (pw, ph) = (((size[0] * scale).round() as u32).max(1), ((size[1] * scale).round() as u32).max(1));
+            let bitmap = page.render_whole(pw, ph, content.turns).ok_or("could not render the graphics-only page")?;
+            let png = encode_png(pw, ph, &crop_bgrx(bitmap.pixels(), pw, [0, 0, pw, ph]), false)?;
+            let rel = self.picture(&png)?;
+            self.pages.push(PageOut { size, segments: Vec::new(), extent: None, picture: Some(rel) });
+            return Ok(());
+        }
+        let (items, drop_caps) = flowing_items(content);
         let (pw, ph) = (((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1));
         let mut render: Option<Option<crate::pdfium::Bitmap>> = None;
         let mut blocks: Vec<Option<Block>> = Vec::with_capacity(items.len());
@@ -262,7 +276,7 @@ impl Writer {
             })
             .filter(|s| !s.blocks.is_empty() || s.table.is_some())
             .collect();
-        self.pages.push(PageOut { size: content.size, segments, extent });
+        self.pages.push(PageOut { size: content.size, segments, extent, picture: None });
         Ok(())
     }
 
@@ -334,6 +348,14 @@ impl Writer {
                 let pg = &self.pages[pi];
                 let size = pg.size;
                 let text_w = (size[0] - margins[0] - margins[2]).max(72.0);
+                if let Some(rel) = pg.picture {
+                    if !last_sect.is_empty() {
+                        close_section(&mut body, &last_sect);
+                    }
+                    picture_page_xml(&mut body, rel, size, &mut out);
+                    last_sect = sect_pr(size, [0.0; 4], &[], size[0], true);
+                    continue;
+                }
                 if pg.segments.is_empty() {
                     // An empty page: a paragraph of its own carries it.
                     if !last_sect.is_empty() {
@@ -404,6 +426,26 @@ impl Writer {
         self.zip.finish().map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn graphics_page(content: &PageContent) -> bool {
+    content.glyphs.is_empty() && !content.graphics.is_empty()
+}
+
+fn picture_page_size(size: [f32; 2]) -> [f32; 2] {
+    // Word's 22-inch limit, applied uniformly to retain the aspect ratio.
+    let scale = (1584.0 / size[0].max(size[1]).max(1.0)).min(1.0);
+    size.map(|n| n * scale)
+}
+
+/// A page-sized, selectable image. Anchoring it to the page avoids inline
+/// picture padding, shrinking to text margins, and an extra blank page.
+fn picture_page_xml(x: &mut String, rel: usize, size: [f32; 2], out: &mut Out) {
+    out.doc_pr += 1;
+    let n = out.doc_pr;
+    let (cx, cy) = (emu(size[0]), emu(size[1]));
+    let _ = write!(x,
+        r#"<w:p><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="1" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:wrapNone/><wp:docPr id="{n}" name="Page image {n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#);
 }
 
 /// Recognise an isolated large letter beside several indented body lines.
@@ -879,6 +921,60 @@ fn styles_xml(face: Option<&super::Face>, size: f32) -> String {
 mod tests {
     use super::*;
     use crate::export::{Graphic, GraphicKind};
+
+    #[test]
+    fn outlined_pages_are_pictures_but_visible_and_ocr_text_stay_editable() {
+        let mut page = PageContent { size: [600.0, 800.0], ..Default::default() };
+        assert!(!graphics_page(&page));
+        page.graphics.push(Graphic { rect: [70.0, 100.0, 500.0, 650.0], kind: GraphicKind::Path { curved: true }, object: None });
+        assert!(graphics_page(&page));
+        page.glyphs = initial_page().glyphs;
+        assert!(!graphics_page(&page));
+        for g in &mut page.glyphs {
+            g.invisible = true;
+        }
+        assert!(!graphics_page(&page));
+        assert_eq!(picture_page_size([467.717, 660.472]), [467.717, 660.472]);
+        assert_eq!(picture_page_size([3168.0, 1584.0]), [1584.0, 792.0]);
+    }
+
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn pdfium_outlined_page_is_one_image_and_the_next_page_remains_editable() {
+        let stream = |text: &str| format!("<< /Length {} >>\nstream\n{text}\nendstream", text.len());
+        let pdf = crate::pdfium::tests::write_pdf(vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 450 300] /Contents 5 0 R >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 450] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>".into(),
+            stream("0 .7 .3 rg 30 200 70 50 re f 120 200 70 50 re f 210 200 70 50 re f"),
+            stream("BT /F1 12 Tf 40 400 Td (Ordinary body text remains editable) Tj ET 0 0 1 rg 120 180 30 30 re f 150 180 30 30 re f 135 210 30 30 re f"),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        ]);
+        let input = std::env::temp_dir().join(format!("metalpdf_vector_cover_{}.pdf", std::process::id()));
+        let output = input.with_extension("docx");
+        std::fs::write(&input, pdf).unwrap();
+        assert_eq!(crate::export::run_paragraphs(&input, &output, None).unwrap(), 2);
+        let bytes = std::fs::read(&output).unwrap();
+        let read = |name| crate::export::zip::read_entry(&bytes, name).unwrap();
+        let xml = String::from_utf8(read("word/document.xml")).unwrap();
+        assert_eq!(xml.matches("<wp:anchor ").count(), 1);
+        assert_eq!(xml.matches("<wp:inline ").count(), 1);
+        assert!(xml.contains(r#"<wp:docPr id="1" name="Page image 1""#));
+        assert!(xml.contains(r#"<wp:docPr id="2" name="Picture 2""#));
+        assert!(xml.contains(r#"<w:pgSz w:w="9000" w:h="6000" w:orient="landscape""#));
+        assert!(xml.contains(r#"<w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0""#));
+        assert!(xml.contains("Ordinary body text remains editable"));
+        assert!(!xml.contains("w:framePr"));
+        let png = read("word/media/image1.png");
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        assert_eq!((decoder.info().width, decoder.info().height), (1250, 833));
+        let mut pixels = vec![0; decoder.output_buffer_size().unwrap()];
+        let frame = decoder.next_frame(&mut pixels).unwrap();
+        assert!(pixels[..frame.buffer_size()].iter().any(|&v| v < 200));
+        std::fs::remove_file(input).unwrap();
+        std::fs::remove_file(output).unwrap();
+    }
 
     fn initial_page() -> PageContent {
         let mut glyphs = vec![Glyph { source: -1, ch: 'O', rect: [55.0, 80.0, 95.0, 140.0], x: 55.0, baseline: 128.0, size: 51.0, font: 0, color: [0, 176, 80], space_before: false, invisible: false }];

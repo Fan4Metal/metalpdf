@@ -2115,7 +2115,7 @@ pub mod tests {
 
     /// A PDF of `objects` (numbered from 1, the first the catalog), with
     /// its cross-reference table and trailer.
-    fn write_pdf(objects: Vec<String>) -> Vec<u8> {
+    pub(crate) fn write_pdf(objects: Vec<String>) -> Vec<u8> {
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offsets = Vec::new();
         for (i, obj) in objects.iter().enumerate() {
