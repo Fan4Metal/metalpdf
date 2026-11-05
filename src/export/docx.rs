@@ -23,20 +23,20 @@ use windows_sys::Win32::Graphics::Gdi::{
 /// Measure the actual replacement font at a large em, independently of the
 /// screen DPI. Explicit character scaling also keeps viewers which ignore
 /// `fitText` from wrapping a PDF line into the frame underneath it.
-struct Measurements {
+pub(super) struct Measurements {
     dc: HDC,
     fonts: HashMap<u16, HFONT>,
 }
 
 impl Measurements {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             dc: unsafe { CreateCompatibleDC(std::ptr::null_mut()) },
             fonts: HashMap::new(),
         }
     }
 
-    fn width(&mut self, id: u16, face: &super::Face, text: &str, size: f32) -> Option<f32> {
+    pub(super) fn width(&mut self, id: u16, face: &super::Face, text: &str, size: f32) -> Option<f32> {
         if self.dc.is_null() {
             return None;
         }

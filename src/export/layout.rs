@@ -58,6 +58,14 @@ impl Line {
     /// the box, the size and the baseline made again.
     fn settle(&mut self) {
         self.glyphs.sort_by(|a, b| a.rect[0].total_cmp(&b.rect[0]));
+        // Artwork was appended after the text and may have first joined
+        // another image across a comma. Recompute its separator against
+        // its actual neighbour once the intervening text has been inserted.
+        for i in 1..self.glyphs.len() {
+            if self.glyphs[i].source < -1 {
+                self.glyphs[i].space_before = self.glyphs[i].rect[0]-self.glyphs[i-1].rect[2] > 0.22*self.glyphs[i].size;
+            }
+        }
         let main = self.glyphs.iter().max_by(|a, b| a.size.total_cmp(&b.size)).expect("a line has glyphs");
         (self.size, self.baseline) = (main.size, main.baseline);
         self.rect = self.glyphs.iter().fold(self.glyphs[0].rect, |r, g| union(r, g.rect));
@@ -175,7 +183,7 @@ fn median(mut v: Vec<f32>) -> Option<f32> {
 fn accent(c: char) -> Option<char> {
     Some(match c {
         '\u{a8}' => '\u{308}',
-        '\u{b4}' | '\u{2dd}' => '\u{301}',
+        '\u{b4}' | '\u{2dd}' | '\u{e088}' => '\u{301}',
         '`' => '\u{300}',
         '^' | '\u{2c6}' => '\u{302}',
         '~' | '\u{2dc}' => '\u{303}',
@@ -326,9 +334,21 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
             // Next to it, either side, within an em; not over it.
             let after = piece.rect[0] - line.rect[2];
             let before = line.rect[0] - piece.rect[2];
+            // An inline picture is inserted after extraction. Text on its
+            // two sides may already be one line; insert it into that hole
+            // rather than giving it a separate paragraph below the text.
+            if (piece.glyphs.iter().all(|g| g.source < -1) || line.glyphs.iter().any(|g| g.source < -1))
+                && piece.rect[0] >= line.rect[0] && piece.rect[2] <= line.rect[2]
+                && line.glyphs.iter().all(|g| g.rect[2] <= piece.rect[0]+0.2*s || g.rect[0] >= piece.rect[2]-0.2*s)
+            {
+                line.glyphs.extend(piece.glyphs);
+                line.settle();
+                continue 'piece;
+            }
             let goes_after = after > -0.3 * s;
             let gap = if goes_after { after } else if before > -0.3 * s { before } else { continue };
-            if gap > 1.0 * s || apart_in_size(line.size, piece.size, gap) {
+            let artwork_marker = line.glyphs.iter().chain(&piece.glyphs).any(|g| g.source < -1);
+            if gap > (if artwork_marker { 2.5 } else { 1.0 }) * s || apart_in_size(line.size, piece.size, gap) && (line.baseline - piece.baseline).abs() < 0.12 * s {
                 continue;
             }
             let mut glyphs = piece.glyphs;
@@ -369,7 +389,7 @@ fn follows(line: &Line, g: &Glyph, ems: f32) -> Option<f32> {
         return None;
     }
     let gap = g.rect[0] - last.rect[2];
-    (gap > -0.3 * s && g.x >= last.x - 0.1 * s && gap < ems * s && !apart_in_size(line.size, g.size, gap)).then_some(gap)
+    (gap > -0.3 * s && g.x >= last.x - 0.1 * s && gap < ems * s && (!apart_in_size(line.size, g.size, gap) || (line.baseline - g.baseline).abs() >= 0.12 * s)).then_some(gap)
 }
 
 /// Text of unlike sizes (a caption beside the body) a space apart or more
@@ -382,6 +402,15 @@ fn apart_in_size(a: f32, b: f32, gap: f32) -> bool {
 
 /// The figures of the page (step 2 above).
 fn figures(content: &PageContent, glyphs: &[Glyph]) -> Vec<Figure> {
+    figures_with_labels(content, glyphs, false)
+}
+
+/// In paragraph exports, diagram labels must stay with their artwork.
+pub(super) fn labelled_figures(content: &PageContent) -> Vec<Figure> {
+    figures_with_labels(content, &content.glyphs, true)
+}
+
+fn figures_with_labels(content: &PageContent, glyphs: &[Glyph], labels: bool) -> Vec<Figure> {
     let [w, h] = content.size;
     if !(w > 1.0 && h > 1.0) {
         return Vec::new();
@@ -475,6 +504,11 @@ fn figures(content: &PageContent, glyphs: &[Glyph]) -> Vec<Figure> {
             }
         }
     }
+    let mut fonts = std::collections::HashMap::new();
+    for g in glyphs.iter().filter(|g| !g.invisible && g.ch.is_alphabetic()) {
+        *fonts.entry((g.font, (g.size * 2.0).round() as i32)).or_insert(0usize) += 1;
+    }
+    let body = fonts.iter().max_by_key(|(f, n)| (**n, std::cmp::Reverse(**f))).map(|(f, _)| *f);
     let mut out: Vec<Figure> = Vec::new();
     for c in clusters.into_values() {
         let Some(rect) = c.rect else { continue };
@@ -488,7 +522,12 @@ fn figures(content: &PageContent, glyphs: &[Glyph]) -> Vec<Figure> {
         // A short image strip (badges and their labels) stays one picture;
         // its dense tiny lettering is artwork rather than a body paragraph.
         let label_strip = c.images > 0 && fh <= 30.0 && fw > 3.0 * fh && text <= 300.0;
-        let figure = label_strip || if c.rich { text <= (0.004 * area).max(40.0) } else { c.seeds >= 3 && text <= 0.0015 * area };
+        let inside: Vec<_> = glyphs.iter().filter(|g| inside(centre(g.rect), rect, 1.0)).collect();
+        let narrative = inside.iter().filter(|g| body.is_some_and(|(font, size)| g.font == font && (g.size * 2.0 - size as f32).abs() < 1.0)).count();
+        let labelled = labels && c.rich && c.members >= 2 && area >= 1500.0
+            && inside.iter().all(|g| !g.invisible) && narrative as f32 <= 0.25 * text
+            && text <= (0.018 * area).max(80.0);
+        let figure = label_strip || labelled || if c.rich { text <= (0.004 * area).max(40.0) } else { c.seeds >= 3 && text <= 0.0015 * area };
         if figure {
             let image = if c.members == 1 && c.images == 1 { c.image } else { None };
             out.push(Figure { rect, column: [rect[0], rect[2]], image });
@@ -626,7 +665,7 @@ pub fn cut(idx: &[usize], rects: &[Rect], column: [f32; 2], gutter: f32, out: &m
 /// use area holds the bullets of the Symbol and Wingdings fonts.
 fn is_bullet(c: char) -> bool {
     matches!(c, '•' | '◦' | '▪' | '▫' | '‣' | '⁃' | '●' | '○' | '■' | '□' | '–' | '—' | '-' | '*' | '·' | '►' | '▶' | '✓' | '✔' | '➢' | '➤' | '❖' | '♦' | '◆' | '◇' | '→')
-        || ('\u{f000}'..='\u{f0ff}').contains(&c)
+        || ('\u{f000}'..='\u{f0ff}').contains(&c) || ('\u{f0000}'..='\u{ffffd}').contains(&c)
 }
 
 /// Where the text after a list marker starts on `line`, if it has one: a
@@ -811,6 +850,9 @@ fn table_of(items: &[Item], columns: &[[f32; 2]], members: &[(usize, usize)], gr
     if members.iter().any(|&(_, k)| !matches!(items[k], Item::Para(_)) || items[k].lines() > 5) {
         return None;
     }
+    if members.iter().any(|&(_, k)| matches!(&items[k], Item::Para(p) if p.lines.iter().flat_map(|l| &l.glyphs).all(|g| g.source < -1))) {
+        return None;
+    }
     let mut sorted = members.to_vec();
     sorted.sort_by(|a, b| items[a.1].rect()[1].total_cmp(&items[b.1].rect()[1]));
     let mut rows: Vec<([f32; 2], Vec<Vec<usize>>)> = Vec::new();
@@ -850,7 +892,7 @@ fn table_of(items: &[Item], columns: &[[f32; 2]], members: &[(usize, usize)], gr
     let rect = [columns[0][0], rows[0].0[0], columns[columns.len() - 1][1], rows[rows.len() - 1].0[1]];
     let ruled = graphics
         .iter()
-        .filter(|g| matches!(g.kind, super::GraphicKind::Path { .. }) && g.rect[0] >= rect[0] - 12.0 && g.rect[2] <= rect[2] + 12.0 && g.rect[1] >= rect[1] - 12.0 && g.rect[3] <= rect[3] + 12.0)
+        .filter(|g| matches!(g.kind, super::GraphicKind::Path { curved: false }) && (g.rect[2] - g.rect[0] > 24.0 || g.rect[3] - g.rect[1] > 24.0) && g.rect[0] >= rect[0] - 12.0 && g.rect[2] <= rect[2] + 12.0 && g.rect[1] >= rect[1] - 12.0 && g.rect[3] <= rect[3] + 12.0)
         .count()
         >= rows.len();
     let one_line = members.iter().all(|&(_, k)| items[k].lines() == 1);
@@ -988,6 +1030,15 @@ pub struct Span {
 /// line's end (U+00AD). `marker_sep` goes between a list marker and its
 /// text (a tab for Word).
 pub fn spans(para: &Para, marker_sep: &str) -> Vec<Span> {
+    joined_spans(para, marker_sep, false)
+}
+
+/// Preserve the PDF's discretionary word breaks for Word's flowing text.
+pub(super) fn flowing_spans(para: &Para, marker_sep: &str) -> Vec<Span> {
+    joined_spans(para, marker_sep, true)
+}
+
+fn joined_spans(para: &Para, marker_sep: &str, soft_hyphens: bool) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
     let mut pending: Option<&str> = None;
     for (n, line) in para.lines.iter().enumerate() {
@@ -995,7 +1046,7 @@ pub fn spans(para: &Para, marker_sep: &str) -> Vec<Span> {
             let last = out.last_mut();
             match last {
                 Some(span) if span.text.ends_with('\u{ad}') => {
-                    span.text.pop();
+                    if !soft_hyphens { span.text.pop(); }
                 }
                 Some(span) if span.text.ends_with('-') => {}
                 Some(_) => pending = Some(" "),
@@ -1080,6 +1131,28 @@ mod tests {
     }
 
     const OPTS: Options = Options { invisible: false, figures: true };
+
+    #[test]
+    fn a_raised_footnote_number_stays_with_its_smaller_body_text() {
+        let mut marker = text("1",50.0,98.0);
+        marker[0].size = 6.0;
+        marker[0].rect[2] = 53.0;
+        marker.extend(text("Footnote text",58.5,101.0));
+        let got = lines(marker);
+        assert_eq!(got.len(),1);
+        assert_eq!(got[0].text(),"1 Footnote text");
+    }
+
+    #[test]
+    fn flowing_text_retains_discretionary_hyphens() {
+        let mut glyphs = text("para",50.0,100.0);
+        glyphs.extend(text("\u{ad}",70.0,100.0));
+        glyphs.extend(text("graph continues",50.0,112.0));
+        let items = analyse(&page(glyphs),OPTS);
+        let Item::Para(p) = &items[0] else {panic!()};
+        assert_eq!(spans(p,"\t").iter().map(|s|s.text.as_str()).collect::<String>(),"paragraph continues");
+        assert_eq!(flowing_spans(p,"\t").iter().map(|s|s.text.as_str()).collect::<String>(),"para\u{ad}graph continues");
+    }
 
     #[test]
     fn a_paragraph_wraps_into_one_and_a_gap_starts_another() {

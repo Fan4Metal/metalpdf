@@ -351,6 +351,11 @@ impl Fonts {
         } else {
             "Arial"
         };
+        // Medium display faces lose their weight when the family is absent.
+        // Installed Medium families above already carry their own weight.
+        if base_font.to_ascii_lowercase().contains("medium") {
+            style.bold = true;
+        }
         crate::export::Face { family: family.into(), bold: style.bold, italic: style.italic }
     }
 }

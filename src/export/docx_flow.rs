@@ -9,7 +9,7 @@
 //! break where the next column starts; the first section of a page starts
 //! a new page, so each PDF page starts a Word page. A paragraph's line
 //! pitch is the PDF's minimum line spacing, and the space before it
-//! the PDF's gap capped at a paragraph-sized space; indents are counted
+//! the PDF's original gap; indents are counted
 //! from the paragraph's column. Word controls the resulting pagination.
 
 use std::collections::HashMap;
@@ -21,10 +21,24 @@ use super::docx::{self, NS};
 use super::layout::{self, Align, Item, Options, Span, Vert};
 use super::xml::{HEAD, esc};
 use super::zip::ZipWriter;
-use super::{Faces, FontInfo, Glyph, Meta, PageContent, crop_bgrx, encode_png, shrink_rgba};
+use super::{Faces, FontInfo, Glyph, Meta, PageContent, crop_bgrx, encode_png};
 use crate::pdfium::{Page, sys::Api};
 
 mod toc;
+mod artwork;
+
+struct InlinePicture {
+    marker: char,
+    rel: usize,
+    width: f32,
+    height: f32,
+    shift: f32,
+}
+
+struct Decoration {
+    rel: usize,
+    rect: [f32; 4],
+}
 
 struct Tab {
     pos: f32,
@@ -71,6 +85,7 @@ struct DocPara {
     /// Tab stops from the column's left edge, including contents leaders.
     tabs: Vec<Tab>,
     drop_cap: Option<DropCap>,
+    artwork: Vec<InlinePicture>,
 }
 
 enum Block {
@@ -117,6 +132,7 @@ struct PageOut {
     extent: Option<[f32; 4]>,
     /// A graphics-only page, including titles drawn as letter outlines.
     picture: Option<usize>,
+    decorations: Vec<Decoration>,
 }
 
 pub struct Writer {
@@ -128,6 +144,8 @@ pub struct Writer {
     sizes: HashMap<i32, usize>,
     /// Characters by font, for the default font.
     font_use: HashMap<u16, usize>,
+    /// Unjustified word advances, for matching replacement font metrics.
+    advances: HashMap<u16, Vec<(String, f32, f32)>>,
 }
 
 /// Word's units: twentieths of a point, and EMUs for drawings.
@@ -142,7 +160,7 @@ fn emu(pt: f32) -> i64 {
 impl Writer {
     pub fn new(mut zip: ZipWriter<BufWriter<File>>, meta: Meta) -> std::io::Result<Writer> {
         docx::start_package(&mut zip, &meta)?;
-        Ok(Writer { zip, pages: Vec::new(), pictures: 0, sizes: HashMap::new(), font_use: HashMap::new() })
+        Ok(Writer { zip, pages: Vec::new(), pictures: 0, sizes: HashMap::new(), font_use: HashMap::new(), advances: HashMap::new() })
     }
 
     /// A picture into the archive; its number.
@@ -152,10 +170,11 @@ impl Writer {
         Ok(self.pictures)
     }
 
-    pub fn page(&mut self, _api: &'static Api, page: &Page, content: &PageContent, _fonts: &[FontInfo], _faces: &mut crate::fonts::Fonts) -> Result<(), String> {
+    pub fn page(&mut self, _api: &'static Api, page: &Page, content: &PageContent, fonts: &[FontInfo], _faces: &mut crate::fonts::Fonts) -> Result<(), String> {
         let [w, h] = content.size;
         let scale = super::PICTURE_DPI / 72.0;
-        if graphics_page(content) {
+        let prepared = artwork::prepare(content, fonts);
+        if graphics_page(content) || prepared.whole_page {
             // Letter outlines have no editable paragraphs. Clustering them
             // into inline figures tears a designed cover into separate words
             // or letters. Keep the entire composition, including its margins.
@@ -164,19 +183,40 @@ impl Writer {
             let bitmap = page.render_whole(pw, ph, content.turns).ok_or("could not render the graphics-only page")?;
             let png = encode_png(pw, ph, &crop_bgrx(bitmap.pixels(), pw, [0, 0, pw, ph]), false)?;
             let rel = self.picture(&png)?;
-            self.pages.push(PageOut { size, segments: Vec::new(), extent: None, picture: Some(rel) });
+            self.pages.push(PageOut { size, segments: Vec::new(), extent: None, picture: Some(rel), decorations: Vec::new() });
             return Ok(());
         }
-        let (items, drop_caps) = flowing_items(content);
-        let (pw, ph) = (((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1));
+        let (items, drop_caps) = flowing_items(&prepared.content);
         let mut render: Option<Option<crate::pdfium::Bitmap>> = None;
         let mut blocks: Vec<Option<Block>> = Vec::with_capacity(items.len());
         let mut extent: Option<[f32; 4]> = None;
+        let mut decorations = Vec::new();
+        for &rect in &prepared.decorations {
+            let png = render_crop(page, content, rect, &mut render)?;
+            decorations.push(Decoration { rel: self.picture(&png)?, rect });
+        }
         for item in &items {
             let r = item.rect();
             extent = Some(extent.map_or(r, |e| layout::union(e, r)));
             match item {
                 Item::Para(p) => {
+                    for line in &p.lines {
+                        let mut start = 0;
+                        for end in 1..=line.glyphs.len() {
+                            let g = &line.glyphs[start];
+                            if end < line.glyphs.len() && !line.glyphs[end].space_before
+                                && line.glyphs[end].font == g.font && (line.glyphs[end].size - g.size).abs() < 0.1 {
+                                continue;
+                            }
+                            let word = &line.glyphs[start..end];
+                            let samples = self.advances.entry(g.font).or_default();
+                            if samples.len() < 250 && word.len() >= 4 && word.iter().all(|g| g.ch.is_alphabetic()) {
+                                let width = word.last().unwrap().rect[2] - g.x;
+                                samples.push((word.iter().map(|g| g.ch).collect(), g.size, width));
+                            }
+                            start = end;
+                        }
+                    }
                     for g in p.lines.iter().flat_map(|l| &l.glyphs) {
                         *self.sizes.entry((g.size * 2.0).round() as i32).or_default() += 1;
                         *self.font_use.entry(g.font).or_default() += 1;
@@ -185,32 +225,18 @@ impl Writer {
                     if para.tabs.iter().any(|t| t.leader) {
                         para.pitch = toc::pitch(p, &items);
                     }
+                    for g in p.lines.iter().flat_map(|l| &l.glyphs).filter(|g| g.source < -1) {
+                        let index = (-g.source - 2) as usize;
+                        if let Some(art) = prepared.inline.get(index) {
+                            let png = render_crop(page, content, art.rect, &mut render)?;
+                            para.artwork.push(InlinePicture { marker: g.ch, rel: self.picture(&png)?, width: art.rect[2] - art.rect[0], height: art.rect[3] - art.rect[1], shift: art.baseline - art.rect[3] });
+                        }
+                    }
                     blocks.push(Some(Block::Para(para)));
                 }
                 Item::Figure(f) => {
                     let (fw, fh) = (f.rect[2] - f.rect[0], f.rect[3] - f.rect[1]);
-                    // A picture alone at its own resolution, at most as
-                    // fine as the figures; anything else cut out of the
-                    // page rendered.
-                    let own = f.image.and_then(|i| page.image_pixels(i).ok()).map(|(iw, ih, rgba)| {
-                        let (iw, ih, rgba) = shrink_rgba(iw, ih, rgba, (fw * scale).ceil() as u32, (fh * scale).ceil() as u32);
-                        encode_png(iw, ih, &rgba, true)
-                    });
-                    let png = match own {
-                        Some(png) => png?,
-                        None => {
-                            let bitmap = render.get_or_insert_with(|| page.render_whole(pw, ph, content.turns));
-                            let Some(bitmap) = bitmap else {
-                                blocks.push(None);
-                                continue;
-                            };
-                            let x0 = ((f.rect[0] * scale).floor().max(0.0) as u32).min(pw - 1);
-                            let y0 = ((f.rect[1] * scale).floor().max(0.0) as u32).min(ph - 1);
-                            let x1 = ((f.rect[2] * scale).ceil() as u32).clamp(x0 + 1, pw);
-                            let y1 = ((f.rect[3] * scale).ceil() as u32).clamp(y0 + 1, ph);
-                            encode_png(x1 - x0, y1 - y0, &crop_bgrx(bitmap.pixels(), pw, [x0, y0, x1, y1]), false)?
-                        }
-                    };
+                    let png = render_crop(page, content, f.rect, &mut render)?;
                     let rel = self.picture(&png)?;
                     let mid = (f.column[0] + f.column[1]) / 2.0;
                     let col_w = (f.column[1] - f.column[0]).max(1.0);
@@ -265,6 +291,7 @@ impl Writer {
                             line.spans.push(Span { text: "\t".into(), ..last.clone() });
                         }
                         line.spans.extend(p.spans);
+                        line.artwork.extend(p.artwork);
                         line.chars += p.chars;
                         line.bottom = line.bottom.max(p.bottom);
                     }
@@ -276,7 +303,7 @@ impl Writer {
             })
             .filter(|s| !s.blocks.is_empty() || s.table.is_some())
             .collect();
-        self.pages.push(PageOut { size: content.size, segments, extent, picture: None });
+        self.pages.push(PageOut { size: content.size, segments, extent, picture: None, decorations });
         Ok(())
     }
 
@@ -340,13 +367,26 @@ impl Writer {
         // The first section of a page starts a new page, the others go on
         // on it (continuous). A section ends in its last paragraph, the
         // document's last one in the body.
-        let mut out = Out { fonts, lookup, faces: &mut faces, doc_pr: 0 };
+        let mut measurements = docx::Measurements::new();
+        let mut scales = HashMap::new();
+        for (font, samples) in &self.advances {
+            let face = faces.get(*font, fonts, lookup);
+            let mut ratios: Vec<_> = samples.iter().filter_map(|(text, size, advance)| {
+                measurements.width(*font, &face, text, *size).map(|width| advance / width)
+            }).filter(|r| r.is_finite() && *r > 0.5 && *r < 1.6).collect();
+            ratios.sort_by(f32::total_cmp);
+            if let Some(ratio) = ratios.get(ratios.len()/2) {
+                scales.insert(*font, (100.0 * ratio).round().min(100.0) as i64);
+            }
+        }
+        let mut out = Out { fonts, lookup, faces: &mut faces, doc_pr: 0, scales };
         let mut body = String::new();
         let mut last_sect = String::new();
         for &(from, to, margins) in &runs {
             for pi in from..to {
                 let pg = &self.pages[pi];
                 let size = pg.size;
+                let margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), ((size[1]-e[3])/2.0).clamp(14.0, 0.15*size[1])]);
                 let text_w = (size[0] - margins[0] - margins[2]).max(72.0);
                 if let Some(rel) = pg.picture {
                     if !last_sect.is_empty() {
@@ -414,6 +454,18 @@ impl Writer {
                         close_section(&mut body, &last_sect);
                     }
                     body.push_str(&content);
+                    if si == 0 && !pg.decorations.is_empty() {
+                        let mut drawing = String::new();
+                        for d in &pg.decorations {
+                            decoration_xml(&mut drawing, d, &mut out);
+                        }
+                        // The drawing belongs to the first body paragraph;
+                        // it contributes no extra paragraph or line height.
+                        let start = body.len() - content.len();
+                        if let Some(first) = body[start..].find("</w:pPr>") {
+                            body.insert_str(start + first + "</w:pPr>".len(), &drawing);
+                        }
+                    }
                     last_sect = sect_pr(size, margins, &cols, text_w, si == 0);
                     si = sj;
                 }
@@ -441,11 +493,51 @@ fn picture_page_size(size: [f32; 2]) -> [f32; 2] {
 /// A page-sized, selectable image. Anchoring it to the page avoids inline
 /// picture padding, shrinking to text margins, and an extra blank page.
 fn picture_page_xml(x: &mut String, rel: usize, size: [f32; 2], out: &mut Out) {
+    x.push_str(r#"<w:p><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr>"#);
+    decoration_xml(x, &Decoration { rel, rect: [0.0, 0.0, size[0], size[1]] }, out);
+    x.push_str("</w:p>");
+}
+
+fn decoration_xml(x: &mut String, d: &Decoration, out: &mut Out) {
     out.doc_pr += 1;
     let n = out.doc_pr;
-    let (cx, cy) = (emu(size[0]), emu(size[1]));
+    let rel = d.rel;
+    let (cx, cy) = (emu(d.rect[2] - d.rect[0]), emu(d.rect[3] - d.rect[1]));
+    let (left, top) = (emu(d.rect[0]), emu(d.rect[1]));
     let _ = write!(x,
-        r#"<w:p><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="1" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:wrapNone/><wp:docPr id="{n}" name="Page image {n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#);
+        r#"<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="1" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>{left}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>{top}</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:wrapNone/><wp:docPr id="{n}" name="Page image {n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#);
+}
+
+fn render_crop(page: &Page, content: &PageContent, r: [f32; 4], render: &mut Option<Option<crate::pdfium::Bitmap>>) -> Result<Vec<u8>, String> {
+    let scale = super::PICTURE_DPI / 72.0;
+    let (w, h) = (((content.size[0] * scale).round() as u32).max(1), ((content.size[1] * scale).round() as u32).max(1));
+    let bitmap = render.get_or_insert_with(|| page.render_whole(w, h, content.turns)).as_ref().ok_or("could not render page artwork")?;
+    let x = ((r[0] * scale).floor().max(0.0) as u32).min(w-1);
+    let y = ((r[1] * scale).floor().max(0.0) as u32).min(h-1);
+    let right = ((r[2]*scale).ceil() as u32).clamp(x+1,w);
+    let bottom = ((r[3]*scale).ceil() as u32).clamp(y+1,h);
+    encode_png(right-x, bottom-y, &crop_bgrx(bitmap.pixels(), w, [x,y,right,bottom]), false)
+}
+
+fn paragraph_runs(x: &mut String, p: &DocPara, out: &mut Out) {
+    for span in &p.spans {
+        let mut text = String::new();
+        for ch in span.text.chars() {
+            if let Some(pic) = p.artwork.iter().find(|a| a.marker == ch) {
+                if !text.is_empty() {
+                    scaled_run_xml(x, &Span { text: std::mem::take(&mut text), ..span.clone() }, &out.faces.get(span.font, out.fonts, out.lookup), 0, *out.scales.get(&span.font).unwrap_or(&100));
+                }
+                out.doc_pr += 1;
+                let n = out.doc_pr;
+                let rel = pic.rel;
+                let (cx,cy,shift) = (emu(pic.width),emu(pic.height),tw(pic.shift)/10);
+                let _ = write!(x, r#"<w:r><w:rPr><w:sz w:val="2"/><w:position w:val="{shift}"/></w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{n}" name="Inline artwork {n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#);
+            } else { text.push(ch) }
+        }
+        if !text.is_empty() {
+            scaled_run_xml(x, &Span { text, ..span.clone() }, &out.faces.get(span.font, out.fonts, out.lookup), 0, *out.scales.get(&span.font).unwrap_or(&100));
+        }
+    }
 }
 
 /// Recognise an isolated large letter beside several indented body lines.
@@ -542,6 +634,7 @@ struct Out<'a> {
     lookup: &'a mut crate::fonts::Fonts,
     faces: &'a mut Faces,
     doc_pr: usize,
+    scales: HashMap<u16, i64>,
 }
 
 /// Where the block before ended, for the space before the next: its last
@@ -596,9 +689,7 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             if column_break {
                 x.push_str(r#"<w:r><w:br w:type="column"/></w:r>"#);
             }
-            for span in &p.spans {
-                run_xml(x, span, &out.faces.get(span.font, out.fonts, out.lookup), 0);
-            }
+            paragraph_runs(x, p, out);
             *prev = Prev { baseline: Some(p.last_baseline), bottom: Some(p.bottom) };
         }
         Block::Picture { rel, width, height, align, left, top, bottom } => {
@@ -611,13 +702,13 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             if *align == Align::Left && *left > 0.0 {
                 let _ = write!(x, r#"<w:ind w:left="{}"/>"#, tw(left.min(col_w - width * k).max(0.0)));
             }
-            let _ = write!(x, r#"<w:jc w:val="{}"/></w:pPr>"#, jc(*align));
+            let _ = write!(x, r#"<w:jc w:val="{}"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr>"#, jc(*align));
             if column_break {
                 x.push_str(r#"<w:r><w:br w:type="column"/></w:r>"#);
             }
             let _ = write!(
                 x,
-                r#"<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{n}" name="Picture {n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+                r#"<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{n}" name="Picture {n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
             );
             *prev = Prev { baseline: None, bottom: Some(*bottom) };
         }
@@ -654,9 +745,9 @@ fn para_before(p: &DocPara, prev: &Prev) -> f32 {
     if contents { gap.max(0.0) } else { paragraph_gap(gap, p.size) }
 }
 
-/// Keep separation without carrying large fixed PDF gaps into reflowing text.
-fn paragraph_gap(gap: f32, size: f32) -> f32 {
-    gap.clamp(0.0, 1.5 * size)
+/// Preserve deliberate white space, including epigraphs and footnotes.
+fn paragraph_gap(gap: f32, _size: f32) -> f32 {
+    gap.clamp(0.0, 400.0)
 }
 
 /// Word's cell margin, left and right (0.075 inch).
@@ -778,7 +869,7 @@ fn doc_para(p: &layout::Para, cap: Option<&DropCap>) -> DocPara {
             (body - col[0], lefts[0] - body, right)
         }
     };
-    let spans = layout::spans(p, "\t");
+    let spans = layout::flowing_spans(p, "\t");
     let mut para = DocPara {
         spans,
         align: p.align,
@@ -795,7 +886,20 @@ fn doc_para(p: &layout::Para, cap: Option<&DropCap>) -> DocPara {
         chars: p.chars(),
         tabs: Vec::new(),
         drop_cap: None,
+        artwork: Vec::new(),
     };
+    let centre = (col[0]+col[1])/2.0;
+    if n <= 3 && p.marker.is_none() && p.rect[2]-p.rect[0] < 0.8*(col[1]-col[0])
+        && p.lines.iter().all(|l| ((l.rect[0]+l.rect[2])/2.0-centre).abs() < 0.7*p.size)
+    {
+        para.align = Align::Center;
+        para.left = (p.rect[0]-col[0]-0.25*p.size).max(0.0);
+        para.right = (col[1]-p.rect[2]-0.25*p.size).max(0.0);
+        para.first = 0.0;
+    }
+    if p.marker.is_some() {
+        para.tabs.push(Tab { pos: para.left, right: false, leader: false });
+    }
     if let Some(cap) = cap {
         // The initial lines were inset to wrap the PDF's cap. Word's
         // separate initial-letter frame supplies their inset now.
@@ -864,6 +968,10 @@ fn sect_pr(size: [f32; 2], m: [f32; 4], cols: &[(f32, f32)], text_w: f32, new_pa
 /// A run: its font, weight, slant, colour, size and position; a tab in
 /// the text as Word's own tab.
 fn run_xml(x: &mut String, span: &Span, face: &super::Face, position: i64) {
+    scaled_run_xml(x, span, face, position, 100);
+}
+
+fn scaled_run_xml(x: &mut String, span: &Span, face: &super::Face, position: i64, scale: i64) {
     let mut rpr = String::from("<w:rPr>");
     let f = esc(&face.family);
     let _ = write!(rpr, r#"<w:rFonts w:ascii="{f}" w:hAnsi="{f}" w:eastAsia="{f}" w:cs="{f}"/>"#);
@@ -878,6 +986,9 @@ fn run_xml(x: &mut String, span: &Span, face: &super::Face, position: i64) {
         let _ = write!(rpr, r#"<w:color w:val="{r:02X}{g:02X}{b:02X}"/>"#);
     }
     let hp = ((span.size * 2.0).round() as i64).clamp(2, 3276);
+    if scale != 100 {
+        let _ = write!(rpr, r#"<w:w w:val="{scale}"/>"#);
+    }
     let _ = write!(rpr, r#"<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>"#);
     if position != 0 {
         let _ = write!(rpr, r#"<w:position w:val="{position}"/>"#);
@@ -892,8 +1003,11 @@ fn run_xml(x: &mut String, span: &Span, face: &super::Face, position: i64) {
         if i > 0 {
             let _ = write!(x, "<w:r>{rpr}<w:tab/></w:r>");
         }
-        if !part.is_empty() {
-            let _ = write!(x, r#"<w:r>{rpr}<w:t xml:space="preserve">{}</w:t></w:r>"#, esc(part));
+        for (j, text) in part.split('\u{ad}').enumerate() {
+            if j > 0 { let _ = write!(x, "<w:r>{rpr}<w:softHyphen/></w:r>"); }
+            if !text.is_empty() {
+                let _ = write!(x, r#"<w:r>{rpr}<w:t xml:space="preserve">{}</w:t></w:r>"#, esc(text));
+            }
         }
     }
 }
@@ -1024,13 +1138,14 @@ mod tests {
         let fonts = [FontInfo { name: "PetersburgC".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0 };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new() };
         let mut xml = String::new();
         let mut prev = Prev { baseline: Some(60.0), bottom: Some(62.0) };
         block_xml(&mut xml, &Block::Para(doc_para(p, Some(&caps[0]))), &mut prev, 340.0, false, &|_| None, &mut out);
         assert_eq!(xml.matches("<w:framePr").count(), 1);
         assert!(xml.contains(r#"w:dropCap="drop" w:lines="3" w:w="800""#));
-        assert_eq!(xml.matches(r#"w:before="330""#).count(), 2);
+        let before = tw(para_before(&doc_para(p, Some(&caps[0])), &Prev { baseline: Some(60.0), bottom: Some(62.0) }));
+        assert_eq!(xml.matches(&format!(r#"w:before="{before}""#)).count(), 2);
         assert!(xml.contains(r#"<w:sz w:val="102""#));
         let body = xml.split_once("</w:p>").unwrap().1;
         assert!(!body.contains("framePr") && !body.contains("vertAlign"));
@@ -1071,7 +1186,7 @@ mod tests {
         let fonts = [FontInfo { name: "Tahoma".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0 };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new() };
         let mut xml = String::new();
         let mut prev = Prev { baseline: Some(94.0), bottom: Some(100.0) };
         assert!(para_before(&para, &prev) > 80.0);
@@ -1103,4 +1218,16 @@ mod tests {
         let Item::Figure(f) = &items[0] else { panic!() };
         assert_eq!(f.rect, [0.0, 0.0, 600.0, 800.0]);
     }
+    #[test]
+    fn replacement_metrics_and_optional_breaks_remain_editable_word_runs() {
+        let span = Span {text:"para\u{ad}graph".into(),font:0,size:11.0,color:[0;3],vert:Vert::Base};
+        let face = super::super::Face {family:"Arial".into(),bold:false,italic:false};
+        let mut xml = String::new();
+        scaled_run_xml(&mut xml,&span,&face,0,88);
+        assert!(xml.contains(r#"<w:w w:val="88"/>"#));
+        assert!(xml.contains("<w:softHyphen/>"));
+        assert!(xml.contains(">para</w:t>") && xml.contains(">graph</w:t>"));
+        assert!(!xml.contains("drawing") && !xml.contains("fitText"));
+    }
+
 }

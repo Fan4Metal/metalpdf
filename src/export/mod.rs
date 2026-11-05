@@ -286,7 +286,7 @@ impl Job {
         }
         let index = self.next;
         let page = self.doc.load_page(index).and_then(|p| p.flattened()).ok_or_else(|| format!("page {} could not be loaded", index + 1))?;
-        let content = page.export_content(&mut self.fonts, matches!(self.writer, Some(Writer::DocxFlow(_))));
+        let content = page.export_content(&mut self.fonts, false);
         let result = match self.writer.as_mut() {
             Some(Writer::Docx(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
             Some(Writer::DocxFlow(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
@@ -412,7 +412,10 @@ mod tests {
         assert_eq!(super::run_paragraphs(&input, &out, None).unwrap(), 2);
         let bytes = std::fs::read(&out).unwrap();
         let doc = String::from_utf8(read_entry(&bytes, "word/document.xml").unwrap()).unwrap();
-        assert!(doc.contains("Hello MetalPDF") && doc.contains("Second line of text") && doc.contains("Page two"));
+        assert!(doc.contains("Hello MetalPDF") && doc.contains("Second line of text"));
+        // The second page's text is sideways in the PDF. Keep the shown
+        // landscape composition instead of turning the page to reflow it.
+        assert!(doc.contains(r#"<w:pgSz w:w="16840" w:h="11900" w:orient="landscape"/>"#));
         // These are paragraphs in the main story, not positioned frames or
         // text boxes. Edits can rewrap lines and move subsequent paragraphs.
         assert!(!doc.contains("w:framePr") && !doc.contains("w:txbxContent") && !doc.contains("w:fitText"));

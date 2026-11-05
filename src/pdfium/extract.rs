@@ -176,6 +176,21 @@ impl Page {
                     continue;
                 }
                 if ch.is_whitespace() {
+                    // Symbol fonts sometimes map a visible bullet to U+0020.
+                    // Keep its ink as artwork instead of discarding it as a
+                    // word separator (or emitting a wrong Unicode symbol).
+                    if unsafe { (api.FPDFText_IsGenerated)(text, index) } == 0 {
+                        let mut flags = 0;
+                        let mut buf = [0u8; 256];
+                        let len = unsafe { (api.FPDFText_GetFontInfo)(text, index, buf.as_mut_ptr().cast(), buf.len() as c_ulong, &mut flags) };
+                        let name = String::from_utf8_lossy(&buf[..(len as usize).saturating_sub(1).min(buf.len())]).to_ascii_lowercase();
+                        if name.contains("ding") || name.contains("symbol") {
+                            let (mut l,mut r,mut b,mut t) = (0.0,0.0,0.0,0.0);
+                            if unsafe { (api.FPDFText_GetCharBox)(text, index, &mut l, &mut r, &mut b, &mut t) } != 0 && r-l > 0.1 && t-b > 0.1 {
+                                content.graphics.push(Graphic { rect: view_rect(l as f32,b as f32,r as f32,t as f32), kind: GraphicKind::Image, object: None });
+                            }
+                        }
+                    }
                     space = true;
                     continue;
                 }
@@ -263,7 +278,7 @@ impl Page {
                 break;
             }
             let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index) };
-            self.graphics_of(object, identity, Some(index as usize), 0, &mut content.graphics, &view_rect);
+            self.graphics_of(object, identity, Some(index as usize), (0, None), &mut content.graphics, &view_rect);
         }
         content
     }
@@ -271,13 +286,41 @@ impl Page {
     /// `object`'s graphics into `out`: `matrix` takes its space (a form
     /// XObject's) to page space; `top` is its index on the page when it
     /// is a top-level object.
-    fn graphics_of(&self, object: sys::FPDF_PAGEOBJECT, matrix: [f32; 6], top: Option<usize>, depth: u32, out: &mut Vec<Graphic>, view_rect: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]) {
+    fn graphics_of(&self, object: sys::FPDF_PAGEOBJECT, matrix: [f32; 6], top: Option<usize>, traversal: (u32, Option<[f32; 4]>), out: &mut Vec<Graphic>, view_rect: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]) {
+        let (depth, inherited_clip) = traversal;
         let api = self.api();
         if object.is_null() || out.len() >= MAX_GRAPHICS {
             return;
         }
         let kind = unsafe { (api.FPDFPageObj_GetType)(object) };
         let apply = |m: &[f32; 6], x: f32, y: f32| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+        let intersect = |a: [f32; 4], b: [f32; 4]| {
+            let r = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+            (r[2] >= r[0] && r[3] >= r[1]).then_some(r)
+        };
+        // Curves can extend far beyond a plot's clipping rectangle. Their
+        // unclipped bounds otherwise swallow neighbouring paragraphs or are
+        // discarded as a page background, losing the graph entirely.
+        let mut clip = inherited_clip;
+        let path = unsafe { (api.FPDFPageObj_GetClipPath)(object) };
+        if !path.is_null() {
+            for p in 0..unsafe { (api.FPDFClipPath_CountPaths)(path) }.clamp(0, 1024) {
+                let n = unsafe { (api.FPDFClipPath_CountPathSegments)(path, p) }.clamp(0, MAX_SEGMENTS);
+                let mut r = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+                for s in 0..n {
+                    let segment = unsafe { (api.FPDFClipPath_GetPathSegment)(path, p, s) };
+                    let (mut x, mut y) = (0.0, 0.0);
+                    if unsafe { (api.FPDFPathSegment_GetPoint)(segment, &mut x, &mut y) } != 0 {
+                        let (x, y) = apply(&matrix, x, y);
+                        r = [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)];
+                    }
+                }
+                if r.iter().all(|v| v.is_finite()) {
+                    let r = view_rect(r[0], r[1], r[2], r[3]);
+                    clip = match clip { Some(c) => match intersect(c, r) { Some(c) => Some(c), None => return }, None => Some(r) };
+                }
+            }
+        }
         let bounds = || {
             let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
             if unsafe { (api.FPDFPageObj_GetBounds)(object, &mut l, &mut b, &mut r, &mut t) } == 0 {
@@ -288,7 +331,8 @@ impl Page {
             for (x, y) in pts {
                 (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
             }
-            Some(view_rect(x0, y0, x1, y1))
+            let r = view_rect(x0, y0, x1, y1);
+            match clip { Some(c) => intersect(r, c), None => Some(r) }
         };
         match kind {
             sys::FPDF_PAGEOBJ_PATH => {
@@ -350,7 +394,7 @@ impl Page {
                 let n = unsafe { (api.FPDFFormObj_CountObjects)(object) }.max(0);
                 for i in 0..n {
                     let child = unsafe { (api.FPDFFormObj_GetObject)(object, i as c_ulong) };
-                    self.graphics_of(child, inner, None, depth + 1, out, view_rect);
+                    self.graphics_of(child, inner, None, (depth + 1, clip), out, view_rect);
                 }
             }
             _ => {}
@@ -438,6 +482,32 @@ impl Page {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn clipped_curves_and_translated_forms_keep_their_visible_bounds() {
+        let stream = |s: &str| format!("<< /Length {} >>\nstream\n{s}\nendstream",s.len());
+        let form = "q 10 20 90 60 re W n 0 0 m 50 120 100 -10000 140 100 c S Q";
+        let bytes = crate::pdfium::tests::write_pdf(vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /XObject << /F 5 0 R >> >> >>".into(),
+            stream("q 40 300 120 100 re W n 0 0 m 100 400 120 -10000 180 360 c S Q /F Do"),
+            format!("<< /Type /XObject /Subtype /Form /BBox [0 0 150 150] /Matrix [1 0 0 1 200 100] /Resources << >> /Length {} >>\nstream\n{form}\nendstream",form.len()),
+        ]);
+        let path = std::env::temp_dir().join(format!("metalpdf_clipped_plot_{}.pdf",std::process::id()));
+        std::fs::write(&path,bytes).unwrap();
+        let doc = crate::pdfium::Document::open(crate::pdfium::init().unwrap(),&path,None).unwrap();
+        let page = doc.load_page(0).unwrap();
+        let content = page.export_content(&mut Default::default(),false);
+        assert_eq!(content.graphics.len(),2,"{:?}",content.graphics);
+        for (g,wanted) in content.graphics.iter().zip([[40.0,400.0,160.0,500.0],[210.0,620.0,300.0,680.0]]) {
+            assert!(g.rect[0]>=wanted[0]-0.1 && g.rect[1]>=wanted[1]-0.1 && g.rect[2]<=wanted[2]+0.1 && g.rect[3]<=wanted[3]+0.1,"{:?}",g.rect);
+            assert!(g.rect[2]>g.rect[0] && g.rect[3]>g.rect[1]);
+        }
+        drop(page);drop(doc);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     #[ignore = "needs vendor/pdfium"]
     fn pdfium_docx_preserves_translucent_text_in_artwork() {

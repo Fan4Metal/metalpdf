@@ -37,6 +37,7 @@ pub type FPDF_PAGEOBJECT = *mut c_void;
 pub type FPDF_FONT = *mut c_void;
 pub type FPDF_PAGEOBJECTMARK = *mut c_void;
 pub type FPDF_PATHSEGMENT = *mut c_void;
+pub type FPDF_CLIPPATH = *mut c_void;
 
 pub type FPDF_BOOL = c_int;
 pub type FPDF_DWORD = c_ulong;
@@ -428,6 +429,10 @@ api! {
     FPDFPageObj_Destroy: fn(FPDF_PAGEOBJECT);
     FPDFPageObj_GetType: fn(FPDF_PAGEOBJECT) -> c_int;
     FPDFPageObj_GetBounds: fn(FPDF_PAGEOBJECT, *mut c_float, *mut c_float, *mut c_float, *mut c_float) -> FPDF_BOOL;
+    FPDFPageObj_GetClipPath: fn(FPDF_PAGEOBJECT) -> FPDF_CLIPPATH;
+    FPDFClipPath_CountPaths: fn(FPDF_CLIPPATH) -> c_int;
+    FPDFClipPath_CountPathSegments: fn(FPDF_CLIPPATH, c_int) -> c_int;
+    FPDFClipPath_GetPathSegment: fn(FPDF_CLIPPATH, c_int, c_int) -> FPDF_PATHSEGMENT;
     FPDFPageObj_Transform: fn(FPDF_PAGEOBJECT, c_double, c_double, c_double, c_double, c_double, c_double);
     // The export's look at the graphics: a path's segments (straight and
     // square, or curves), a form XObject's objects.
