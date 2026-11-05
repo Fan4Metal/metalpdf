@@ -253,6 +253,8 @@ pub struct Settings {
     pub sidebar_side: SidebarSide,
     /// The dark theme's look: grey or black.
     pub dark_style: DarkStyle,
+    /// Floating scroll bars that disappear when the pointer leaves the area.
+    pub auto_hide_scrollbars: bool,
     /// Find matches case.
     pub find_case: bool,
     /// Find matches whole words only.
@@ -280,6 +282,7 @@ impl Default for Settings {
             sidebar_tab: SidebarTab::Thumbnails,
             sidebar_side: SidebarSide::Left,
             dark_style: DarkStyle::Grey,
+            auto_hide_scrollbars: false,
             find_case: false,
             find_words: false,
             print: PrintSettings::default(),
@@ -502,6 +505,7 @@ mod tests {
             sidebar_tab: SidebarTab::Outline,
             sidebar_side: SidebarSide::Right,
             dark_style: DarkStyle::Black,
+            auto_hide_scrollbars: true,
             window: Some(WindowGeometry { x: 10, y: 20, width: 900, height: 700, maximized: false, scale_factor: 1.5, physical: true }),
             ..Settings::default()
         };
@@ -509,10 +513,12 @@ mod tests {
         assert!(json.contains(r#""zoom":{"scale":1.25}"#), "{json}");
         assert!(json.contains(r#""sidebar_side":"right""#) && json.contains(r#""dark_style":"black""#), "{json}");
         assert!(json.contains(r#""language":"ru""#), "{json}");
+        assert!(json.contains(r#""auto_hide_scrollbars":true"#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
         let partial: Settings = serde_json::from_str(r#"{"theme":"light","future":1}"#).unwrap();
         assert_eq!(partial.theme, ThemeSetting::Light);
         assert_eq!(partial.zoom, ZoomSetting::FitWidth);
+        assert!(!partial.auto_hide_scrollbars);
     }
 
     /// The file of version 0.1.0 reads with defaults for whatever came later.

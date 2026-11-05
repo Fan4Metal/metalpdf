@@ -155,3 +155,31 @@ pub fn classic_spacing(spacing: &mut egui::style::Spacing) {
     spacing.button_padding = egui::vec2(4.0, 1.0);
     spacing.interact_size = egui::vec2(40.0, 18.0);
 }
+
+/// The floating style fades away outside the scroll area, as in MetalMD;
+/// the persistent style keeps a wide handle in a strip of its own.
+pub fn apply_scroll_style(ctx: &egui::Context, auto_hide: bool) {
+    let mut scroll = if auto_hide {
+        egui::style::ScrollStyle::floating()
+    } else {
+        egui::style::ScrollStyle {
+            floating: true,
+            bar_width: 12.0,
+            floating_width: 12.0,
+            floating_allocated_width: 12.0,
+            handle_min_length: 24.0,
+            foreground_color: true,
+            dormant_handle_opacity: 0.4,
+            active_handle_opacity: 0.55,
+            interact_handle_opacity: 0.85,
+            dormant_background_opacity: 0.0,
+            active_background_opacity: 0.0,
+            interact_background_opacity: 0.08,
+            ..egui::style::ScrollStyle::floating()
+        }
+    };
+    // The page anchor controls the offset, including turns at the edge
+    // in single-page mode; a rubber-band spring would fight that offset.
+    scroll.kinetic.rubber_band = false;
+    ctx.all_styles_mut(|style| style.spacing.scroll = scroll);
+}

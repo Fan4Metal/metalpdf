@@ -511,39 +511,10 @@ impl App {
             // the family).
             o.input_options.line_scroll_speed = 100.0;
         });
-        // Scroll bars of one width in a strip of their own, the handle a
-        // mid grey that darkens under the mouse: egui's floating bars thin
-        // out when idle and are hard to catch, and the solid ones have a
-        // 2-point handle (the bar less the margins) in a light grey near
-        // invisible on the track. A floating bar as wide at rest as when
-        // hovered, allocated its width, with the handle in the text colour
-        // at a low opacity, gives what is wanted.
-        // The light theme is egui's own, with 0.36's widgets (the dark
-        // one gets them in `apply_dark_style`).
+        // The light theme is egui's own, with the family's widgets.
         cc.egui_ctx.style_mut_of(egui::Theme::Light, |s| crate::style::classic_widgets(&mut s.visuals));
-        cc.egui_ctx.all_styles_mut(|s| {
-            crate::style::classic_spacing(&mut s.spacing);
-            s.spacing.scroll = egui::style::ScrollStyle {
-                floating: true,
-                bar_width: 12.0,
-                floating_width: 12.0,
-                floating_allocated_width: 12.0,
-                handle_min_length: 24.0,
-                foreground_color: true,
-                dormant_handle_opacity: 0.4,
-                active_handle_opacity: 0.55,
-                interact_handle_opacity: 0.85,
-                dormant_background_opacity: 0.0,
-                active_background_opacity: 0.0,
-                interact_background_opacity: 0.08,
-                // No rubber band (egui 0.37): the page area sets its offset
-                // from the anchor every frame and keeps it within a page in
-                // single-page mode, where a pull past the edge turns the
-                // page; an overscroll springing back fought both.
-                kinetic: egui::style::KineticScrollStyle { rubber_band: false, ..Default::default() },
-                ..egui::style::ScrollStyle::floating()
-            };
-        });
+        cc.egui_ctx.all_styles_mut(|s| crate::style::classic_spacing(&mut s.spacing));
+        crate::style::apply_scroll_style(&cc.egui_ctx, settings.auto_hide_scrollbars);
         engine.set_context(cc.egui_ctx.clone());
         // The window is still hidden (eframe shows it after the first
         // frame), so a caption set now is shown from the start; set after
@@ -2097,6 +2068,7 @@ impl App {
         // Chosen in the context menus of the sidebar's and the theme's buttons.
         let mut sidebar_side = self.settings.sidebar_side;
         let mut dark_style = self.settings.dark_style;
+        let mut auto_hide_scrollbars = self.settings.auto_hide_scrollbars;
         let mut about_click = false;
         let mut update_tag = None;
         let cur = self.current;
@@ -2198,7 +2170,7 @@ impl App {
                         }
                         let theme_button = crate::ui::theme_button(ui, theme);
                         theme_click = theme_button.clicked();
-                        crate::ui::dark_style_menu(&theme_button, &mut dark_style);
+                        crate::ui::appearance_menu(&theme_button, &mut dark_style, &mut auto_hide_scrollbars);
                     });
                 });
             });
@@ -2240,6 +2212,12 @@ impl App {
         if dark_style != self.settings.dark_style {
             self.settings.dark_style = dark_style;
             crate::style::apply_dark_style(ui.ctx(), dark_style);
+            self.settings_dirty = true;
+        }
+        if auto_hide_scrollbars != self.settings.auto_hide_scrollbars {
+            self.settings.auto_hide_scrollbars = auto_hide_scrollbars;
+            crate::style::apply_scroll_style(ui.ctx(), auto_hide_scrollbars);
+            for window in &self.windows { ui.ctx().request_repaint_of(window.viewport); }
             self.settings_dirty = true;
         }
         if let Some(tag) = update_tag {

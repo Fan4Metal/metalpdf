@@ -69,16 +69,16 @@ pub fn next_theme(theme: ThemePreference) -> ThemePreference {
 pub fn theme_button(ui: &mut Ui, theme: ThemePreference) -> Response {
     let tip = match theme {
         ThemePreference::System => tr!(
-            "Theme: as in Windows (click: light)\nRight-click: grey or black dark theme",
-            "Тема: как в Windows (щелчок: светлая)\nПравый щелчок: серая или чёрная тёмная тема"
+            "Theme: as in Windows (click: light)\nRight-click: appearance settings",
+            "Тема: как в Windows (щелчок: светлая)\nПравый щелчок: оформление"
         ),
         ThemePreference::Light => tr!(
-            "Theme: light (click: dark)\nRight-click: grey or black dark theme",
-            "Тема: светлая (щелчок: тёмная)\nПравый щелчок: серая или чёрная тёмная тема"
+            "Theme: light (click: dark)\nRight-click: appearance settings",
+            "Тема: светлая (щелчок: тёмная)\nПравый щелчок: оформление"
         ),
         ThemePreference::Dark => tr!(
-            "Theme: dark (click: as in Windows)\nRight-click: grey or black dark theme",
-            "Тема: тёмная (щелчок: как в Windows)\nПравый щелчок: серая или чёрная тёмная тема"
+            "Theme: dark (click: as in Windows)\nRight-click: appearance settings",
+            "Тема: тёмная (щелчок: как в Windows)\nПравый щелчок: оформление"
         ),
     };
     let icon = match theme {
@@ -89,18 +89,21 @@ pub fn theme_button(ui: &mut Ui, theme: ThemePreference) -> Response {
     icon_button(ui, icon, false, tip)
 }
 
-/// The context menu of the theme button: which of the two dark themes the
-/// dark one is (as MetalMD). Returns `true` when it changed.
-pub fn dark_style_menu(response: &Response, style: &mut DarkStyle) -> bool {
-    let before = *style;
+/// The theme button's appearance menu. Returns `true` when a choice changed.
+pub fn appearance_menu(response: &Response, style: &mut DarkStyle, auto_hide_scrollbars: &mut bool) -> bool {
+    let before = (*style, *auto_hide_scrollbars);
     menu::context_menu(response, |ui| {
         for (value, label) in [(DarkStyle::Grey, tr!("Dark theme: grey", "Тёмная тема: серая")), (DarkStyle::Black, tr!("Dark theme: black", "Тёмная тема: чёрная"))] {
             if ui.radio_value(style, value, label).clicked() {
                 ui.close();
             }
         }
+        ui.separator();
+        if ui.checkbox(auto_hide_scrollbars, tr!("Automatically hide scroll bars", "Автоматически скрывать полосы прокрутки")).changed() {
+            ui.close();
+        }
     });
-    *style != before
+    (*style, *auto_hide_scrollbars) != before
 }
 
 /// The context menu of the sidebar's button and of its tabs: the side of

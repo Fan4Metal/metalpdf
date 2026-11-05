@@ -72,7 +72,7 @@ The toolbar under the tabs (not shown on the start page) holds:
 - the text tool and the hand, the pencil of the editing mode, the printer, which opens the print dialog, and the page with an arrow, whose menu saves the document as Word or PowerPoint;
 - on the right, a note that says when an edit was refused or a file saved, and the progress of a print job or a save as Word or PowerPoint with a cross to cancel it.
 
-The tab bar holds the sidebar toggle, Open, the tabs, and on the right the theme switch (its context menu chooses between a grey and a near-black dark theme), the update button when a newer version exists, and About.
+The tab bar holds the sidebar toggle, Open, the tabs, and on the right the theme switch (its context menu chooses between a grey and a near-black dark theme and enables automatically hidden scroll bars), the update button when a newer version exists, and About. With automatic hiding enabled, scroll bars float over the content, appear on hover and fade when the pointer leaves the scroll area. The choice is remembered between runs.
 
 </details>
 
