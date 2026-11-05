@@ -529,7 +529,7 @@ impl TextBoxes {
         Self { faces: Faces::default(), measurements: Measurements::new(), id: 0 }
     }
 
-    pub(super) fn write(&mut self, x: &mut String, line: &layout::Line, rect: [f32; 4], fonts: &[FontInfo], lookup: &mut crate::fonts::Fonts) {
+    fn write(&mut self, x: &mut String, line: &layout::Line, rect: [f32; 4], fonts: &[FontInfo], lookup: &mut crate::fonts::Fonts) {
         let origin = [rect[0],rect[1]];
         let mut l = line_out(line, 1.0, None, false);
         l.x -= origin[0];
@@ -551,6 +551,137 @@ impl TextBoxes {
         let _ = write!(x, r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="{left}" y="{top}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:widowControl w:val="0"/><w:suppressAutoHyphens/><w:snapToGrid w:val="0"/><w:spacing w:before="0" w:after="0" w:line="{height}" w:lineRule="exact"/><w:ind w:left="0" w:right="0" w:firstLine="0"/><w:jc w:val="left"/></w:pPr>"#);
         line_runs_xml(x, &l, fonts, lookup, &mut self.faces, &mut self.measurements, &mut self.id);
         x.push_str(r#"</w:p></w:txbxContent></wps:txbx><wps:bodyPr rot="0" vertOverflow="overflow" horzOverflow="overflow" wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp>"#);
+    }
+
+    /// One text story per composition avoids Word repeatedly laying out
+    /// hundreds of tiny child shapes during background pagination. Tabs
+    /// preserve separated cells on a row; paragraph spacing keeps its rows.
+    pub(super) fn block(
+        &mut self,
+        x: &mut String,
+        lines: &[layout::Line],
+        rect: [f32; 4],
+        fonts: &[FontInfo],
+        lookup: &mut crate::fonts::Fonts,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        let mut rows: Vec<Vec<&layout::Line>> = Vec::new();
+        for line in lines {
+            if let Some(row) = rows.last_mut().filter(|r| {
+                let size = r.iter().map(|l| l.size).fold(line.size, f32::max);
+                (r[0].baseline - line.baseline).abs() < 0.6 * size
+                    && r.iter()
+                        .all(|l| l.rect[2] <= line.rect[0] + 0.5 || line.rect[2] <= l.rect[0] + 0.5)
+            }) {
+                row.push(line);
+            } else {
+                rows.push(vec![line]);
+            }
+        }
+        let baselines: Vec<_> = rows
+            .iter()
+            .map(|r| r.iter().map(|l| l.baseline).fold(f32::NEG_INFINITY, f32::max))
+            .collect();
+        let handwritten = lines.iter().flat_map(|l| &l.glyphs).any(|g| {
+            fonts
+                .get(g.font as usize)
+                .is_some_and(|f| f.name.to_ascii_lowercase().contains("segoeprint"))
+        });
+        if handwritten {
+            for line in lines {
+                self.write(x, line, rect, fonts, lookup);
+            }
+            return;
+        }
+        let mut crowded = vec![false; rows.len()];
+        for (i, (r, b)) in rows.windows(2).zip(baselines.windows(2)).enumerate() {
+            if b[1] - b[0] < 0.85 * r[0].iter().chain(&r[1]).map(|l| l.size).fold(0.0, f32::max) {
+                crowded[i] = true;
+                crowded[i + 1] = true;
+            }
+        }
+        let mut separate = Vec::new();
+        rows = rows
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                if crowded[i] {
+                    separate.extend(r);
+                    None
+                } else {
+                    Some(r)
+                }
+            })
+            .collect();
+        if rows.is_empty() {
+            for line in separate {
+                self.write(x, line, rect, fonts, lookup);
+            }
+            return;
+        }
+        let baselines: Vec<_> = rows
+            .iter()
+            .map(|r| r.iter().map(|l| l.baseline).fold(f32::NEG_INFINITY, f32::max))
+            .collect();
+        let (cx, cy) = (emu(rect[2] - rect[0]), emu(rect[3] - rect[1]));
+        let _ = write!(
+            x,
+            r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>"#
+        );
+        let mut cursor = 0.0;
+        for (i, row) in rows.iter_mut().enumerate() {
+            row.sort_by(|a, b| a.rect[0].total_cmp(&b.rect[0]));
+            let size = row.iter().map(|l| l.size).fold(0.0, f32::max);
+            let baseline = baselines[i] - rect[1];
+            let height = tw(if let Some(next) = baselines.get(i + 1) {
+                next - baselines[i]
+            } else {
+                2.0 * size
+            })
+            .max(20);
+            let before = tw((baseline - 0.8 * height as f32 / 20.0 - cursor).max(0.0));
+            let expected = cursor + before as f32 / 20.0 + height as f32 / 25.0;
+            let left = tw((row[0].glyphs[0].x - rect[0]).max(0.0));
+            let _ = write!(
+                x,
+                r#"<w:p><w:pPr><w:widowControl w:val="0"/><w:suppressAutoHyphens/><w:snapToGrid w:val="0"/><w:spacing w:before="{before}" w:after="0" w:line="{height}" w:lineRule="exact"/><w:ind w:left="{left}" w:right="0" w:firstLine="0"/><w:jc w:val="left"/><w:tabs>"#
+            );
+            for line in row.iter().skip(1) {
+                let _ = write!(
+                    x,
+                    r#"<w:tab w:val="left" w:pos="{}"/>"#,
+                    tw(line.glyphs[0].x - rect[0])
+                );
+            }
+            x.push_str("</w:tabs></w:pPr>");
+            for (j, line) in row.iter().enumerate() {
+                if j > 0 {
+                    x.push_str("<w:r><w:tab/></w:r>");
+                }
+                let mut l = line_out(line, 1.0, None, false);
+                l.baseline = expected;
+                for run in &mut l.runs {
+                    run.baseline -= rect[1];
+                }
+                line_runs_xml(
+                    x,
+                    &l,
+                    fonts,
+                    lookup,
+                    &mut self.faces,
+                    &mut self.measurements,
+                    &mut self.id,
+                );
+            }
+            x.push_str("</w:p>");
+            cursor += before as f32 / 20.0 + height as f32 / 20.0;
+        }
+        x.push_str(r#"</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vertOverflow="overflow" horzOverflow="overflow" wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp>"#);
+        for line in separate {
+            self.write(x, line, rect, fonts, lookup);
+        }
     }
 }
 
@@ -595,6 +726,90 @@ fn styles_xml(face: Option<&super::Face>, size: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn label(text: &str, x: f32, baseline: f32) -> layout::Line {
+        let glyphs = text
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| Glyph {
+                source: -1,
+                ch,
+                rect: [
+                    x + 5.0 * i as f32,
+                    baseline - 9.0,
+                    x + 5.0 * (i + 1) as f32,
+                    baseline + 2.0,
+                ],
+                x: x + 5.0 * i as f32,
+                baseline,
+                size: 10.0,
+                font: 0,
+                color: [0; 3],
+                space_before: false,
+                invisible: false,
+            })
+            .collect();
+        layout::Line {
+            glyphs,
+            rect: [
+                x,
+                baseline - 9.0,
+                x + 5.0 * text.len() as f32,
+                baseline + 2.0,
+            ],
+            baseline,
+            size: 10.0,
+        }
+    }
+
+    fn labels_xml(lines: &[layout::Line]) -> String {
+        let fonts = [FontInfo {
+            name: "Arial".into(),
+            ..Default::default()
+        }];
+        let mut lookup = crate::fonts::Fonts::default();
+        let mut xml = String::new();
+        TextBoxes::new().block(
+            &mut xml,
+            lines,
+            [0.0, 0.0, 200.0, 200.0],
+            &fonts,
+            &mut lookup,
+        );
+        xml
+    }
+
+    #[test]
+    fn labels_share_a_story_and_keep_tabs_between_columns() {
+        let xml = labels_xml(&[
+            label("A", 10.0, 20.0),
+            label("B", 110.0, 21.0),
+            label("C", 10.0, 50.0),
+            label("D", 110.0, 50.0),
+        ]);
+        assert_eq!(xml.matches("<wps:wsp>").count(), 1);
+        assert_eq!(xml.matches("<w:p>").count(), 2);
+        assert_eq!(
+            xml.matches(r#"<w:tab w:val="left" w:pos="2200"/>"#).count(),
+            2
+        );
+        for text in ["A", "B", "C", "D"] {
+            assert!(xml.contains(&format!(">{text}</w:t>")));
+        }
+    }
+
+    #[test]
+    fn tightly_stacked_math_does_not_split_unrelated_labels_into_shapes() {
+        let xml = labels_xml(&[
+            label("Heading", 10.0, 20.0),
+            label("N", 10.0, 50.0),
+            label("D", 10.0, 54.0),
+            label("Footer", 10.0, 90.0),
+        ]);
+        assert_eq!(xml.matches("<wps:wsp>").count(), 3);
+        assert_eq!(xml.matches("<w:p>").count(), 4);
+        assert!(xml.contains(">Heading</w:t>") && xml.contains(">Footer</w:t>"));
+    }
 
     #[test]
     fn oversized_pages_scale_uniformly() {

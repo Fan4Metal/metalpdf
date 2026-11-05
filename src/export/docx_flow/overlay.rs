@@ -116,6 +116,11 @@ pub(super) fn graphic(
     } else {
         (cx, cy)
     };
+    let mut text = String::new();
+    if grouped {
+        out.textboxes
+            .block(&mut text, &region.lines, region.rect, out.fonts, out.lookup);
+    }
     if grouped {
         let _ = write!(
             x,
@@ -129,10 +134,7 @@ pub(super) fn graphic(
         r#"<pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="image{rel}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>"#
     );
     if grouped {
-        for line in &region.lines {
-            out.textboxes
-                .write(x, line, region.rect, out.fonts, out.lookup);
-        }
+        x.push_str(&text);
         x.push_str("</wpg:wgp>");
     }
     x.push_str("</a:graphicData></a:graphic>");
@@ -163,7 +165,18 @@ mod tests {
         let read = |name| crate::export::zip::read_entry(&bytes, name).unwrap();
         let xml = String::from_utf8(read("word/document.xml")).unwrap();
         assert_eq!(xml.matches("<wpg:wgp ").count(), 1);
-        assert_eq!(xml.matches("<w:txbxContent>").count(), 4);
+        // A small table needs one text story, not a shape per cell. Large
+        // books otherwise make Word spend seconds laying out child shapes.
+        assert_eq!(xml.matches("<w:txbxContent>").count(), 1);
+        let labels = xml
+            .split("<w:txbxContent>")
+            .nth(1)
+            .unwrap()
+            .split("</w:txbxContent>")
+            .next()
+            .unwrap();
+        assert_eq!(labels.matches("<w:p>").count(), 2);
+        assert_eq!(labels.matches("<w:r><w:tab/></w:r>").count(), 2);
         let text: String = xml
             .split("<w:t xml:space=\"preserve\">")
             .skip(1)
