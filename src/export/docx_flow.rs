@@ -26,6 +26,7 @@ use crate::pdfium::{Page, sys::Api};
 
 mod toc;
 mod artwork;
+mod forms;
 
 struct InlinePicture {
     marker: char,
@@ -91,6 +92,7 @@ struct DocPara {
 enum Block {
     Para(DocPara),
     Picture { rel: usize, width: f32, height: f32, align: Align, left: f32, top: f32, bottom: f32 },
+    Grid(forms::Table),
 }
 
 impl Block {
@@ -98,6 +100,7 @@ impl Block {
         match self {
             Block::Para(p) => p.top,
             Block::Picture { top, .. } => *top,
+            Block::Grid(table) => table.rect[1],
         }
     }
 
@@ -105,6 +108,7 @@ impl Block {
         match self {
             Block::Para(p) => p.bottom,
             Block::Picture { bottom, .. } => *bottom,
+            Block::Grid(table) => table.rect[3],
         }
     }
 }
@@ -170,11 +174,32 @@ impl Writer {
         Ok(self.pictures)
     }
 
+    fn remember_line(&mut self, line:&layout::Line) {
+        let mut start = 0;
+        for end in 1..=line.glyphs.len() {
+            let g = &line.glyphs[start];
+            if end < line.glyphs.len() && !line.glyphs[end].space_before
+                && line.glyphs[end].font == g.font && (line.glyphs[end].size - g.size).abs() < 0.1 {
+                continue;
+            }
+            let word = &line.glyphs[start..end];
+            let samples = self.advances.entry(g.font).or_default();
+            if samples.len() < 250 && word.len() >= 4 && word.iter().all(|g| g.ch.is_alphabetic()) {
+                let width = word.last().unwrap().rect[2] - g.x;
+                samples.push((word.iter().map(|g| g.ch).collect(), g.size, width));
+            }
+            start = end;
+        }
+    }
+
     pub fn page(&mut self, _api: &'static Api, page: &Page, content: &PageContent, fonts: &[FontInfo], _faces: &mut crate::fonts::Fonts) -> Result<(), String> {
         let [w, h] = content.size;
         let scale = super::PICTURE_DPI / 72.0;
-        let prepared = artwork::prepare(content, fonts);
-        if graphics_page(content) || prepared.whole_page {
+        let mut form = forms::detect(content, fonts);
+        let mut flow_content = content.clone();
+        if let Some(form) = &form {forms::remove(&mut flow_content,form);}
+        let prepared = artwork::prepare(&flow_content, fonts);
+        if graphics_page(content) || prepared.whole_page && form.is_none() {
             // Letter outlines have no editable paragraphs. Clustering them
             // into inline figures tears a designed cover into separate words
             // or letters. Keep the entire composition, including its margins.
@@ -191,7 +216,7 @@ impl Writer {
         let mut blocks: Vec<Option<Block>> = Vec::with_capacity(items.len());
         let mut extent: Option<[f32; 4]> = None;
         let mut decorations = Vec::new();
-        for &rect in &prepared.decorations {
+        for &rect in prepared.decorations.iter().chain(form.iter().flat_map(|f|&f.decorations)) {
             let png = render_crop(page, content, rect, &mut render)?;
             decorations.push(Decoration { rel: self.picture(&png)?, rect });
         }
@@ -200,23 +225,7 @@ impl Writer {
             extent = Some(extent.map_or(r, |e| layout::union(e, r)));
             match item {
                 Item::Para(p) => {
-                    for line in &p.lines {
-                        let mut start = 0;
-                        for end in 1..=line.glyphs.len() {
-                            let g = &line.glyphs[start];
-                            if end < line.glyphs.len() && !line.glyphs[end].space_before
-                                && line.glyphs[end].font == g.font && (line.glyphs[end].size - g.size).abs() < 0.1 {
-                                continue;
-                            }
-                            let word = &line.glyphs[start..end];
-                            let samples = self.advances.entry(g.font).or_default();
-                            if samples.len() < 250 && word.len() >= 4 && word.iter().all(|g| g.ch.is_alphabetic()) {
-                                let width = word.last().unwrap().rect[2] - g.x;
-                                samples.push((word.iter().map(|g| g.ch).collect(), g.size, width));
-                            }
-                            start = end;
-                        }
-                    }
+                    for line in &p.lines {self.remember_line(line);}
                     for g in p.lines.iter().flat_map(|l| &l.glyphs) {
                         *self.sizes.entry((g.size * 2.0).round() as i32).or_default() += 1;
                         *self.font_use.entry(g.font).or_default() += 1;
@@ -235,6 +244,25 @@ impl Writer {
                     blocks.push(Some(Block::Para(para)));
                 }
                 Item::Figure(f) => {
+                    if let Some(table) = form.as_mut().filter(|form| (0..4).all(|k|(form.table.rect[k]-f.rect[k]).abs()<1.0)) {
+                        let pw = ((w*scale).round() as u32).max(1);
+                        let ph = ((h*scale).round() as u32).max(1);
+                        let bitmap = render.get_or_insert_with(||page.render_whole(pw,ph,content.turns)).as_ref().ok_or("could not render table shading")?;
+                        for cell in table.table.rows.iter_mut().flat_map(|r|&mut r.cells) {
+                            let x=(((cell.rect[0]+1.0)*scale) as u32).min(pw-1);
+                            let y=(((cell.rect[1]+1.0)*scale) as u32).min(ph-1);
+                            let at=((y*pw+x)*4) as usize;
+                            let pixel=&bitmap.pixels()[at..at+4];
+                            cell.fill=[pixel[2],pixel[1],pixel[0]];
+                            for line in layout::lines(cell.glyphs.clone()) {self.remember_line(&line);}
+                            for g in &cell.glyphs {
+                                *self.sizes.entry((g.size*2.0).round() as i32).or_default()+=1;
+                                *self.font_use.entry(g.font).or_default()+=1;
+                            }
+                        }
+                        blocks.push(Some(Block::Grid(table.table.clone())));
+                        continue;
+                    }
                     let (fw, fh) = (f.rect[2] - f.rect[0], f.rect[3] - f.rect[1]);
                     let png = render_crop(page, content, f.rect, &mut render)?;
                     let rel = self.picture(&png)?;
@@ -379,14 +407,17 @@ impl Writer {
                 scales.insert(*font, (100.0 * ratio).round().min(100.0) as i64);
             }
         }
-        let mut out = Out { fonts, lookup, faces: &mut faces, doc_pr: 0, scales };
+        let mut out = Out { fonts, lookup, faces: &mut faces, doc_pr: 0, scales, margin_left:0.0 };
         let mut body = String::new();
         let mut last_sect = String::new();
         for &(from, to, margins) in &runs {
             for pi in from..to {
                 let pg = &self.pages[pi];
                 let size = pg.size;
-                let margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), ((size[1]-e[3])/2.0).clamp(14.0, 0.15*size[1])]);
+                let mut margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), ((size[1]-e[3])/2.0).clamp(14.0, 0.15*size[1])]);
+                let grid_carrier = !pg.decorations.is_empty() && pg.segments.first().and_then(|s|s.blocks.first()).is_some_and(|(_,b)|matches!(b,Block::Grid(_)));
+                if grid_carrier {margins[1]=(margins[1]-1.0).max(0.0);}
+                out.margin_left=margins[0];
                 let text_w = (size[0] - margins[0] - margins[2]).max(72.0);
                 if let Some(rel) = pg.picture {
                     if !last_sect.is_empty() {
@@ -448,6 +479,12 @@ impl Writer {
                         // A section cannot end in a table: a paragraph a
                         // point high follows it.
                         content.push_str(r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/></w:pPr></w:p>"#);
+                    }
+                    if si==0 && grid_carrier {
+                        // Word positions drawings anchored inside a table
+                        // against its cell even with layoutInCell="0". Use
+                        // a tiny paragraph outside the table as the anchor.
+                        content.insert_str(0,r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr></w:p>"#);
                     }
                     // The section before ends in the last paragraph so far.
                     if !last_sect.is_empty() {
@@ -635,6 +672,7 @@ struct Out<'a> {
     faces: &'a mut Faces,
     doc_pr: usize,
     scales: HashMap<u16, i64>,
+    margin_left: f32,
 }
 
 /// Where the block before ended, for the space before the next: its last
@@ -648,6 +686,13 @@ struct Prev {
 /// A block as a paragraph: `col_w` the width of its column, a column
 /// break before it when asked.
 fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_break: bool, level: &dyn Fn(&DocPara) -> Option<usize>, out: &mut Out) {
+    if let Block::Grid(table)=block {
+        let before=(table.rect[1]-prev.bottom.unwrap_or(table.rect[1])).max(0.0);
+        if before>1.0 {let _=write!(x,r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/></w:pPr></w:p>"#,tw(before));}
+        forms::write(x,table,out.margin_left,out);
+        *prev=Prev {baseline:None,bottom:Some(table.rect[3])};
+        return;
+    }
     if let Block::Para(p) = block
         && let Some(cap) = &p.drop_cap
     {
@@ -655,6 +700,7 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
     }
     x.push_str("<w:p><w:pPr>");
     match block {
+        Block::Grid(_)=>unreachable!(),
         Block::Para(p) => {
             if let Some(n) = level(p) {
                 let _ = write!(x, r#"<w:pStyle w:val="Heading{n}"/>"#);
@@ -1138,7 +1184,7 @@ mod tests {
         let fonts = [FontInfo { name: "PetersburgC".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new() };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0 };
         let mut xml = String::new();
         let mut prev = Prev { baseline: Some(60.0), bottom: Some(62.0) };
         block_xml(&mut xml, &Block::Para(doc_para(p, Some(&caps[0]))), &mut prev, 340.0, false, &|_| None, &mut out);
@@ -1186,7 +1232,7 @@ mod tests {
         let fonts = [FontInfo { name: "Tahoma".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new() };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0 };
         let mut xml = String::new();
         let mut prev = Prev { baseline: Some(94.0), bottom: Some(100.0) };
         assert!(para_before(&para, &prev) > 80.0);
