@@ -21,8 +21,27 @@ use super::docx::{self, NS};
 use super::layout::{self, Align, Item, Options, Span, Vert};
 use super::xml::{HEAD, esc};
 use super::zip::ZipWriter;
-use super::{Faces, FontInfo, Meta, PageContent, crop_bgrx, encode_png, shrink_rgba};
+use super::{Faces, FontInfo, Glyph, Meta, PageContent, crop_bgrx, encode_png, shrink_rgba};
 use crate::pdfium::{Page, sys::Api};
+
+/// A separate initial-letter frame, anchored to the following paragraph.
+/// Its font and baseline must never become those of the surrounding text.
+#[derive(Clone, Debug)]
+struct DropCap {
+    glyph: Glyph,
+    first_baseline: f32,
+    text_left: f32,
+    lines: usize,
+}
+
+impl DropCap {
+    fn starts(&self, p: &layout::Para) -> bool {
+        p.marker.is_none()
+            && p.lines.len() >= self.lines
+            && (p.lines[0].baseline - self.first_baseline).abs() < 0.3 * p.size
+            && (p.lines[0].rect[0] - self.text_left).abs() < 0.5 * p.size
+    }
+}
 
 /// A paragraph as Word gets it, its geometry in points.
 struct DocPara {
@@ -43,6 +62,7 @@ struct DocPara {
     chars: usize,
     /// Tab stops from the column's left edge, right-aligned ones flagged.
     tabs: Vec<(f32, bool)>,
+    drop_cap: Option<DropCap>,
 }
 
 enum Block {
@@ -123,7 +143,7 @@ impl Writer {
     }
 
     pub fn page(&mut self, _api: &'static Api, page: &Page, content: &PageContent, _fonts: &[FontInfo], _faces: &mut crate::fonts::Fonts) -> Result<(), String> {
-        let items = flowing_items(content);
+        let (items, drop_caps) = flowing_items(content);
         let [w, h] = content.size;
         let scale = super::PICTURE_DPI / 72.0;
         let (pw, ph) = (((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1));
@@ -139,7 +159,7 @@ impl Writer {
                         *self.sizes.entry((g.size * 2.0).round() as i32).or_default() += 1;
                         *self.font_use.entry(g.font).or_default() += 1;
                     }
-                    blocks.push(Some(Block::Para(doc_para(p))));
+                    blocks.push(Some(Block::Para(doc_para(p, drop_caps.iter().find(|cap| cap.starts(p))))));
                 }
                 Item::Figure(f) => {
                     let (fw, fh) = (f.rect[2] - f.rect[0], f.rect[3] - f.rect[1]);
@@ -374,21 +394,92 @@ impl Writer {
     }
 }
 
-/// A large page fill is decoration, not a figure containing the entire
-/// page's text. Keep the actual pictures as separate inline figures.
-fn flowing_items(content: &PageContent) -> Vec<Item> {
+/// Recognise an isolated large letter beside several indented body lines.
+/// Do this before line grouping: a dropped baseline otherwise attaches the
+/// cap to a later line and turns its neighbours into giant superscripts.
+fn drop_caps(content: &PageContent) -> Vec<(usize, DropCap)> {
+    let mut sizes: HashMap<i32, usize> = HashMap::new();
+    for g in &content.glyphs {
+        if !g.invisible && g.ch.is_alphabetic() && g.size.is_finite() && g.size > 0.0 {
+            *sizes.entry((g.size * 2.0).round() as i32).or_default() += 1;
+        }
+    }
+    let Some((&size, _)) = sizes.iter().max_by_key(|(s, n)| (**n, -**s)) else { return Vec::new() };
+    let body = size as f32 / 2.0;
+    let candidates: Vec<_> = content.glyphs.iter().enumerate().filter(|(_, g)| {
+        !g.invisible && g.ch.is_alphabetic() && g.size >= 2.0 * body && g.size <= 8.0 * body
+    }).collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let lines = layout::lines(content.glyphs.iter().filter(|g| !g.invisible && g.size >= 0.8 * body && g.size <= 1.2 * body).cloned().collect());
+    let mut caps = Vec::new();
+    for (i, g) in candidates {
+        // A word in a large heading or logo is not a drop cap.
+        if content.glyphs.iter().enumerate().any(|(j, other)| {
+            i != j && !other.ch.is_whitespace() && other.size >= 0.75 * g.size
+                && (other.baseline - g.baseline).abs() < 0.5 * body
+                && other.rect[0] < g.rect[2] + g.size && other.rect[2] > g.rect[0] - g.size
+        }) {
+            continue;
+        }
+        let mut beside: Vec<_> = lines.iter().filter(|l| {
+            l.glyphs.len() >= 8 && l.rect[0] >= g.rect[2] - 0.3 * body && l.rect[0] <= g.rect[2] + 1.5 * body
+                && l.rect[2] > g.rect[2] + 4.0 * body
+                && l.baseline > g.rect[1] + 0.4 * body && l.baseline <= g.baseline + 0.5 * body
+        }).collect();
+        beside.sort_by(|a, b| a.baseline.total_cmp(&b.baseline));
+        if !(2..=8).contains(&beside.len())
+            || beside[0].baseline > g.rect[1] + 2.0 * body
+            || (beside.last().unwrap().baseline - g.baseline).abs() > 0.6 * body
+            || beside.windows(2).any(|pair| {
+                let pitch = pair[1].baseline - pair[0].baseline;
+                !(0.85 * body..=1.8 * body).contains(&pitch) || (pair[1].rect[0] - pair[0].rect[0]).abs() > 0.5 * body
+            })
+        {
+            continue;
+        }
+        caps.push((i, DropCap { glyph: g.clone(), first_baseline: beside[0].baseline, text_left: beside[0].rect[0], lines: beside.len() }));
+    }
+    caps
+}
+
+/// Keep cap frames out of body analysis, and page fills out of figures.
+fn flowing_items(content: &PageContent) -> (Vec<Item>, Vec<DropCap>) {
+    let candidates = drop_caps(content);
     let mut analysed = content.clone();
+    let mut index = 0;
+    analysed.glyphs.retain(|_| {
+        let keep = !candidates.iter().any(|(i, _)| *i == index);
+        index += 1;
+        keep
+    });
     let area = content.size[0] * content.size[1];
     analysed.graphics.retain(|g| {
         matches!(g.kind, super::GraphicKind::Image) || (g.rect[2] - g.rect[0]) * (g.rect[3] - g.rect[1]) < 0.5 * area
     });
     let mut items = layout::analyse(&analysed, Options { invisible: true, figures: true });
+    let mut caps = Vec::new();
+    let mut restored = false;
+    for (_, cap) in candidates {
+        if items.iter().any(|item| matches!(item, Item::Para(p) if cap.starts(p))) {
+            caps.push(cap);
+        } else {
+            // A figure or an unusual reading order: preserve the letter
+            // as ordinary text rather than silently dropping it.
+            analysed.glyphs.push(cap.glyph);
+            restored = true;
+        }
+    }
+    if restored {
+        items = layout::analyse(&analysed, Options { invisible: true, figures: true });
+    }
     // Image-only pages (including full-page scans) still need their image.
     if items.is_empty() && !content.graphics.is_empty() {
         let [w, h] = content.size;
         items.push(Item::Figure(layout::Figure { rect: [0.0, 0.0, w, h], column: [0.0, w], image: None }));
     }
-    items
+    (items, caps)
 }
 
 /// What writing the blocks needs: the fonts and the drawings' numbers.
@@ -410,15 +501,14 @@ struct Prev {
 /// A block as a paragraph: `col_w` the width of its column, a column
 /// break before it when asked.
 fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_break: bool, level: &dyn Fn(&DocPara) -> Option<usize>, out: &mut Out) {
+    if let Block::Para(p) = block
+        && let Some(cap) = &p.drop_cap
+    {
+        drop_cap_xml(x, cap, p, para_before(p, prev), out);
+    }
     x.push_str("<w:p><w:pPr>");
     match block {
         Block::Para(p) => {
-            let height = if p.lines >= 2 { p.pitch } else { 1.17 * p.size };
-            let before = match (prev.baseline, prev.bottom) {
-                (Some(b), _) => p.first_baseline - b - height,
-                (None, Some(bottom)) => p.top - bottom,
-                (None, None) => 0.0,
-            };
             if let Some(n) = level(p) {
                 let _ = write!(x, r#"<w:pStyle w:val="Heading{n}"/>"#);
             }
@@ -429,7 +519,7 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
                 }
                 x.push_str("</w:tabs>");
             }
-            let before = paragraph_gap(before, p.size);
+            let before = para_before(p, prev);
             let _ = write!(x, r#"<w:spacing w:before="{}" w:after="0""#, tw(before.clamp(0.0, 400.0)));
             if p.lines >= 2 && p.pitch >= 0.9 * p.size {
                 let _ = write!(x, r#" w:line="{}" w:lineRule="atLeast""#, tw(p.pitch));
@@ -451,7 +541,7 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
                 x.push_str(r#"<w:r><w:br w:type="column"/></w:r>"#);
             }
             for span in &p.spans {
-                run_xml(x, span, &out.faces.get(span.font, out.fonts, out.lookup));
+                run_xml(x, span, &out.faces.get(span.font, out.fonts, out.lookup), 0);
             }
             *prev = Prev { baseline: Some(p.last_baseline), bottom: Some(p.bottom) };
         }
@@ -477,6 +567,34 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
         }
     }
     x.push_str("</w:p>");
+}
+
+/// Word's native initial-letter frame wraps only its opening body lines
+/// and follows the paragraph when earlier text is edited. All body runs
+/// remain ordinary text in the main story, at their original body size.
+fn drop_cap_xml(x: &mut String, cap: &DropCap, p: &DocPara, before: f32, out: &mut Out) {
+    let width = (cap.text_left - cap.glyph.x).max(1.0);
+    let height = p.pitch * cap.lines as f32;
+    // The frame and the body need the same preceding gap. Otherwise only
+    // the body moves down, leaving the cap above its opening lines.
+    let _ = write!(x, r#"<w:p><w:pPr><w:keepNext/><w:framePr w:dropCap="drop" w:lines="{}" w:w="{}" w:hSpace="0" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/><w:spacing w:before="{}" w:after="0" w:line="{}" w:lineRule="exact"/><w:ind w:left="{}"/><w:textAlignment w:val="baseline"/></w:pPr>"#,
+        cap.lines, tw(width), tw(before), tw(height), tw(p.left));
+    let span = Span { text: cap.glyph.ch.to_string(), font: cap.glyph.font, size: cap.glyph.size, color: cap.glyph.color, vert: Vert::Base };
+    // An exact frame's baseline is at 4/5 of its line box, as in the
+    // fixed-layout writer. Retain the PDF's baseline drop against the body.
+    let shift = (cap.glyph.baseline - cap.first_baseline) - 0.8 * (height - p.pitch);
+    run_xml(x, &span, &out.faces.get(span.font, out.fonts, out.lookup), (-2.0 * shift).round() as i64);
+    x.push_str("</w:p>");
+}
+
+fn para_before(p: &DocPara, prev: &Prev) -> f32 {
+    let height = if p.lines >= 2 { p.pitch } else { 1.17 * p.size };
+    let gap = match (prev.baseline, prev.bottom) {
+        (Some(b), _) => p.first_baseline - b - height,
+        (None, Some(bottom)) => p.top - bottom,
+        (None, None) => 0.0,
+    };
+    paragraph_gap(gap, p.size)
 }
 
 /// Keep separation without carrying large fixed PDF gaps into reflowing text.
@@ -589,7 +707,7 @@ fn word_columns(columns: &[[f32; 2]], text_w: f32) -> Vec<(f32, f32)> {
 }
 
 /// A paragraph of `layout` with its indents counted from its column.
-fn doc_para(p: &layout::Para) -> DocPara {
+fn doc_para(p: &layout::Para, cap: Option<&DropCap>) -> DocPara {
     let n = p.lines.len();
     let col = p.column;
     let lefts: Vec<f32> = p.lines.iter().map(|l| l.rect[0]).collect();
@@ -604,7 +722,7 @@ fn doc_para(p: &layout::Para) -> DocPara {
         }
     };
     let spans = layout::spans(p, "\t");
-    DocPara {
+    let mut para = DocPara {
         spans,
         align: p.align,
         left: left.max(0.0),
@@ -619,7 +737,21 @@ fn doc_para(p: &layout::Para) -> DocPara {
         bottom: p.rect[3],
         chars: p.chars(),
         tabs: Vec::new(),
+        drop_cap: None,
+    };
+    if let Some(cap) = cap {
+        // The initial lines were inset to wrap the PDF's cap. Word's
+        // separate initial-letter frame supplies their inset now.
+        para.left = (cap.glyph.x - p.column[0]).max(0.0);
+        para.first = 0.0;
+        let mut lines = p.lines.clone();
+        for line in lines.iter_mut().take(cap.lines) {
+            line.rect[0] = cap.glyph.x;
+        }
+        para.align = layout::alignment(&lines, p.column, p.size);
+        para.drop_cap = Some(cap.clone());
     }
+    para
 }
 
 fn jc(align: Align) -> &'static str {
@@ -666,7 +798,7 @@ fn sect_pr(size: [f32; 2], m: [f32; 4], cols: &[(f32, f32)], text_w: f32, new_pa
 
 /// A run: its font, weight, slant, colour, size and position; a tab in
 /// the text as Word's own tab.
-fn run_xml(x: &mut String, span: &Span, face: &super::Face) {
+fn run_xml(x: &mut String, span: &Span, face: &super::Face, position: i64) {
     let mut rpr = String::from("<w:rPr>");
     let f = esc(&face.family);
     let _ = write!(rpr, r#"<w:rFonts w:ascii="{f}" w:hAnsi="{f}" w:eastAsia="{f}" w:cs="{f}"/>"#);
@@ -682,6 +814,9 @@ fn run_xml(x: &mut String, span: &Span, face: &super::Face) {
     }
     let hp = ((span.size * 2.0).round() as i64).clamp(2, 3276);
     let _ = write!(rpr, r#"<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>"#);
+    if position != 0 {
+        let _ = write!(rpr, r#"<w:position w:val="{position}"/>"#);
+    }
     match span.vert {
         Vert::Super => rpr.push_str(r#"<w:vertAlign w:val="superscript"/>"#),
         Vert::Sub => rpr.push_str(r#"<w:vertAlign w:val="subscript"/>"#),
@@ -720,7 +855,85 @@ fn styles_xml(face: Option<&super::Face>, size: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::{Glyph, Graphic, GraphicKind};
+    use crate::export::{Graphic, GraphicKind};
+
+    fn initial_page() -> PageContent {
+        let mut glyphs = vec![Glyph { source: -1, ch: 'O', rect: [55.0, 80.0, 95.0, 140.0], x: 55.0, baseline: 128.0, size: 51.0, font: 0, color: [0, 176, 80], space_before: false, invisible: false }];
+        for (i, text) in [
+            "nce upon a time the computers changed the world,",
+            "opening new possibilities for the people who used",
+            "them. This ordinary paragraph keeps its normal",
+            "type size and reading order when exported to Word.",
+            "Every line after the initial is ordinary body text,",
+            "and the final line ends here.",
+            "A separate paragraph follows after a gap.",
+        ].iter().enumerate() {
+            let left = if i < 3 { 95.0 } else { 55.0 };
+            let right = if i == 5 { 250.0 } else { 395.0 };
+            let baseline = if i == 6 { 190.0 } else { 100.0 + 14.0 * i as f32 };
+            let advance = (right - left) / text.len() as f32;
+            glyphs.extend(text.chars().enumerate().map(|(j, ch)| {
+                let x = left + advance * j as f32;
+                Glyph { source: -1, ch, rect: [x, baseline - 10.4, x + advance, baseline + 2.5], x, baseline, size: 11.0, font: 0, color: [0; 3], space_before: false, invisible: false }
+            }));
+        }
+        PageContent { size: [468.0, 660.0], glyphs, ..Default::default() }
+    }
+
+    #[test]
+    fn a_drop_cap_does_not_change_body_size_or_reading_order() {
+        let (items, caps) = flowing_items(&initial_page());
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].lines, 3);
+        let Item::Para(p) = &items[0] else { panic!() };
+        assert!(caps[0].starts(p));
+        assert_eq!(p.lines.len(), 6);
+        let para = doc_para(p, Some(&caps[0]));
+        assert_eq!((para.size, para.left, para.first), (11.0, 0.0, 0.0));
+        assert_eq!(para.align, Align::Justify);
+        assert!(para.spans.iter().all(|s| s.size == 11.0 && s.vert == Vert::Base));
+        let text: String = para.spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.starts_with("nce upon a time the computers changed the world, opening new possibilities"));
+        assert!(text.ends_with("and the final line ends here."));
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn only_the_initial_is_framed_and_shares_the_body_gap() {
+        let (items, caps) = flowing_items(&initial_page());
+        let Item::Para(p) = &items[0] else { panic!() };
+        let fonts = [FontInfo { name: "PetersburgC".into(), ..Default::default() }];
+        let mut lookup = crate::fonts::Fonts::default();
+        let mut faces = Faces::default();
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0 };
+        let mut xml = String::new();
+        let mut prev = Prev { baseline: Some(60.0), bottom: Some(62.0) };
+        block_xml(&mut xml, &Block::Para(doc_para(p, Some(&caps[0]))), &mut prev, 340.0, false, &|_| None, &mut out);
+        assert_eq!(xml.matches("<w:framePr").count(), 1);
+        assert!(xml.contains(r#"w:dropCap="drop" w:lines="3" w:w="800""#));
+        assert_eq!(xml.matches(r#"w:before="330""#).count(), 2);
+        assert!(xml.contains(r#"<w:sz w:val="102""#));
+        let body = xml.split_once("</w:p>").unwrap().1;
+        assert!(!body.contains("framePr") && !body.contains("vertAlign"));
+        assert!(!body.contains(r#"<w:sz w:val="102""#));
+        assert!(body.contains(r#"<w:sz w:val="22""#));
+        assert_eq!(prev.baseline, Some(170.0));
+    }
+
+    #[test]
+    fn a_large_word_or_raised_initial_is_not_a_drop_cap() {
+        let mut page = initial_page();
+        let mut next = page.glyphs[0].clone();
+        next.ch = 'N';
+        next.x = 96.0;
+        next.rect[0] = 96.0;
+        next.rect[2] = 136.0;
+        page.glyphs.push(next);
+        assert!(drop_caps(&page).is_empty());
+        page.glyphs.pop();
+        page.glyphs[0].baseline = 100.0;
+        assert!(drop_caps(&page).is_empty());
+    }
 
     #[test]
     fn page_decoration_does_not_turn_editable_text_into_a_picture() {
@@ -729,7 +942,7 @@ mod tests {
             Glyph { source: -1, ch, rect: [x, 80.0, x + 6.0, 92.0], x, baseline: 90.0, size: 10.0, font: 0, color: [0; 3], space_before: false, invisible: false }
         }).collect();
         let page = PageContent { size: [600.0, 800.0], glyphs, graphics: vec![Graphic { rect: [30.0, 40.0, 570.0, 760.0], kind: GraphicKind::Path { curved: true }, object: None }], turns: 0 };
-        let items = flowing_items(&page);
+        let (items, _) = flowing_items(&page);
         assert!(items.iter().all(|item| matches!(item, Item::Para(_))));
         let Item::Para(p) = &items[0] else { panic!() };
         assert_eq!(p.lines[0].text(), "Ordinary paragraph");
@@ -738,7 +951,7 @@ mod tests {
     #[test]
     fn an_image_only_page_is_not_lost_in_paragraph_mode() {
         let page = PageContent { size: [600.0, 800.0], graphics: vec![Graphic { rect: [0.0, 0.0, 600.0, 800.0], kind: GraphicKind::Image, object: Some(0) }], ..Default::default() };
-        let items = flowing_items(&page);
+        let (items, _) = flowing_items(&page);
         assert_eq!(items.len(), 1);
         let Item::Figure(f) = &items[0] else { panic!() };
         assert_eq!(f.rect, [0.0, 0.0, 600.0, 800.0]);

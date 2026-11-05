@@ -45,7 +45,7 @@ pub fn style_of(base_font: &str, flags: i32) -> Style {
     let name = untagged(base_font).to_ascii_lowercase();
     let has = |s: &str| name.contains(s);
     Style {
-        serif: has("times") || has("georgia") || has("garamond") || has("roman") || has("book") || has("cambria") || (has("serif") && !has("sans")),
+        serif: has("times") || has("georgia") || has("garamond") || has("roman") || has("book") || has("cambria") || has("petersburg") || (has("serif") && !has("sans")),
         mono: has("mono") || has("courier") || has("consol") || flags & FLAG_FIXED_PITCH != 0,
         bold: has("bold") || has("black") || has("heavy") || has("semibold") || has("demibold") || flags & FLAG_FORCE_BOLD != 0,
         italic: has("italic") || has("oblique") || flags & FLAG_ITALIC != 0,
@@ -401,6 +401,8 @@ mod tests {
         assert_eq!(style_of("ABCDEF+NotoSans-Bold", 0), Style { bold: true, ..plain });
         assert_eq!(style_of("Arial,BoldItalic", 0), Style { bold: true, italic: true, ..plain });
         assert_eq!(style_of("TimesNewRomanPS-BoldMT", 0), Style { serif: true, bold: true, ..plain });
+        assert_eq!(style_of("ABCDEF+PetersburgC", 0), Style { serif: true, ..plain });
+        assert_eq!(style_of("PetersburgC-Italic", 0), Style { serif: true, italic: true, ..plain });
         assert_eq!(style_of("CourierNewPSMT", 0), Style { mono: true, ..plain });
         assert_eq!(style_of("Helvetica-Oblique", 0), Style { italic: true, ..plain });
         assert_eq!(style_of("DejaVuSansMono", 0), Style { mono: true, ..plain });
