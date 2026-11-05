@@ -24,6 +24,14 @@ use super::zip::ZipWriter;
 use super::{Faces, FontInfo, Glyph, Meta, PageContent, crop_bgrx, encode_png, shrink_rgba};
 use crate::pdfium::{Page, sys::Api};
 
+mod toc;
+
+struct Tab {
+    pos: f32,
+    right: bool,
+    leader: bool,
+}
+
 /// A separate initial-letter frame, anchored to the following paragraph.
 /// Its font and baseline must never become those of the surrounding text.
 #[derive(Clone, Debug)]
@@ -60,8 +68,8 @@ struct DocPara {
     top: f32,
     bottom: f32,
     chars: usize,
-    /// Tab stops from the column's left edge, right-aligned ones flagged.
-    tabs: Vec<(f32, bool)>,
+    /// Tab stops from the column's left edge, including contents leaders.
+    tabs: Vec<Tab>,
     drop_cap: Option<DropCap>,
 }
 
@@ -159,7 +167,11 @@ impl Writer {
                         *self.sizes.entry((g.size * 2.0).round() as i32).or_default() += 1;
                         *self.font_use.entry(g.font).or_default() += 1;
                     }
-                    blocks.push(Some(Block::Para(doc_para(p, drop_caps.iter().find(|cap| cap.starts(p))))));
+                    let mut para = doc_para(p, drop_caps.iter().find(|cap| cap.starts(p)));
+                    if para.tabs.iter().any(|t| t.leader) {
+                        para.pitch = toc::pitch(p, &items);
+                    }
+                    blocks.push(Some(Block::Para(para)));
                 }
                 Item::Figure(f) => {
                     let (fw, fh) = (f.rect[2] - f.rect[0], f.rect[3] - f.rect[1]);
@@ -234,7 +246,7 @@ impl Writer {
                     let n = rest.len();
                     for (i, (p, r)) in rest.into_iter().enumerate() {
                         let flush_right = i + 1 == n && (right - r[2]).abs() < p.size;
-                        line.tabs.push(if flush_right { (r[2] - left, true) } else { (r[0] - left, false) });
+                        line.tabs.push(Tab { pos: if flush_right { r[2] - left } else { r[0] - left }, right: flush_right, leader: false });
                         if let Some(last) = line.spans.last() {
                             line.spans.push(Span { text: "\t".into(), ..last.clone() });
                         }
@@ -262,7 +274,7 @@ impl Writer {
         let body_face = body_font.map(|f| faces.get(f, fonts, lookup));
         // The headings: paragraphs set larger than the body, short; their
         // sizes ranked, the largest Heading 1.
-        let is_heading = |p: &DocPara| p.size >= body_size * 1.15 && p.lines <= 3 && p.chars <= 200 && p.spans.iter().any(|s| s.text.chars().any(char::is_alphabetic));
+        let is_heading = |p: &DocPara| !p.tabs.iter().any(|t| t.leader) && p.size >= body_size * 1.15 && p.lines <= 3 && p.chars <= 200 && p.spans.iter().any(|s| s.text.chars().any(char::is_alphabetic));
         let mut heading_sizes: Vec<i32> = self
             .pages
             .iter()
@@ -479,7 +491,7 @@ fn flowing_items(content: &PageContent) -> (Vec<Item>, Vec<DropCap>) {
         let [w, h] = content.size;
         items.push(Item::Figure(layout::Figure { rect: [0.0, 0.0, w, h], column: [0.0, w], image: None }));
     }
-    (items, caps)
+    (toc::separate(items), caps)
 }
 
 /// What writing the blocks needs: the fonts and the drawings' numbers.
@@ -514,14 +526,16 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             }
             if !p.tabs.is_empty() {
                 x.push_str("<w:tabs>");
-                for &(pos, right) in &p.tabs {
-                    let _ = write!(x, r#"<w:tab w:val="{}" w:pos="{}"/>"#, if right { "right" } else { "left" }, tw(pos.clamp(0.0, col_w)));
+                for tab in &p.tabs {
+                    let _ = write!(x, r#"<w:tab w:val="{}" w:pos="{}"{}/>"#, if tab.right { "right" } else { "left" }, tw(tab.pos.clamp(0.0, col_w)), if tab.leader { r#" w:leader="dot""# } else { "" });
                 }
                 x.push_str("</w:tabs>");
             }
             let before = para_before(p, prev);
             let _ = write!(x, r#"<w:spacing w:before="{}" w:after="0""#, tw(before.clamp(0.0, 400.0)));
-            if p.lines >= 2 && p.pitch >= 0.9 * p.size {
+            if p.tabs.iter().any(|t| t.leader) {
+                let _ = write!(x, r#" w:line="{}" w:lineRule="exact""#, tw(p.pitch));
+            } else if p.lines >= 2 && p.pitch >= 0.9 * p.size {
                 let _ = write!(x, r#" w:line="{}" w:lineRule="atLeast""#, tw(p.pitch));
             }
             x.push_str("/>");
@@ -588,13 +602,14 @@ fn drop_cap_xml(x: &mut String, cap: &DropCap, p: &DocPara, before: f32, out: &m
 }
 
 fn para_before(p: &DocPara, prev: &Prev) -> f32 {
-    let height = if p.lines >= 2 { p.pitch } else { 1.17 * p.size };
+    let contents = p.tabs.iter().any(|t| t.leader);
+    let height = if contents || p.lines >= 2 { p.pitch } else { 1.17 * p.size };
     let gap = match (prev.baseline, prev.bottom) {
         (Some(b), _) => p.first_baseline - b - height,
         (None, Some(bottom)) => p.top - bottom,
         (None, None) => 0.0,
     };
-    paragraph_gap(gap, p.size)
+    if contents { gap.max(0.0) } else { paragraph_gap(gap, p.size) }
 }
 
 /// Keep separation without carrying large fixed PDF gaps into reflowing text.
@@ -750,6 +765,14 @@ fn doc_para(p: &layout::Para, cap: Option<&DropCap>) -> DocPara {
         }
         para.align = layout::alignment(&lines, p.column, p.size);
         para.drop_cap = Some(cap.clone());
+    }
+    if let Some(spans) = toc::spans(p) {
+        para.spans = spans;
+        para.align = Align::Left;
+        para.left = (p.rect[0] - col[0]).max(0.0);
+        para.first = 0.0;
+        para.right = 0.0;
+        para.tabs.push(Tab { pos: p.rect[2] - col[0], right: true, leader: true });
     }
     para
 }
@@ -933,6 +956,34 @@ mod tests {
         page.glyphs.pop();
         page.glyphs[0].baseline = 100.0;
         assert!(drop_caps(&page).is_empty());
+    }
+
+    #[test]
+    fn contents_use_native_dotted_tabs_and_preserve_the_opening_gap() {
+        let glyphs = "1.1. Ideas................15".chars().enumerate().map(|(i, ch)| {
+            let x = 95.0 + i as f32 * 5.0;
+            Glyph { source: -1, ch, rect: [x, 181.0, x + 5.0, 193.0], x, baseline: 191.0, size: 9.0, font: 0, color: [0; 3], space_before: false, invisible: false }
+        }).collect();
+        let page = PageContent { size: [468.0, 660.0], glyphs, ..Default::default() };
+        let (items, _) = flowing_items(&page);
+        let Item::Para(p) = &items[0] else { panic!() };
+        let para = doc_para(p, None);
+        let text: String = para.spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "1.1. Ideas\t15");
+        assert_eq!(para.first, 0.0);
+        assert_eq!(para.align, Align::Left);
+        let fonts = [FontInfo { name: "Tahoma".into(), ..Default::default() }];
+        let mut lookup = crate::fonts::Fonts::default();
+        let mut faces = Faces::default();
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0 };
+        let mut xml = String::new();
+        let mut prev = Prev { baseline: Some(94.0), bottom: Some(100.0) };
+        assert!(para_before(&para, &prev) > 80.0);
+        block_xml(&mut xml, &Block::Para(para), &mut prev, 340.0, false, &|_| None, &mut out);
+        assert!(xml.contains(r#"w:val="right""#) && xml.contains(r#"w:leader="dot""#));
+        assert_eq!(xml.matches("<w:tab/>").count(), 1);
+        assert!(xml.contains(r#"w:lineRule="exact""#));
+        assert!(!xml.contains("........") && !xml.contains("framePr"));
     }
 
     #[test]
