@@ -245,13 +245,19 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         if ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Print, false, tr!("Print (Ctrl+P)", "Печать (Ctrl+P)"))).inner.clicked() {
             actions.push(ToolbarAction::Print);
         }
-        // Save as Word or PowerPoint: a menu of the two.
+        // Both Word modes are explicit choices, with different editing behaviour.
         let export_tip = tr!("Save as a Word document or a PowerPoint presentation", "Сохранить как документ Word или презентацию PowerPoint");
         let export = ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Export, false, export_tip)).inner;
         egui::Popup::menu(&export).show(|ui| {
-            ui.set_min_width(230.0);
-            if ui.button(tr!("Word document (.docx)…", "Документ Word (.docx)…")).clicked() {
+            ui.set_min_width(280.0);
+            if ui.button(tr!("Word — preserve layout (.docx)…", "Word — сохранение верстки (.docx)…"))
+                .on_hover_text(tr!("Keeps the positions of text and artwork. Text is edited line by line.", "Сохраняет положение текста и графики. Текст редактируется построчно.")).clicked() {
                 actions.push(ToolbarAction::Export(Format::Docx));
+                ui.close();
+            }
+            if ui.button(tr!("Word — ordinary paragraphs (.docx)…", "Word — обычные абзацы (.docx)…"))
+                .on_hover_text(tr!("Editable paragraphs, columns and tables. Lines and pages may wrap differently from the PDF.", "Редактируемые абзацы, колонки и таблицы. Переносы строк и страниц могут отличаться от PDF.")).clicked() {
+                actions.push(ToolbarAction::Export(Format::DocxFlow));
                 ui.close();
             }
             if ui.button(tr!("PowerPoint presentation (.pptx)…", "Презентация PowerPoint (.pptx)…")).clicked() {
@@ -265,7 +271,7 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
                     actions.push(ToolbarAction::CancelExport);
                 }
                 let text = match format {
-                    Format::Docx => tr!(format!("Saving as Word: {done} of {total}"), format!("Сохранение в Word: {done} из {total}")),
+                    Format::Docx | Format::DocxFlow => tr!(format!("Saving as Word: {done} of {total}"), format!("Сохранение в Word: {done} из {total}")),
                     Format::Pptx => tr!(format!("Saving as PowerPoint: {done} of {total}"), format!("Сохранение в PowerPoint: {done} из {total}")),
                 };
                 ui.label(RichText::new(text).size(12.0));

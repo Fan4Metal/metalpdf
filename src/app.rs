@@ -798,7 +798,7 @@ impl App {
             Ask::Export { tab: id, format },
             move || {
                 let (name, ext) = match format {
-                    Format::Docx => (tr!("Word document", "Документ Word"), "docx"),
+                    Format::Docx | Format::DocxFlow => (tr!("Word document", "Документ Word"), "docx"),
                     Format::Pptx => (tr!("PowerPoint presentation", "Презентация PowerPoint"), "pptx"),
                 };
                 let mut dialog = rfd::FileDialog::new().add_filter(name, &[ext]);
@@ -806,7 +806,13 @@ impl App {
                     dialog = dialog.set_directory(folder);
                 }
                 if let Some(stem) = path.file_stem() {
-                    dialog = dialog.set_file_name(format!("{}.{ext}", stem.to_string_lossy()));
+                    let stem = stem.to_string_lossy();
+                    let name = if format == Format::DocxFlow {
+                        tr!(format!("{stem} (paragraphs).{ext}"), format!("{stem} (абзацы).{ext}"))
+                    } else {
+                        format!("{stem}.{ext}")
+                    };
+                    dialog = dialog.set_file_name(name);
                 }
                 dialog
             },
@@ -1159,9 +1165,9 @@ impl App {
                     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                     let text = match (&outcome, format) {
                         (Exported::Done, _) => tr!(format!("Saved as {name}"), format!("Сохранено как {name}")),
-                        (Exported::Cancelled, Format::Docx) => tr!("Saving as Word stopped", "Сохранение в Word остановлено").to_owned(),
+                        (Exported::Cancelled, Format::Docx | Format::DocxFlow) => tr!("Saving as Word stopped", "Сохранение в Word остановлено").to_owned(),
                         (Exported::Cancelled, Format::Pptx) => tr!("Saving as PowerPoint stopped", "Сохранение в PowerPoint остановлено").to_owned(),
-                        (Exported::Failed(e), Format::Docx) => tr!(format!("Could not save as Word: {e}"), format!("Не удалось сохранить в Word: {e}")),
+                        (Exported::Failed(e), Format::Docx | Format::DocxFlow) => tr!(format!("Could not save as Word: {e}"), format!("Не удалось сохранить в Word: {e}")),
                         (Exported::Failed(e), Format::Pptx) => tr!(format!("Could not save as PowerPoint: {e}"), format!("Не удалось сохранить в PowerPoint: {e}")),
                     };
                     if let Some(tab) = self.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()).find(|t| t.doc.id == id) {
@@ -2969,7 +2975,7 @@ impl eframe::App for App {
                     if let Some(path) = answer.paths.first() {
                         // The format the name asks for; none named, the one
                         // chosen, its extension added.
-                        let (path, format) = match Format::of(path) {
+                        let (path, format) = match format.for_path(path) {
                             Some(f) => (path.clone(), f),
                             None => (path.with_extension(format.extension()), format),
                         };

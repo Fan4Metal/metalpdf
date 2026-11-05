@@ -13,6 +13,8 @@
 //!   original positions and word advances. The artwork is rendered without
 //!   that text, behind the frames. Page sizes, orientations and breaks are
 //!   preserved; font substitution cannot reflow text onto another page.
+//!   The optional paragraph mode (`docx_flow`) writes ordinary paragraphs,
+//!   columns and tables; Word then controls their line and page breaks.
 //! - **PowerPoint** gets one slide a page, laid out as the page: a text
 //!   box a paragraph where the paragraph was, the pictures as pictures,
 //!   and what is neither (the drawings, rules, shadings, text at an
@@ -25,6 +27,7 @@
 //! content) and have their exported text hidden for the artwork picture.
 
 pub mod docx;
+mod docx_flow;
 pub mod layout;
 pub mod pptx;
 mod xml;
@@ -39,6 +42,8 @@ use crate::pdfium::{Document, sys::Api};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Docx,
+    /// Ordinary Word paragraphs, columns and tables, which reflow when edited.
+    DocxFlow,
     Pptx,
 }
 
@@ -55,9 +60,18 @@ impl Format {
 
     pub fn extension(self) -> &'static str {
         match self {
-            Format::Docx => "docx",
+            Format::Docx | Format::DocxFlow => "docx",
             Format::Pptx => "pptx",
         }
+    }
+
+    /// A typed extension changes the file format, but not the chosen Word
+    /// layout mode: both Word modes use .docx.
+    pub fn for_path(self, path: &Path) -> Option<Format> {
+        Self::of(path).map(|format| match (self, format) {
+            (Format::DocxFlow, Format::Docx) => Format::DocxFlow,
+            (_, format) => format,
+        })
     }
 }
 
@@ -211,6 +225,7 @@ pub fn shrink_rgba(width: u32, height: u32, rgba: Vec<u8>, max_w: u32, max_h: u3
 
 enum Writer {
     Docx(docx::Writer),
+    DocxFlow(docx_flow::Writer),
     Pptx(pptx::Writer),
 }
 
@@ -244,6 +259,7 @@ impl Job {
         let meta = Meta { title, author };
         let writer = match format {
             Format::Docx => docx::Writer::new(out, meta).map(Writer::Docx),
+            Format::DocxFlow => docx_flow::Writer::new(out, meta).map(Writer::DocxFlow),
             Format::Pptx => {
                 let first = doc.page_size(0).unwrap_or([612.0, 792.0]);
                 pptx::Writer::new(out, meta, first, count).map(Writer::Pptx)
@@ -270,9 +286,10 @@ impl Job {
         }
         let index = self.next;
         let page = self.doc.load_page(index).and_then(|p| p.flattened()).ok_or_else(|| format!("page {} could not be loaded", index + 1))?;
-        let content = page.export_content(&mut self.fonts, false);
+        let content = page.export_content(&mut self.fonts, matches!(self.writer, Some(Writer::DocxFlow(_))));
         let result = match self.writer.as_mut() {
             Some(Writer::Docx(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
+            Some(Writer::DocxFlow(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
             Some(Writer::Pptx(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
             None => Err("the export is over".into()),
         };
@@ -286,6 +303,7 @@ impl Job {
     pub fn finish(mut self, faces: &mut crate::fonts::Fonts) -> Result<(), String> {
         let written = match self.writer.take() {
             Some(Writer::Docx(w)) => w.finish(&self.fonts.fonts, faces),
+            Some(Writer::DocxFlow(w)) => w.finish(&self.fonts.fonts, faces),
             Some(Writer::Pptx(w)) => w.finish(),
             None => Err("the export is over".into()),
         };
@@ -349,6 +367,18 @@ impl Faces {
 /// thread: the command line's `--export`.
 pub fn run(input: &Path, output: &Path, password: Option<&str>) -> Result<usize, String> {
     let format = Format::of(output).ok_or("the output must be a .docx or a .pptx file")?;
+    run_as(input, output, password, format)
+}
+
+/// The command line's --export-paragraphs: an explicit, reflowing Word mode.
+pub fn run_paragraphs(input: &Path, output: &Path, password: Option<&str>) -> Result<usize, String> {
+    if Format::of(output) != Some(Format::Docx) {
+        return Err("paragraph export requires a .docx output file".into());
+    }
+    run_as(input, output, password, Format::DocxFlow)
+}
+
+fn run_as(input: &Path, output: &Path, password: Option<&str>, format: Format) -> Result<usize, String> {
     let api = crate::pdfium::init().map_err(|e| e.to_string())?;
     let doc = Document::open(api, input, password).map_err(|e| e.to_string())?;
     let mut job = Job::start(api, doc, output, format)?;
@@ -362,6 +392,35 @@ pub fn run(input: &Path, output: &Path, password: Option<&str>) -> Result<usize,
 #[cfg(test)]
 mod tests {
     use super::zip::read_entry;
+
+    #[test]
+    fn a_docx_filename_keeps_the_chosen_word_layout() {
+        use super::Format::{Docx, DocxFlow, Pptx};
+        let docx = std::path::Path::new("document.DOCX");
+        assert_eq!(DocxFlow.for_path(docx), Some(DocxFlow));
+        assert_eq!(Docx.for_path(docx), Some(Docx));
+        assert_eq!(Pptx.for_path(docx), Some(Docx));
+        assert_eq!(DocxFlow.for_path(std::path::Path::new("slides.pptx")), Some(Pptx));
+        assert_eq!(DocxFlow.for_path(std::path::Path::new("document")), None);
+    }
+
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn pdfium_paragraph_export_contains_ordinary_word_text() {
+        let input = crate::pdfium::tests::sample_file("export-paragraphs");
+        let out = std::env::temp_dir().join(format!("metalpdf_paragraphs_{}.docx", std::process::id()));
+        assert_eq!(super::run_paragraphs(&input, &out, None).unwrap(), 2);
+        let bytes = std::fs::read(&out).unwrap();
+        let doc = String::from_utf8(read_entry(&bytes, "word/document.xml").unwrap()).unwrap();
+        assert!(doc.contains("Hello MetalPDF") && doc.contains("Second line of text") && doc.contains("Page two"));
+        // These are paragraphs in the main story, not positioned frames or
+        // text boxes. Edits can rewrap lines and move subsequent paragraphs.
+        assert!(!doc.contains("w:framePr") && !doc.contains("w:txbxContent") && !doc.contains("w:fitText"));
+        assert!(doc.contains(r#"<w:pStyle w:val="Heading1"/>"#));
+        assert!(read_entry(&bytes, "word/media/image1.png").is_some());
+        std::fs::remove_file(out).unwrap();
+        std::fs::remove_file(input).unwrap();
+    }
 
     #[test]
     #[ignore = "needs vendor/pdfium"]

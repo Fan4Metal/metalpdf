@@ -91,6 +91,7 @@ One copy of MetalPDF runs per user session: a second launch (a double click in E
 | `--register`, `--unregister` | Offer MetalPDF for `.pdf` files in Windows' "Open with", and withdraw it (the installer runs them) |
 | `--bench file.pdf` | Prints the engine's timings for a file |
 | `--export file.pdf out.docx` | Saves the document as a Word document (`out.pptx`: a PowerPoint presentation) without a window |
+| `--export-paragraphs file.pdf out.docx` | Saves as ordinary Word paragraphs, columns and tables without a window |
 | `--screenshot file.png file.pdf` | Writes the window's picture after a few frames and exits |
 | `--export-icon file.ico` | Writes the application icon |
 | `--version`, `--help` | The version, the options |
@@ -202,7 +203,7 @@ A run keeps its font, and so its look, whenever that font can show the new text;
 
 ### Saving as Word or PowerPoint
 
-The page with an arrow on the toolbar offers **Word document (.docx)** and **PowerPoint presentation (.pptx)**; the file is proposed beside the PDF under its name. The document is written in the background, a page at a time, with its progress and a cross to stop it on the right of the toolbar; a document with unsaved edits is saved as shown. Office is not needed: the files are made by MetalPDF, and open in Word, PowerPoint, LibreOffice and the like.
+The page with an arrow on the toolbar offers **Word — preserve layout (.docx)**, **Word — ordinary paragraphs (.docx)** and **PowerPoint presentation (.pptx)**. The file is proposed beside the PDF; paragraph mode adds “(paragraphs)” to the proposed name. The document is written in the background, a page at a time, with its progress and a cross to stop it on the right of the toolbar; a document with unsaved edits is saved as shown. Office is not needed: the files are made by MetalPDF, and open in Word, PowerPoint, LibreOffice and the like.
 
 <details>
 <summary>What Word gets, and what PowerPoint gets</summary>
@@ -211,8 +212,9 @@ A PDF holds characters at places, not paragraphs: MetalPDF gathers the character
 
 - **Word** preserves the page layout: each line is editable text in a frame at its original position, with the original word widths and printed hyphens. Columns, table text, lists, side headings and footers retain their places; the text does not reflow between the original lines. Larger headings use Word's Heading 1–3 styles. Pictures, table rules, fills, rotated text and other artwork form a background behind the editable text. Each PDF page becomes one Word page with the same size and orientation; pages larger than Word's 22-inch limit are scaled uniformly.
 - **PowerPoint** gets a slide a page, laid out as the page: a text box a paragraph where the paragraph was, the page's pictures as pictures, and what is neither (drawings, rules, shadings, text at an angle) as one picture of the page behind them, so that the slide looks as the page did. The slides take the first page's size; a page of another size is fitted to the slide.
+- **Word — ordinary paragraphs** joins PDF lines into normal Word paragraphs, with font styles, alignment, indents and headings. Columns and recognised tables become native Word columns and tables; pictures remain inline images. Text wraps as it is edited, so paragraphs and table rows can expand. Each source page starts a new Word page, but line breaks, spacing and the final number of pages can differ from the PDF. This mode favours editing over exact positioning; a scan without recognised text remains a picture.
 
-Word favours the original layout over flowing paragraphs: a table's text is edited as separate lines, rather than as native Word cells. Scans retain their original image; an existing recognised text layer is kept as hidden text in Word, without a second visible copy over the scan. Text effects that cannot be represented safely remain in the artwork. A font that is not installed is substituted in the same style; the letter shapes may differ, but the original line positions and page breaks are preserved.
+In the layout-preserving Word mode, a table's text is edited as separate lines, rather than as native Word cells. Scans retain their original image; an existing recognised text layer is kept as hidden text, without a second visible copy over the scan. Text effects that cannot be represented safely remain in the artwork. A font that is not installed is substituted in the same style; the letter shapes may differ, but the original line positions and page breaks are preserved.
 
 </details>
 

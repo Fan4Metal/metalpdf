@@ -112,6 +112,7 @@ fn main() -> eframe::Result {
                 println!("  --new-instance              a window of its own instead of a tab in the running one");
                 println!("  --bench FILE.pdf            the engine's timings for one file, no window");
                 println!("  --export FILE.pdf OUT.docx|OUT.pptx   save as a Word document or a PowerPoint presentation, no window");
+                println!("  --export-paragraphs FILE.pdf OUT.docx   save as ordinary Word paragraphs, no window");
                 println!("  --export-icon FILE.ico|png  the app icon");
                 println!("  --screenshot FILE.png       the window's picture after a few frames, then exit");
                 println!("  --version, --help");
@@ -126,16 +127,21 @@ fn main() -> eframe::Result {
                 };
                 std::process::exit(bench::run(Path::new(&file)));
             }
-            Some("--export") => {
+            Some(flag @ ("--export" | "--export-paragraphs")) => {
                 // Saved as a Word document or a PowerPoint presentation,
                 // without a window.
                 win::attach_parent_console();
                 let (Some(input), Some(output)) = (args.next(), args.next()) else {
-                    eprintln!("--export needs a PDF file and a .docx or .pptx file");
+                    eprintln!("{flag} needs a PDF file and an output file (.docx for paragraphs; .docx or .pptx for --export)");
                     std::process::exit(2);
                 };
                 let started = std::time::Instant::now();
-                match export::run(Path::new(&input), Path::new(&output), None) {
+                let result = if flag == "--export-paragraphs" {
+                    export::run_paragraphs(Path::new(&input), Path::new(&output), None)
+                } else {
+                    export::run(Path::new(&input), Path::new(&output), None)
+                };
+                match result {
                     Ok(pages) => {
                         println!("{pages} pages written to {} in {:.2} s", output.to_string_lossy(), started.elapsed().as_secs_f64());
                         return Ok(());

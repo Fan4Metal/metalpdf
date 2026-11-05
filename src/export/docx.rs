@@ -146,7 +146,7 @@ const CONTENT_TYPES: &str = r#"<Types xmlns="http://schemas.openxmlformats.org/p
 const ROOT_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>"#;
 const SETTINGS: &str = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:characterSpacingControl w:val="doNotCompress"/><w:autoHyphenation w:val="0"/><w:doNotTrackMoves/><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>"#;
 const APP: &str = r#"<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>MetalPDF</Application></Properties>"#;
-const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture""#;
+pub(super) const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture""#;
 
 pub fn core_xml(meta: &Meta) -> String {
     let mut s = String::from(HEAD);
@@ -165,13 +165,27 @@ fn part(xml: &str) -> Vec<u8> {
     format!("{HEAD}{xml}").into_bytes()
 }
 
+/// The parts shared by both Word layout modes.
+pub(super) fn start_package(zip: &mut ZipWriter<BufWriter<File>>, meta: &Meta) -> std::io::Result<()> {
+    zip.add("[Content_Types].xml", &part(CONTENT_TYPES), true)?;
+    zip.add("_rels/.rels", &part(ROOT_RELS), true)?;
+    zip.add("word/settings.xml", &part(SETTINGS), true)?;
+    zip.add("docProps/app.xml", &part(APP), true)?;
+    zip.add("docProps/core.xml", core_xml(meta).as_bytes(), true)
+}
+
+pub(super) fn document_rels(pictures: usize) -> String {
+    let mut rels = format!(r#"{HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>"#);
+    for n in 1..=pictures {
+        let _ = write!(rels, r#"<Relationship Id="rIdImg{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{n}.png"/>"#);
+    }
+    rels.push_str("</Relationships>");
+    rels
+}
+
 impl Writer {
     pub fn new(mut zip: ZipWriter<BufWriter<File>>, meta: Meta) -> std::io::Result<Writer> {
-        zip.add("[Content_Types].xml", &part(CONTENT_TYPES), true)?;
-        zip.add("_rels/.rels", &part(ROOT_RELS), true)?;
-        zip.add("word/settings.xml", &part(SETTINGS), true)?;
-        zip.add("docProps/app.xml", &part(APP), true)?;
-        zip.add("docProps/core.xml", core_xml(&meta).as_bytes(), true)?;
+        start_package(&mut zip, &meta)?;
         Ok(Writer {
             zip,
             pages: Vec::new(),
@@ -370,18 +384,8 @@ impl Writer {
                 true,
             )
             .map_err(|e| e.to_string())?;
-        let mut rels = format!(
-            r#"{HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>"#
-        );
-        for n in 1..=self.pictures {
-            let _ = write!(
-                rels,
-                r#"<Relationship Id="rIdImg{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{n}.png"/>"#
-            );
-        }
-        rels.push_str("</Relationships>");
         self.zip
-            .add("word/_rels/document.xml.rels", rels.as_bytes(), true)
+            .add("word/_rels/document.xml.rels", document_rels(self.pictures).as_bytes(), true)
             .map_err(|e| e.to_string())?;
         self.zip.finish().map_err(|e| e.to_string())?;
         Ok(())
