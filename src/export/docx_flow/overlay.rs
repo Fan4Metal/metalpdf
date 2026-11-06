@@ -54,13 +54,15 @@ impl Layers {
             .enumerate()
             .map(|(i, rect)| Region {
                 rect,
-                lines: layout::lines(
-                    assigned
+                lines: {
+                    let mut glyphs = assigned
                         .iter()
                         .filter(|(g, region)| *region == i && hidden.contains(&g.source))
                         .map(|(g, _)| (*g).clone())
-                        .collect(),
-                ),
+                        .collect();
+                    layout::join_accents(&mut glyphs);
+                    layout::lines(glyphs)
+                },
             })
             .collect();
         Ok(Self {

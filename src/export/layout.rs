@@ -221,7 +221,7 @@ fn compose(base: char, mark: char) -> Option<char> {
 /// `ё`), or is dropped when the pair has no character of its own. Else it
 /// made a line of its own between the text's lines and broke the
 /// paragraph there.
-fn join_accents(glyphs: &mut Vec<Glyph>) {
+pub(super) fn join_accents(glyphs: &mut Vec<Glyph>) {
     let marks: Vec<usize> = (0..glyphs.len()).filter(|&i| accent(glyphs[i].ch).is_some()).collect();
     if marks.is_empty() {
         return;

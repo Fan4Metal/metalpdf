@@ -29,6 +29,7 @@ mod artwork;
 mod forms;
 mod overlay;
 mod wrapping;
+mod captions;
 
 struct InlinePicture {
     marker: char,
@@ -207,6 +208,7 @@ impl Writer {
         let mut form = forms::detect(content, fonts);
         let mut flow_content = content.clone();
         if let Some(form) = &form {forms::remove(&mut flow_content,form);}
+        captions::prepare(&mut flow_content);
         let prepared = artwork::prepare(&flow_content, fonts);
         if graphics_page(content) || prepared.whole_page && form.is_none() {
             // Letter outlines have no editable paragraphs. Clustering them
