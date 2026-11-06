@@ -359,7 +359,7 @@ mod tests {
             let Item::Para(p)=&items[0] else {panic!()};
             let mut doc=super::super::doc_para(&paragraph(p,&pictures),None);
             let placement=pictures[0].clone();
-            doc.floating.push(super::super::FloatingPicture {rel:1,region:super::super::overlay::Region {rect:placement.figure.rect,lines:Vec::new()},placement});
+            doc.floating.push(super::super::FloatingPicture {rel:1,region:super::super::overlay::Region {rect:placement.figure.rect,lines:Vec::new(),exact:Vec::new()},placement});
             let mut lookup=crate::fonts::Fonts::default();
             let mut faces=crate::export::Faces::default();
             let mut out=super::super::Out {fonts:&fonts,lookup:&mut lookup,faces:&mut faces,doc_pr:0,scales:Default::default(),margin_left:50.0,textboxes:crate::export::docx::TextBoxes::new()};

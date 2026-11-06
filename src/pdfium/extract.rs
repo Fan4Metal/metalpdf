@@ -197,6 +197,24 @@ impl Page {
                 if unsafe { (api.FPDFText_IsGenerated)(text, index) } == 1 {
                     continue;
                 }
+                // Legacy math fonts can map a visible summation, integral,
+                // or delimiter to a control code. Preserve its tight ink box
+                // as artwork; it is not a discretionary word-ending hyphen.
+                let symbol_control=ch=='\u{2}' && {
+                    let mut flags=0;let mut buf=[0u8;256];
+                    let len=unsafe {(api.FPDFText_GetFontInfo)(text,index,buf.as_mut_ptr().cast(),buf.len() as c_ulong,&mut flags)};
+                    let name=String::from_utf8_lossy(&buf[..(len as usize).saturating_sub(1).min(buf.len())]).to_ascii_uppercase();
+                    ["CMEX","CMSY","CMMI","MSBM","SYMBOL"].iter().any(|n|name.contains(n))
+                };
+                if ch.is_control() && (ch!='\u{2}' || symbol_control) || matches!(ch,'\u{fffd}'|'\u{fffe}'|'\u{ffff}') {
+                    if unsafe {(api.FPDFText_IsGenerated)(text,index)}==0 && self.horizontal(text,index,&to_view) {
+                        let (mut l,mut r,mut b,mut t)=(0.0,0.0,0.0,0.0);
+                        if unsafe {(api.FPDFText_GetCharBox)(text,index,&mut l,&mut r,&mut b,&mut t)}!=0 && r-l>0.1 && t-b>0.1 {
+                            content.graphics.push(Graphic {rect:view_rect(l as f32,b as f32,r as f32,t as f32),kind:GraphicKind::Image,object:None});
+                        }
+                    }
+                    continue;
+                }
                 // PDFium reads a hyphen at a line's end as U+0002: a soft
                 // hyphen here, dropped where the lines are joined.
                 let ch = match ch {
@@ -482,6 +500,23 @@ impl Page {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "needs vendor/pdfium"]
+    fn visible_legacy_control_glyphs_remain_artwork() {
+        let stream=|s:&str|format!("<< /Length {} >>\nstream\n{s}\nendstream",s.len());
+        let cmap="/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /Symbols def /CMapType 2 def 1 begincodespacerange <00> <FF> endcodespacerange 2 beginbfchar <41> <0002> <42> <0003> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+        let bytes=crate::pdfium::tests::write_pdf(vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << /F 5 0 R >> >> >>".into(),
+            stream("BT /F 20 Tf 100 650 Td (AB) Tj ET"),"<< /Type /Font /Subtype /Type1 /BaseFont /Symbol /ToUnicode 6 0 R >>".into(),stream(cmap)]);
+        let path=std::env::temp_dir().join(format!("metalpdf_legacy_math_{}.pdf",std::process::id()));std::fs::write(&path,bytes).unwrap();
+        let doc=crate::pdfium::Document::open(crate::pdfium::init().unwrap(),&path,None).unwrap();let page=doc.load_page(0).unwrap();
+        let content=page.export_content(&mut Default::default(),false);
+        assert!(content.glyphs.is_empty(),"{:?}",content.glyphs);assert_eq!(content.graphics.len(),2);
+        assert!(content.graphics.iter().all(|g|g.rect[2]>g.rect[0]&&g.rect[3]>g.rect[1]));
+        drop(page);drop(doc);std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     #[ignore = "needs vendor/pdfium"]
     fn clipped_curves_and_translated_forms_keep_their_visible_bounds() {

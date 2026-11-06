@@ -529,6 +529,12 @@ impl TextBoxes {
         Self { faces: Faces::default(), measurements: Measurements::new(), id: 0 }
     }
 
+    pub(super) fn math_block(&mut self,x:&mut String,lines:&[layout::Line],rect:[f32;4],fonts:&[FontInfo],lookup:&mut crate::fonts::Fonts) {
+        // A mathematical background can occupy gaps inside the text. Each
+        // row keeps its own baseline and horizontal pieces instead of reflowing.
+        for line in lines {self.write(x,line,rect,fonts,lookup);}
+    }
+
     fn write(&mut self, x: &mut String, line: &layout::Line, rect: [f32; 4], fonts: &[FontInfo], lookup: &mut crate::fonts::Fonts) {
         let origin = [rect[0],rect[1]];
         let mut l = line_out(line, 1.0, None, false);
@@ -809,6 +815,20 @@ mod tests {
         assert_eq!(xml.matches("<wps:wsp>").count(), 3);
         assert_eq!(xml.matches("<w:p>").count(), 4);
         assert!(xml.contains(">Heading</w:t>") && xml.contains(">Footer</w:t>"));
+    }
+
+    #[test]
+    fn equation_rows_keep_independent_shapes_and_shared_fit_ids() {
+        let fonts=[FontInfo {name:"Arial".into(),..Default::default()}];
+        let mut lookup=crate::fonts::Fonts::default();let mut boxes=TextBoxes::new();let mut xml=String::new();
+        boxes.block(&mut xml,&[label("caption",10.0,20.0)],[0.0,0.0,200.0,200.0],&fonts,&mut lookup);
+        boxes.math_block(&mut xml,&[label("n",10.0,40.0),label("d",10.0,48.0)],[0.0,0.0,200.0,200.0],&fonts,&mut lookup);
+        boxes.block(&mut xml,&[label("footer",10.0,90.0)],[0.0,0.0,200.0,200.0],&fonts,&mut lookup);
+        assert_eq!(xml.matches("<wps:wsp>").count(),4);
+        let ids:Vec<_>=xml.split("<w:fitText ").skip(1).map(|s|s.split("w:id=\"").nth(1).unwrap().split('"').next().unwrap()).collect();
+        assert_eq!(ids.len(),4);assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(),4);
+        assert!(xml.contains(r#"<a:off x="127000" y="393700"/>"#));
+        assert!(xml.contains(r#"<a:off x="127000" y="495300"/>"#));
     }
 
     #[test]

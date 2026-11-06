@@ -5,6 +5,7 @@ use crate::pdfium::{Bitmap, Page};
 pub(super) struct Region {
     pub rect: [f32; 4],
     pub lines: Vec<layout::Line>,
+    pub exact: Vec<layout::Line>,
 }
 
 pub(super) struct Layers {
@@ -21,6 +22,7 @@ impl Layers {
     pub(super) fn prepare(
         page: &Page,
         content: &PageContent,
+        fonts: &[crate::export::FontInfo],
         regions: Vec<[f32; 4]>,
         original: &mut Option<Option<Bitmap>>,
     ) -> Result<Self, String> {
@@ -29,7 +31,8 @@ impl Layers {
         let assigned: Vec<_> = content
             .glyphs
             .iter()
-            .filter(|g| g.source >= 0 && !g.invisible)
+            .filter(|g| g.source >= 0 && !g.invisible && !matches!(g.ch as u32,0xe000..=0xf8ff|0xf0000..=0xffffd|0x100000..=0x10fffd))
+            .filter(|g|!fonts.get(g.font as usize).is_some_and(super::equations::painted))
             .filter_map(|g| regions.iter().position(|&r| inside(g, r)).map(|i| (g, i)))
             .collect();
         let selected = assigned.iter().map(|(g, _)| g.source).collect();
@@ -54,6 +57,7 @@ impl Layers {
             .enumerate()
             .map(|(i, rect)| Region {
                 rect,
+                exact:Vec::new(),
                 lines: {
                     let mut glyphs = assigned
                         .iter()
@@ -85,6 +89,7 @@ impl Layers {
         let region = index.map(|i| self.regions.remove(i)).unwrap_or(Region {
             rect,
             lines: Vec::new(),
+            exact:Vec::new(),
         });
         // Crops without exported labels must use the untouched rendering:
         // nearby removable objects can extend beyond their region boundary.
@@ -109,7 +114,7 @@ pub(super) fn graphic(
 ) {
     use std::fmt::Write;
     let [cx, cy] = viewport;
-    let grouped = !region.lines.is_empty();
+    let grouped = !region.lines.is_empty() || !region.exact.is_empty();
     let (w, h) = if grouped {
         (
             super::emu(region.rect[2] - region.rect[0]),
@@ -120,8 +125,8 @@ pub(super) fn graphic(
     };
     let mut text = String::new();
     if grouped {
-        out.textboxes
-            .block(&mut text, &region.lines, region.rect, out.fonts, out.lookup);
+        out.textboxes.block(&mut text, &region.lines, region.rect, out.fonts, out.lookup);
+        out.textboxes.math_block(&mut text,&region.exact,region.rect,out.fonts,out.lookup);
     }
     if grouped {
         let _ = write!(

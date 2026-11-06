@@ -30,6 +30,7 @@ mod forms;
 mod overlay;
 mod wrapping;
 mod captions;
+mod equations;
 
 struct InlinePicture {
     marker: char,
@@ -209,8 +210,12 @@ impl Writer {
         let mut flow_content = content.clone();
         if let Some(form) = &form {forms::remove(&mut flow_content,form);}
         captions::prepare(&mut flow_content);
-        let prepared = artwork::prepare(&flow_content, fonts);
-        if graphics_page(content) || prepared.whole_page && form.is_none() {
+        let equations = equations::prepare(&mut flow_content, fonts);
+        let mut prepared = artwork::prepare(&flow_content, fonts);
+        for &rect in &equations.blocks {
+            prepared.content.graphics.push(super::Graphic {rect,kind:super::GraphicKind::Image,object:None});
+        }
+        if graphics_page(content) || prepared.whole_page && form.is_none() && equations.blocks.is_empty() {
             // Letter outlines have no editable paragraphs. Clustering them
             // into inline figures tears a designed cover into separate words
             // or letters. Keep the entire composition, including its margins.
@@ -230,7 +235,7 @@ impl Writer {
             Item::Figure(f) if !form.as_ref().is_some_and(|form| (0..4).all(|k| (form.table.rect[k]-f.rect[k]).abs()<1.0)) => Some(f.rect),
             _ => None,
         })).chain(floating.iter().map(|p| p.figure.rect)).collect();
-        let mut layers = overlay::Layers::prepare(page, content, regions, &mut render)?;
+        let mut layers = overlay::Layers::prepare(page, content, fonts, regions, &mut render)?;
         let mut blocks: Vec<Option<Block>> = Vec::with_capacity(items.len());
         let mut extent = floating.iter().map(|p| p.figure.rect).reduce(layout::union);
         let mut decorations = Vec::new();
@@ -287,7 +292,10 @@ impl Writer {
                         continue;
                     }
                     let (fw, fh) = (f.rect[2] - f.rect[0], f.rect[3] - f.rect[1]);
-                    let (png, region) = layers.take(page, content, f.rect, &mut render)?;
+                    let (png, mut region) = layers.take(page, content, f.rect, &mut render)?;
+                    if equations.blocks.iter().any(|r|f.rect[0]<=r[0]+1.0&&f.rect[2]>=r[2]-1.0&&f.rect[1]<=r[1]+1.0&&f.rect[3]>=r[3]-1.0) {
+                        equations::editable(&mut region);
+                    }
                     let rel = self.picture(&png)?;
                     let mid = (f.column[0] + f.column[1]) / 2.0;
                     let col_w = (f.column[1] - f.column[0]).max(1.0);
@@ -321,7 +329,7 @@ impl Writer {
                     let rows = t.rows.iter().map(|(span, cells)| (*span, cells.iter().map(|ks| ks.iter().filter_map(|&k| blocks[k].take()).collect()).collect())).collect();
                     SegmentOut { columns: vec![[first[0], last[1]]], blocks: Vec::new(), table: Some(TableOut { columns: t.columns, rows, borders: ruled(rect) }) }
                 }
-                None if s.line => {
+                None if s.line && s.items.iter().all(|&(_,k)|matches!(blocks[k],Some(Block::Para(_)))) => {
                     // One paragraph, the parts after the first behind tabs:
                     // the last one right-aligned when it ends at the right.
                     let left = s.columns[0][0];
@@ -555,7 +563,7 @@ fn picture_page_size(size: [f32; 2]) -> [f32; 2] {
 /// picture padding, shrinking to text margins, and an extra blank page.
 fn picture_page_xml(x: &mut String, rel: usize, size: [f32; 2], out: &mut Out) {
     x.push_str(r#"<w:p><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr>"#);
-    decoration_xml(x, &Decoration { rel, region:overlay::Region { rect: [0.0, 0.0, size[0], size[1]], lines:Vec::new() } }, out);
+    decoration_xml(x, &Decoration { rel, region:overlay::Region { rect: [0.0, 0.0, size[0], size[1]], lines:Vec::new(), exact:Vec::new() } }, out);
     x.push_str("</w:p>");
 }
 
