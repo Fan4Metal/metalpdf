@@ -28,6 +28,7 @@ mod toc;
 mod artwork;
 mod forms;
 mod overlay;
+mod wrapping;
 
 struct InlinePicture {
     marker: char,
@@ -35,6 +36,12 @@ struct InlinePicture {
     width: f32,
     height: f32,
     shift: f32,
+}
+
+struct FloatingPicture {
+    rel: usize,
+    placement: wrapping::Picture,
+    region: overlay::Region,
 }
 
 struct Decoration {
@@ -88,6 +95,7 @@ struct DocPara {
     tabs: Vec<Tab>,
     drop_cap: Option<DropCap>,
     artwork: Vec<InlinePicture>,
+    floating: Vec<FloatingPicture>,
 }
 
 enum Block {
@@ -213,21 +221,22 @@ impl Writer {
             return Ok(());
         }
         let (items, drop_caps) = flowing_items(&prepared.content);
+        let (items, floating) = wrapping::prepare(items, &prepared.content);
         let mut render: Option<Option<crate::pdfium::Bitmap>> = None;
         let decoration_regions: Vec<_> = prepared.decorations.iter().chain(form.iter().flat_map(|f| &f.decorations)).copied().collect();
         let regions = decoration_regions.iter().copied().chain(items.iter().filter_map(|item| match item {
             Item::Figure(f) if !form.as_ref().is_some_and(|form| (0..4).all(|k| (form.table.rect[k]-f.rect[k]).abs()<1.0)) => Some(f.rect),
             _ => None,
-        })).collect();
+        })).chain(floating.iter().map(|p| p.figure.rect)).collect();
         let mut layers = overlay::Layers::prepare(page, content, regions, &mut render)?;
         let mut blocks: Vec<Option<Block>> = Vec::with_capacity(items.len());
-        let mut extent: Option<[f32; 4]> = None;
+        let mut extent = floating.iter().map(|p| p.figure.rect).reduce(layout::union);
         let mut decorations = Vec::new();
         for rect in decoration_regions {
             let (png, region) = layers.take(page, content, rect, &mut render)?;
             decorations.push(Decoration { rel: self.picture(&png)?, region });
         }
-        for item in &items {
+        for (index, item) in items.iter().enumerate() {
             let r = item.rect();
             extent = Some(extent.map_or(r, |e| layout::union(e, r)));
             match item {
@@ -237,7 +246,12 @@ impl Writer {
                         *self.sizes.entry((g.size * 2.0).round() as i32).or_default() += 1;
                         *self.font_use.entry(g.font).or_default() += 1;
                     }
-                    let mut para = doc_para(p, drop_caps.iter().find(|cap| cap.starts(p)));
+                    let normalized = wrapping::paragraph(p, &floating);
+                    let mut para = doc_para(&normalized, drop_caps.iter().find(|cap| cap.starts(p)));
+                    for placement in floating.iter().filter(|picture| picture.anchor == index) {
+                        let (png, region) = layers.take(page, content, placement.figure.rect, &mut render)?;
+                        para.floating.push(FloatingPicture { rel: self.picture(&png)?, placement: placement.clone(), region });
+                    }
                     if para.tabs.iter().any(|t| t.leader) {
                         para.pitch = toc::pitch(p, &items);
                     }
@@ -327,6 +341,7 @@ impl Writer {
                         }
                         line.spans.extend(p.spans);
                         line.artwork.extend(p.artwork);
+                        line.floating.extend(p.floating);
                         line.chars += p.chars;
                         line.bottom = line.bottom.max(p.bottom);
                     }
@@ -746,6 +761,7 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             if column_break {
                 x.push_str(r#"<w:r><w:br w:type="column"/></w:r>"#);
             }
+            for picture in &p.floating { wrapping::write(x, picture, p.top, before, out); }
             paragraph_runs(x, p, out);
             *prev = Prev { baseline: Some(p.last_baseline), bottom: Some(p.bottom) };
         }
@@ -958,6 +974,7 @@ fn doc_para(p: &layout::Para, cap: Option<&DropCap>) -> DocPara {
         tabs: Vec::new(),
         drop_cap: None,
         artwork: Vec::new(),
+        floating: Vec::new(),
     };
     let centre = (col[0]+col[1])/2.0;
     if n <= 3 && p.marker.is_none() && p.rect[2]-p.rect[0] < 0.8*(col[1]-col[0])
