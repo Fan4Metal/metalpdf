@@ -88,3 +88,5 @@ opt-level = 1
 # Dependencies optimised in debug builds too, so that a debug build is usable.
 [profile.dev.package."*"]
 opt-level = 3
+# No debug info for dependencies: it made most of target/debug's size.
+debug = false
