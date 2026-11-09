@@ -262,9 +262,9 @@ pub const FPDF_TEXTRENDERMODE_FILL: c_int = 0;
 pub const FPDF_TEXTRENDERMODE_CLIP: c_int = 7;
 
 // Path segment types (FPDFPathSegment_GetType).
-pub const FPDF_SEGMENT_LINETO: c_int = 1;
-pub const FPDF_SEGMENT_BEZIERTO: c_int = 2;
-pub const FPDF_SEGMENT_MOVETO: c_int = 0;
+pub const FPDF_SEGMENT_LINETO: c_int = 0;
+pub const FPDF_SEGMENT_BEZIERTO: c_int = 1;
+pub const FPDF_SEGMENT_MOVETO: c_int = 2;
 
 // Fill and stroke: how some generators make a regular font look bold.
 pub const FPDF_TEXTRENDERMODE_FILL_STROKE: c_int = 2;
