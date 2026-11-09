@@ -322,7 +322,31 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
     // Joined along their baselines.
     pieces.sort_by(|a, b| a.baseline.total_cmp(&b.baseline).then(a.rect[0].total_cmp(&b.rect[0])));
     let mut lines: Vec<Line> = Vec::new();
-    'piece: for piece in pieces {
+    'piece: for mut piece in pieces {
+        // Pictures standing in for characters, sorted first by a baseline
+        // a hair above the text's, go into the holes the text left them:
+        // they were left lines of their own under the text running over.
+        if piece.glyphs.iter().any(|g| g.source >= -1) {
+            let mut k = lines.len();
+            while k > 0 {
+                k -= 1;
+                let line = &lines[k];
+                let s = line.size.max(piece.size);
+                if piece.baseline - line.baseline > 0.6 * s {
+                    break;
+                }
+                if line.glyphs.iter().all(|g| g.source < -1)
+                    && level(&piece, line.baseline, line.size)
+                    && line.rect[0] >= piece.rect[0]
+                    && line.rect[2] <= piece.rect[2]
+                    && piece.glyphs.iter().all(|g| g.rect[2] <= line.rect[0] + 0.2 * s || g.rect[0] >= line.rect[2] - 0.2 * s)
+                {
+                    let art = lines.remove(k);
+                    piece.glyphs.extend(art.glyphs);
+                    piece.settle();
+                }
+            }
+        }
         for line in lines.iter_mut().rev() {
             let s = line.size.max(piece.size);
             if piece.baseline - line.baseline > 0.6 * s {
@@ -348,7 +372,12 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
             let goes_after = after > -0.3 * s;
             let gap = if goes_after { after } else if before > -0.3 * s { before } else { continue };
             let artwork_marker = line.glyphs.iter().chain(&piece.glyphs).any(|g| g.source < -1);
-            if gap > (if artwork_marker { 2.5 } else { 1.0 }) * s || apart_in_size(line.size, piece.size, gap) && (line.baseline - piece.baseline).abs() < 0.12 * s {
+            // A contents line: the page number after a dot leader, the
+            // entry after its number, a tab's width apart.
+            let (left, right) = if goes_after { (&*line, &piece) } else { (&piece, &*line) };
+            let page_number = right.glyphs.len() <= 6 && right.glyphs.iter().all(|g| g.ch.is_ascii_digit() || matches!(g.ch, 'i' | 'v' | 'x' | 'l' | 'c'));
+            let contents = ends_with_leader(left) && page_number || left.glyphs.len() <= 8 && left.glyphs.last().is_some_and(|g| g.ch == '.' || g.ch.is_ascii_digit()) && ends_with_leader_before_number(right);
+            if gap > (if artwork_marker { 2.5 } else if contents { 4.0 } else { 1.0 }) * s || apart_in_size(line.size, piece.size, gap) && (line.baseline - piece.baseline).abs() < 0.12 * s {
                 continue;
             }
             let mut glyphs = piece.glyphs;
@@ -368,6 +397,21 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
     }
     lines.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]).then(a.rect[0].total_cmp(&b.rect[0])));
     lines
+}
+
+/// Whether a line ends with a dot leader (`Title . . . .`).
+fn ends_with_leader(line: &Line) -> bool {
+    let tail: Vec<char> = line.glyphs.iter().rev().map(|g| g.ch).filter(|c| !c.is_whitespace()).take(3).collect();
+    tail.len() == 3 && tail.iter().all(|&c| c == '.' || c == '…')
+}
+
+/// Whether a line is a contents entry: a dot leader, then the page
+/// number (digits or roman), at its end.
+fn ends_with_leader_before_number(line: &Line) -> bool {
+    let chars: Vec<char> = line.glyphs.iter().map(|g| g.ch).filter(|c| !c.is_whitespace()).collect();
+    let number = chars.iter().rev().take_while(|c| c.is_ascii_digit() || matches!(c, 'i' | 'v' | 'x' | 'l' | 'c')).count();
+    let rest = &chars[..chars.len() - number];
+    number > 0 && rest.len() >= 3 && rest[rest.len() - 3..].iter().all(|&c| c == '.' || c == '…')
 }
 
 /// Whether a glyph at `baseline` of `size` is on `line`'s baseline: within
@@ -1355,6 +1399,34 @@ mod tests {
         let got = lines(marker);
         assert_eq!(got.len(),1);
         assert_eq!(got[0].text(),"1 Footnote text");
+    }
+
+    #[test]
+    fn a_picture_a_hair_above_the_line_goes_into_its_hole() {
+        // "w = [E/h] phase", the text one piece over the fraction's hole.
+        let mut glyphs = text("w =", 50.0, 100.0);
+        glyphs.extend(text("phase", 74.0, 100.0));
+        let mut art = text("X", 64.0, 99.6).remove(0);
+        art.source = -2;
+        art.rect = [64.0, 92.0, 70.0, 104.0];
+        glyphs.push(art);
+        let got = lines(glyphs);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].glyphs.iter().map(|g| g.ch).collect::<String>(), "w=Xphase");
+    }
+
+    #[test]
+    fn a_contents_entry_is_one_line_with_its_number_and_page() {
+        // "1." a tab before its entry; the page number a tab after the leader.
+        let mut glyphs = text("1.", 60.0, 100.0);
+        glyphs.extend(text("Thanks . . . . . . xvii", 85.0, 100.0));
+        glyphs.extend(text("Chapter one . . . . .", 50.0, 120.0));
+        glyphs.extend(text("1", 160.0, 120.0));
+        // Columns of prose a gutter apart stay apart.
+        glyphs.extend(text("left column ends...", 50.0, 140.0));
+        glyphs.extend(text("right column", 170.0, 140.0));
+        let got: Vec<String> = lines(glyphs).iter().map(|l| l.text()).collect();
+        assert_eq!(got, ["1. Thanks . . . . . . xvii", "Chapter one . . . . . 1", "left column ends...", "right column"]);
     }
 
     #[test]

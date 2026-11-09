@@ -43,7 +43,15 @@ fn inline_pieces(p: &layout::Para, raw: &[Glyph], fonts: &[FontInfo]) -> Vec<sup
     // no character with their letter), each with the line it is on.
     let line_of = |g: &Glyph| {
         let c = [(g.rect[0] + g.rect[2]) / 2.0, (g.rect[1] + g.rect[3]) / 2.0];
-        p.lines.iter().position(|l| c[0] >= l.rect[0] - 0.5 && c[0] <= l.rect[2] + 0.5 && c[1] >= l.rect[1] - 0.3 * l.size && c[1] <= l.rect[3] + 0.3 * l.size)
+        // The line it is in, else the nearest within a third of an em: a
+        // superscript's centre is within that of the line above too.
+        let off = |l: &layout::Line| (l.rect[1] - c[1]).max(c[1] - l.rect[3]).max(0.0);
+        (0..p.lines.len())
+            .filter(|&k| {
+                let l = &p.lines[k];
+                c[0] >= l.rect[0] - 0.5 && c[0] <= l.rect[2] + 0.5 && off(l) <= 0.3 * l.size
+            })
+            .min_by(|&a, &b| off(&p.lines[a]).total_cmp(&off(&p.lines[b])))
     };
     let gs: Vec<(&Glyph, usize)> = raw.iter().filter(|g| !g.invisible && !g.ch.is_whitespace()).filter_map(|g| line_of(g).map(|k| (g, k))).collect();
     let width = |g: &Glyph| g.rect[2] - g.rect[0];
@@ -165,12 +173,81 @@ pub(super) fn editable(region:&mut super::overlay::Region) {
     region.exact=lines(std::mem::take(&mut region.lines).into_iter().flat_map(|l|l.glyphs).collect());
 }
 
+/// Small fractions set in a line of text (`⅔` as a numerator over a bar
+/// over a denominator, in a smaller size): out of the content, each one
+/// picture on the line's baseline. Left in, the numerator went to the
+/// line and the denominator began a line of its own with the text after
+/// it, the lines crowded together made a composition of the text between
+/// two fractions, and the paragraph broke round it.
+fn stacked_fractions(content:&mut PageContent,body_size:f32)->Vec<super::artwork::Inline> {
+    // Runs of small characters on one baseline.
+    let mut small:Vec<(usize,&Glyph)>=content.glyphs.iter().enumerate().filter(|(_,g)|!g.invisible&&!g.ch.is_whitespace()&&g.size<=0.85*body_size).collect();
+    small.sort_by(|a,b|a.1.baseline.total_cmp(&b.1.baseline).then(a.1.x.total_cmp(&b.1.x)));
+    let mut runs:Vec<(Rect,f32,f32,Vec<usize>)>=Vec::new();
+    for (at,g) in small {
+        match runs.iter_mut().rev().take_while(|r|g.baseline-r.1<0.15*g.size).find(|r|g.rect[0]-r.0[2]<0.5*g.size&&r.0[0]-g.rect[2]<0.5*g.size) {
+            Some(r)=>{r.0=layout::union(r.0,g.rect);r.2=r.2.max(g.size);r.3.push(at);}
+            None=>runs.push((g.rect,g.baseline,g.size,vec![at])),
+        }
+    }
+    let mut out=Vec::new();
+    let mut taken:Vec<usize>=Vec::new();
+    let mut bars:Vec<usize>=Vec::new();
+    for (b,bar) in content.graphics.iter().enumerate() {
+        let r=bar.rect;
+        let y=(r[1]+r[3])/2.0;
+        if r[3]-r[1]>1.2||r[2]-r[0]<2.0||r[2]-r[0]>8.0*body_size {continue;}
+        let over=|run:&(Rect,f32,f32,Vec<usize>)| {let c=(run.0[0]+run.0[2])/2.0;c>=r[0]-1.0&&c<=r[2]+1.0&&run.0[2]-run.0[0]<=r[2]-r[0]+2.0};
+        let num:Vec<usize>=(0..runs.len()).filter(|&k|over(&runs[k])&&runs[k].1<=y+0.5&&y-runs[k].1<0.7*runs[k].2).collect();
+        let den:Vec<usize>=(0..runs.len()).filter(|&k|over(&runs[k])&&runs[k].1>y&&runs[k].1-y<1.3*runs[k].2).collect();
+        if num.is_empty()||den.is_empty() {continue;}
+        let top=num.iter().map(|&k|runs[k].1).fold(f32::MAX,f32::min);
+        let bottom=den.iter().map(|&k|runs[k].1).fold(f32::MIN,f32::max);
+        // Text of the body's size going through it: the line it is in.
+        let line=content.glyphs.iter()
+            .filter(|g|!g.invisible&&g.size>0.85*body_size&&g.baseline>top&&g.baseline<bottom)
+            .filter(|g|g.rect[2]>r[0]-3.0*body_size&&g.rect[0]<r[2]+3.0*body_size)
+            .min_by(|a,b|{let d=|g:&Glyph|(g.rect[0]-r[2]).max(r[0]-g.rect[2]).max(0.0);d(a).total_cmp(&d(b))});
+        let Some(line)=line else {continue};
+        let members:Vec<usize>=num.iter().chain(&den).flat_map(|&k|runs[k].3.iter().copied()).collect();
+        if members.iter().any(|m|taken.contains(m)) {continue;}
+        let rect=members.iter().map(|&m|content.glyphs[m].rect).fold(r,layout::union);
+        let first=members.iter().map(|&m|&content.glyphs[m]).min_by(|a,b|a.x.total_cmp(&b.x)).unwrap();
+        let rect=[rect[0]-0.3,rect[1]-0.3,rect[2]+0.3,rect[3]+0.3];
+        // A character of the line holds its place until the picture takes
+        // it (`artwork::prepare` drops what is inside a picture): the hole
+        // it left parted the line into two, read as columns.
+        let mut stand_in=line.clone();
+        stand_in.ch='0';
+        // A picture's mark to the lines (it goes into holes), and none of
+        // the pictures' indices.
+        stand_in.source = -1_000_000;
+        stand_in.x=rect[0]+0.3;
+        stand_in.rect=[rect[0]+0.3,line.baseline-0.7*line.size,rect[2]-0.3,line.baseline+0.2*line.size];
+        stand_in.space_before=first.space_before;
+        out.push((super::artwork::Inline {rect,baseline:line.baseline},stand_in));
+        taken.extend(members);
+        bars.push(b);
+    }
+    let mut k=0;
+    content.glyphs.retain(|_|{k+=1;!taken.contains(&(k-1))});
+    content.glyphs.extend(out.iter().map(|(_,g)|g.clone()));
+    let out:Vec<_>=out.into_iter().map(|(f,_)|f).collect();
+    let mut k=0;
+    content.graphics.retain(|_|{k+=1;!bars.contains(&(k-1))});
+    out
+}
+
 /// Preserve a mathematical paragraph as one composition. A tall fraction
 /// must not redefine the font or line pitch of the surrounding prose.
 pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
     let mut counts=std::collections::HashMap::new();
     for g in content.glyphs.iter().filter(|g|g.ch.is_alphabetic()&&!g.invisible) {*counts.entry(g.font).or_insert(0usize)+=1;}
     let body=counts.into_iter().max_by_key(|&(f,n)|(n,std::cmp::Reverse(f))).map(|(f,_)|f);
+    let mut sizes=std::collections::HashMap::new();
+    for g in content.glyphs.iter().filter(|g|g.ch.is_alphabetic()&&!g.invisible&&Some(g.font)==body) {*sizes.entry((g.size*2.0).round() as i32).or_insert(0usize)+=1;}
+    let body_size=sizes.into_iter().max_by_key(|&(s,n)|(n,s)).map_or(10.0,|(s,_)|s as f32/2.0);
+    let fractions=stacked_fractions(content,body_size);
     let math=|g:&Glyph| {
         if g.invisible {return false;}
         let font=fonts.get(g.font as usize);
@@ -179,7 +256,7 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
     };
     let excluded:Vec<_>=layout::labelled_figures(content).into_iter().map(|f|f.rect).collect();
     let seeds:Vec<_>=content.glyphs.iter().filter(|g|math(g)&&!excluded.iter().any(|&r|centre_inside(g,r))).map(|g|g.rect).collect();
-    if seeds.is_empty() {return Prepared::default();}
+    if seeds.is_empty() {return Prepared {blocks:Vec::new(),inline:fractions};}
     let all_items=layout::analyse(content,layout::Options {invisible:false,figures:false});
     // Prose with a variable or two in it stays a paragraph that rewraps
     // when edited; only the expressions set apart are fixed compositions.
@@ -244,6 +321,13 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
         if blocks==previous {break;}
     }
     for r in &mut blocks {r[0]=(r[0]-0.5).max(0.0);r[1]=(r[1]-1.0).max(0.0);r[2]=(r[2]+0.5).min(content.size[0]);r[3]=(r[3]+1.0).min(content.size[1]);}
+    // A fraction in a composition is painted with it.
+    for f in fractions {
+        match blocks.iter_mut().find(|r|touches(**r,f.rect,0.0)) {
+            Some(r)=>*r=layout::union(*r,f.rect),
+            None=>inline.push(f),
+        }
+    }
     content.glyphs.retain(|g|!blocks.iter().any(|&r|centre_inside(g,r)));
     content.graphics.retain(|g|!blocks.iter().any(|r|g.rect[0]>=r[0]&&g.rect[2]<=r[2]&&g.rect[1]>=r[1]&&g.rect[3]<=r[3]));
     Prepared {blocks, inline}
@@ -294,6 +378,28 @@ mod tests {
         assert_eq!(prepared.inline.len(),2,"{:?}",prepared.inline.iter().map(|a|(a.rect,a.baseline)).collect::<Vec<_>>());
         assert!(prepared.inline.iter().any(|a|a.rect[0]<=157.0 && a.rect[2]>=162.0 && a.baseline==100.0));
         assert!(prepared.inline.iter().any(|a|a.rect[0]<=261.0 && a.baseline==113.0));
+    }
+
+    #[test]
+    fn small_fractions_in_a_line_are_pictures_on_its_baseline() {
+        // "charge 2/3 ) and d (charge -1/3 ) quarks", the fractions in 7 pt.
+        let small=|s:&str,x:f32,y:f32|{let mut g=text(s,x,y,1);for g in &mut g {g.size=7.0;g.rect=[g.rect[0],y-5.0,g.rect[0]+4.0,y+1.5];}g};
+        let mut glyphs=text("Protons and neutrons are made of u (charge",50.0,100.0,0);
+        glyphs.extend(small("2",262.0,97.0));glyphs.extend(small("3",262.0,104.0));
+        glyphs.extend(text(") and d (charge -",268.0,100.0,0));
+        glyphs.extend(small("1",355.0,97.0));glyphs.extend(small("3",355.0,104.0));
+        glyphs.extend(text(") quarks",361.0,100.0,0));
+        glyphs.extend(text("and the paragraph goes on to its next line here.",50.0,112.0,0));
+        let bar=|x:f32|crate::export::Graphic {rect:[x,98.0,x+5.0,98.4],kind:crate::export::GraphicKind::Path {curved:false},object:None};
+        let mut p=PageContent {size:[600.0,800.0],glyphs,graphics:vec![bar(261.5),bar(354.5)],..Default::default()};
+        let prepared=prepare(&mut p,&fonts());
+        assert!(prepared.blocks.is_empty());
+        assert_eq!(prepared.inline.len(),2);
+        assert!(prepared.inline.iter().all(|f|f.baseline==100.0&&f.rect[3]<108.0));
+        assert!(p.graphics.is_empty());
+        let rows=layout::lines(p.glyphs);
+        assert_eq!(rows.len(),2,"{:?}",rows.iter().map(|r|(r.text(),r.rect)).collect::<Vec<_>>());
+        assert!(rows[0].text().contains(") and d (charge -"));
     }
 
     #[test]
