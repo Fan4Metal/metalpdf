@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     fn page(glyphs: Vec<Glyph>) -> PageContent {
-        PageContent { size: [600.0, 800.0], glyphs, graphics: Vec::new(), turns: 0 }
+        PageContent { size: [600.0, 800.0], glyphs, ..Default::default() }
     }
 
     fn texts(items: &[Item]) -> Vec<String> {

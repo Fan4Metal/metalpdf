@@ -133,6 +133,17 @@ pub struct Graphic {
     pub object: Option<usize>,
 }
 
+/// A straight mark of a path, level or upright, in view space: a stroked
+/// segment (its rectangle as thick as the line) or a filled rectangle (a
+/// cell's shading, or a rule drawn as a thin box). Tables are found by
+/// them: a path drawing a whole grid is one `Graphic` with one box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rule {
+    pub rect: [f32; 4],
+    pub filled: bool,
+    pub color: [u8; 3],
+}
+
 /// What the export reads off a page.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PageContent {
@@ -140,6 +151,8 @@ pub struct PageContent {
     pub size: [f32; 2],
     pub glyphs: Vec<Glyph>,
     pub graphics: Vec<Graphic>,
+    /// The straight marks of the paths without curves.
+    pub rules: Vec<Rule>,
     /// Quarter turns clockwise of the page as shown that the content is
     /// read in (most of its text sideways): `size` is the turned page's.
     pub turns: u8,

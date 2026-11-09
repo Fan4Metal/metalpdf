@@ -4,6 +4,23 @@ use crate::export::{FontInfo, Glyph, GraphicKind, PageContent, layout};
 
 type Rect = [f32; 4];
 
+/// A cell's rule: its colour and thickness in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Border {
+    pub color: [u8; 3],
+    pub width: f32,
+}
+
+/// A cell's place in a cell merged down (Word's `vMerge`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Merge {
+    None,
+    /// The first band of a merged cell: its text.
+    Restart,
+    /// A band below it: empty.
+    Continue,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Cell {
     pub first: usize,
@@ -11,6 +28,9 @@ pub(super) struct Cell {
     pub rect: Rect,
     pub glyphs: Vec<Glyph>,
     pub fill: [u8; 3],
+    /// Top, left, bottom, right; `None`: no rule drawn there.
+    pub borders: [Option<Border>; 4],
+    pub merge: Merge,
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +152,31 @@ pub(super) fn detect(content: &PageContent, fonts: &[FontInfo]) -> Option<Form> 
         ys.push((heading.rect[3] + 2.0).min(bottom));
     }
     distinct(&mut ys);
+    // An unshaded band can hold a row of values and, under it, notes
+    // across the whole table: a row of their own each, so that the notes
+    // span the columns and the values keep theirs.
+    let mut parts = Vec::new();
+    for y in ys.windows(2) {
+        let band = [left, y[0], right, y[1]];
+        let mut lines = layout::lines(content.glyphs.iter().filter(|g| inside(g, band)).cloned().collect());
+        lines.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]));
+        // A short last line of a note goes with it: under a line across,
+        // at its left edge, a line's pitch below.
+        let mut across: Vec<bool> = lines.iter().map(|l| edges[1..edges.len() - 1].iter().any(|&e| runs_across(l, e))).collect();
+        for i in 1..lines.len() {
+            let (a, b) = (&lines[i - 1], &lines[i]);
+            if across[i - 1] && !across[i] && (b.rect[0] - a.rect[0]).abs() < a.size && b.baseline - a.baseline < 1.6 * a.size.max(b.size) {
+                across[i] = true;
+            }
+        }
+        for (i, pair) in lines.windows(2).enumerate() {
+            if across[i] != across[i + 1] && pair[1].rect[1] >= pair[0].rect[3] - 0.5 {
+                parts.push((pair[0].rect[3] + pair[1].rect[1]) / 2.0);
+            }
+        }
+    }
+    ys.extend(parts);
+    distinct(&mut ys);
     let rows = ys
         .windows(2)
         .filter(|y| y[1] - y[0] > 1.0)
@@ -140,12 +185,12 @@ pub(super) fn detect(content: &PageContent, fonts: &[FontInfo]) -> Option<Form> 
             let glyphs: Vec<_> = content.glyphs.iter().filter(|g| inside(g, row_rect)).cloned().collect();
             let merged = headings.iter().any(|l| l.baseline >= y[0] && l.baseline < y[1])
                 || rectangles.iter().any(|r| (r[0] - left).abs() < 1.0 && (r[2] - right).abs() < 1.0 && r[1] <= y[0] + 0.75 && r[3] >= y[1] - 0.75);
-            let spans: Vec<_> = if merged { vec![(0, edges.len() - 1)] } else { (0..edges.len() - 1).map(|i| (i, i + 1)).collect() };
+            let spans: Vec<_> = if merged { vec![(0, edges.len() - 1)] } else { spans_of(&edges, &glyphs) };
             let cells = spans
                 .into_iter()
                 .map(|(first, end)| {
                     let r = [edges[first], y[0], edges[end], y[1]];
-                    Cell { first, end, rect: r, glyphs: glyphs.iter().filter(|g| inside(g, r)).cloned().collect(), fill: [255; 3] }
+                    Cell { first, end, rect: r, glyphs: glyphs.iter().filter(|g| inside(g, r)).cloned().collect(), fill: [255; 3], borders: [None; 4], merge: Merge::None }
                 })
                 .collect();
             Row { top: y[0], bottom: y[1], cells }
@@ -181,11 +226,38 @@ pub(super) fn detect(content: &PageContent, fonts: &[FontInfo]) -> Option<Form> 
     Some(Form { table: Table { rect, edges, rows }, decorations })
 }
 
+/// Whether the text of `line` runs on over `x`: two neighbouring
+/// characters on either side, no wider apart than a word space. Text in
+/// two cells next to each other has the cells' padding between it.
+pub(super) fn runs_across(line: &layout::Line, x: f32) -> bool {
+    line.glyphs.windows(2).any(|p| {
+        let (a, b) = (&p[0], &p[1]);
+        (a.rect[0] + a.rect[2]) / 2.0 < x && (b.rect[0] + b.rect[2]) / 2.0 > x && b.rect[0] - a.rect[2] < 0.5 * a.size.max(b.size)
+    })
+}
+
+/// A row's cells: one a column, joined where its text runs over the
+/// columns' edge (a note under the results across the whole table).
+fn spans_of(edges: &[f32], glyphs: &[Glyph]) -> Vec<(usize, usize)> {
+    let lines = layout::lines(glyphs.to_vec());
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (j, &edge) in edges.iter().enumerate().take(edges.len() - 1).skip(1) {
+        if !lines.iter().any(|l| runs_across(l, edge)) {
+            spans.push((start, j));
+            start = j;
+        }
+    }
+    spans.push((start, edges.len() - 1));
+    spans
+}
+
 pub(super) fn remove(content: &mut PageContent, form: &Form) {
     let regions = std::iter::once(&form.table.rect).chain(&form.decorations);
     for &r in regions {
         content.glyphs.retain(|g| !inside(g, r));
         content.graphics.retain(|g| !covered(g.rect, r));
+        content.rules.retain(|g| !covered(g.rect, r));
     }
     // The synthetic figure participates in reading order, but the writer
     // replaces it with the editable table instead of rendering a picture.
@@ -209,13 +281,38 @@ pub(super) fn write(x: &mut String, table: &Table, margin_left: f32, out: &mut s
     for row in &table.rows {
         let _ = write!(x, r#"<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="{}" w:hRule="atLeast"/></w:trPr>"#, tw(row.bottom - row.top));
         for cell in &row.cells {
-            let [r, g, b] = cell.fill;
-            let _ = write!(
-                x,
-                r#"<w:tc><w:tcPr><w:tcW w:w="{}" w:type="dxa"/><w:gridSpan w:val="{}"/><w:shd w:val="clear" w:color="auto" w:fill="{r:02X}{g:02X}{b:02X}"/><w:vAlign w:val="top"/></w:tcPr>"#,
-                tw(cell.rect[2] - cell.rect[0]),
-                cell.end - cell.first
-            );
+            let _ = write!(x, r#"<w:tc><w:tcPr><w:tcW w:w="{}" w:type="dxa"/>"#, tw(table.edges[cell.end] - table.edges[cell.first]));
+            if cell.end - cell.first > 1 {
+                let _ = write!(x, r#"<w:gridSpan w:val="{}"/>"#, cell.end - cell.first);
+            }
+            match cell.merge {
+                Merge::Restart => x.push_str(r#"<w:vMerge w:val="restart"/>"#),
+                Merge::Continue => x.push_str("<w:vMerge/>"),
+                Merge::None => {}
+            }
+            if cell.borders.iter().any(Option::is_some) {
+                x.push_str("<w:tcBorders>");
+                for (side, border) in ["top", "left", "bottom", "right"].iter().zip(&cell.borders) {
+                    match border {
+                        Some(Border { color: [r, g, b], width }) => {
+                            let _ = write!(x, r#"<w:{side} w:val="single" w:sz="{}" w:space="0" w:color="{r:02X}{g:02X}{b:02X}"/>"#, ((width * 8.0).round() as i64).clamp(2, 96));
+                        }
+                        None => {
+                            let _ = write!(x, r#"<w:{side} w:val="nil"/>"#);
+                        }
+                    }
+                }
+                x.push_str("</w:tcBorders>");
+            }
+            if cell.fill != [255; 3] {
+                let [r, g, b] = cell.fill;
+                let _ = write!(x, r#"<w:shd w:val="clear" w:color="auto" w:fill="{r:02X}{g:02X}{b:02X}"/>"#);
+            }
+            x.push_str(r#"<w:vAlign w:val="top"/></w:tcPr>"#);
+            if cell.merge == Merge::Continue {
+                x.push_str(r#"<w:p><w:pPr><w:spacing w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr></w:p></w:tc>"#);
+                continue;
+            }
             let items = layout::analyse(
                 &PageContent { size: [table.rect[2] + 1.0, table.rect[3] + 1.0], glyphs: cell.glyphs.clone(), ..Default::default() },
                 layout::Options { invisible: true, figures: false },
@@ -314,6 +411,22 @@ mod tests {
         remove(&mut flow, &form);
         assert!(flow.glyphs.is_empty());
         assert_eq!(flow.graphics.len(), 1);
+    }
+
+    #[test]
+    fn notes_under_the_values_span_the_table_in_rows_of_their_own() {
+        let (mut p, fonts) = fixture();
+        // Under the last values: a note over every column, its short last
+        // line, the text joined with no word spaces as in the fixture.
+        p.glyphs.extend(text("Notes_running_on_over_every_column_of_the_whole_table_and_further_on_to_the_end", 25.0, 330.0, 0));
+        p.glyphs.extend(text("and_its_end.", 25.0, 342.0, 0));
+        let form = detect(&p, &fonts).unwrap();
+        let row_of = |y: f32| form.table.rows.iter().find(|r| r.top <= y && r.bottom > y).unwrap();
+        assert_eq!(row_of(314.0).cells.len(), 3);
+        let notes = row_of(330.0);
+        assert_eq!(notes.cells.len(), 1);
+        assert!(notes.top > 316.0 && notes.bottom > 342.0);
+        assert!(notes.cells[0].glyphs.iter().any(|g| g.baseline == 342.0));
     }
 
     #[test]

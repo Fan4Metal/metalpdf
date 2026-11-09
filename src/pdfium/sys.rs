@@ -440,6 +440,8 @@ api! {
     FPDFPath_GetPathSegment: fn(FPDF_PAGEOBJECT, c_int) -> FPDF_PATHSEGMENT;
     FPDFPathSegment_GetPoint: fn(FPDF_PATHSEGMENT, *mut c_float, *mut c_float) -> FPDF_BOOL;
     FPDFPathSegment_GetType: fn(FPDF_PATHSEGMENT) -> c_int;
+    FPDFPathSegment_GetClose: fn(FPDF_PATHSEGMENT) -> FPDF_BOOL;
+    FPDFPath_GetDrawMode: fn(FPDF_PAGEOBJECT, *mut c_int, *mut FPDF_BOOL) -> FPDF_BOOL;
     FPDFFormObj_CountObjects: fn(FPDF_PAGEOBJECT) -> c_int;
     FPDFFormObj_GetObject: fn(FPDF_PAGEOBJECT, c_ulong) -> FPDF_PAGEOBJECT;
     FPDFImageObj_LoadJpegFileInline: fn(*mut FPDF_PAGE, c_int, FPDF_PAGEOBJECT, *mut FPDF_FILEACCESS) -> FPDF_BOOL;

@@ -27,6 +27,7 @@ use crate::pdfium::{Page, sys::Api};
 mod toc;
 mod artwork;
 mod forms;
+mod grid;
 mod overlay;
 mod wrapping;
 mod captions;
@@ -209,13 +210,23 @@ impl Writer {
         let mut form = forms::detect(content, fonts);
         let mut flow_content = content.clone();
         if let Some(form) = &form {forms::remove(&mut flow_content,form);}
+        // Ruled and shaded tables, as Word's tables: out of what flows and
+        // of the figures, back in below as a stand-in each takes the place of.
+        let grids = grid::detect(&flow_content);
+        if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
+            eprintln!("grid: {} rules, tables {:?}", flow_content.rules.len(), grids.iter().map(|t| (t.rect, t.rows.len(), t.edges.len() - 1)).collect::<Vec<_>>());
+        }
+        grid::remove(&mut flow_content, &grids);
         captions::prepare(&mut flow_content);
         let equations = equations::prepare(&mut flow_content, fonts);
         let mut prepared = artwork::prepare(&flow_content, fonts);
         for &rect in &equations.blocks {
             prepared.content.graphics.push(super::Graphic {rect,kind:super::GraphicKind::Image,object:None});
         }
-        if graphics_page(content) || prepared.whole_page && form.is_none() && equations.blocks.is_empty() {
+        for t in &grids {
+            prepared.content.graphics.push(super::Graphic { rect: t.rect, kind: super::GraphicKind::Image, object: None });
+        }
+        if graphics_page(content) || prepared.whole_page && form.is_none() && grids.is_empty() && equations.blocks.is_empty() {
             // Letter outlines have no editable paragraphs. Clustering them
             // into inline figures tears a designed cover into separate words
             // or letters. Keep the entire composition, including its margins.
@@ -228,11 +239,11 @@ impl Writer {
             return Ok(());
         }
         let (items, drop_caps) = flowing_items(&prepared.content);
-        let (items, floating) = wrapping::prepare(items, &prepared.content);
+        let (items, floating) = wrapping::prepare(items, &prepared.content, &grids.iter().map(|t| t.rect).collect::<Vec<_>>());
         let mut render: Option<Option<crate::pdfium::Bitmap>> = None;
         let decoration_regions: Vec<_> = prepared.decorations.iter().chain(form.iter().flat_map(|f| &f.decorations)).copied().collect();
         let regions = decoration_regions.iter().copied().chain(items.iter().filter_map(|item| match item {
-            Item::Figure(f) if !form.as_ref().is_some_and(|form| (0..4).all(|k| (form.table.rect[k]-f.rect[k]).abs()<1.0)) => Some(f.rect),
+            Item::Figure(f) if !form.as_ref().is_some_and(|form| same_rect(form.table.rect, f.rect)) && !grids.iter().any(|t| same_rect(t.rect, f.rect)) => Some(f.rect),
             _ => None,
         })).chain(floating.iter().map(|p| p.figure.rect)).collect();
         let mut layers = overlay::Layers::prepare(page, content, fonts, regions, &mut render)?;
@@ -289,6 +300,19 @@ impl Writer {
                             }
                         }
                         blocks.push(Some(Block::Grid(table.table.clone())));
+                        continue;
+                    }
+                    if let Some(table) = grids.iter().find(|t| same_rect(t.rect, f.rect)) {
+                        for cell in table.rows.iter().flat_map(|r| &r.cells) {
+                            for line in layout::lines(cell.glyphs.clone()) {
+                                self.remember_line(&line);
+                            }
+                            for g in &cell.glyphs {
+                                *self.sizes.entry((g.size * 2.0).round() as i32).or_default() += 1;
+                                *self.font_use.entry(g.font).or_default() += 1;
+                            }
+                        }
+                        blocks.push(Some(Block::Grid(table.clone())));
                         continue;
                     }
                     let (fw, fh) = (f.rect[2] - f.rect[0], f.rect[3] - f.rect[1]);
@@ -547,6 +571,10 @@ impl Writer {
         self.zip.finish().map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn same_rect(a: [f32; 4], b: [f32; 4]) -> bool {
+    (0..4).all(|k| (a[k] - b[k]).abs() < 1.0)
 }
 
 fn graphics_page(content: &PageContent) -> bool {
@@ -892,9 +920,13 @@ fn table_xml(x: &mut String, t: &TableOut, above: f32, margin_left: f32, text_w:
                 x.push_str("<w:p/>");
             }
             let mut prev = Prev::default();
+            // A table in the cell is indented from the cell's text, not
+            // from the page's margin.
+            let margin = std::mem::replace(&mut out.margin_left, edges[c] + CELL_PAD);
             for block in blocks {
                 block_xml(x, block, &mut prev, widths[c] - 2.0 * CELL_PAD, false, level, out);
             }
+            out.margin_left = margin;
             x.push_str("</w:tc>");
         }
         x.push_str("</w:tr>");
@@ -1309,7 +1341,7 @@ mod tests {
             let x = 50.0 + 6.0 * i as f32;
             Glyph { source: -1, ch, rect: [x, 80.0, x + 6.0, 92.0], x, baseline: 90.0, size: 10.0, font: 0, color: [0; 3], space_before: false, invisible: false }
         }).collect();
-        let page = PageContent { size: [600.0, 800.0], glyphs, graphics: vec![Graphic { rect: [30.0, 40.0, 570.0, 760.0], kind: GraphicKind::Path { curved: true }, object: None }], turns: 0 };
+        let page = PageContent { size: [600.0, 800.0], glyphs, graphics: vec![Graphic { rect: [30.0, 40.0, 570.0, 760.0], kind: GraphicKind::Path { curved: true }, object: None }], turns: 0, ..Default::default() };
         let (items, _) = flowing_items(&page);
         assert!(items.iter().all(|item| matches!(item, Item::Para(_))));
         let Item::Para(p) = &items[0] else { panic!() };

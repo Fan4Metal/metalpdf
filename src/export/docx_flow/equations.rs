@@ -134,7 +134,7 @@ mod tests {
         glyphs.extend(text("b",140.0,158.0,1));
         glyphs.extend(text("(4.3)",500.0,176.0,0));
         glyphs.extend(text("Ordinary prose below the expression.",50.0,230.0,0));
-        let mut p=PageContent {size:[600.0,800.0],glyphs,graphics:vec![crate::export::Graphic {rect:[138.0,148.0,150.0,149.0],kind:crate::export::GraphicKind::Path {curved:false},object:None}],turns:0};
+        let mut p=PageContent {size:[600.0,800.0],glyphs,graphics:vec![crate::export::Graphic {rect:[138.0,148.0,150.0,149.0],kind:crate::export::GraphicKind::Path {curved:false},object:None}],turns:0,..Default::default()};
         let prepared=prepare(&mut p,&fonts());
         assert_eq!(prepared.blocks.len(),1);
         let r=prepared.blocks[0];assert!(r[0]<=100.0 && r[2]>=525.0 && r[1]<=134.0 && r[3]>=178.0);

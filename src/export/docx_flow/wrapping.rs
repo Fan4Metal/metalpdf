@@ -138,11 +138,13 @@ fn continues(a: &Para, b: &Para, pictures: &[Picture]) -> bool {
         && !matches!(nb.align,Align::Center|Align::Right)
 }
 
-pub(super) fn prepare(mut items: Vec<Item>, content: &crate::export::PageContent) -> (Vec<Item>, Vec<Picture>) {
+pub(super) fn prepare(mut items: Vec<Item>, content: &crate::export::PageContent, tables: &[[f32; 4]]) -> (Vec<Item>, Vec<Picture>) {
     let mut pictures = Vec::new();
     let mut removed = std::collections::HashSet::new();
     for (index,item) in items.iter().enumerate() {
         let Item::Figure(f) = item else { continue };
+        // A table's stand-in stays in the text, where its rows can grow.
+        if tables.iter().any(|t| (0..4).all(|k| (t[k]-f.rect[k]).abs() < 1.0)) { continue; }
         // Text-backed artwork (code shading, legends, labelled diagrams)
         // retains its existing group instead of becoming a prose obstacle.
         let labels = content.glyphs.iter().filter(|g| !g.ch.is_whitespace() && !g.invisible
@@ -215,7 +217,7 @@ mod tests {
     use crate::export::Glyph;
 
     fn prepare(items: Vec<Item>) -> (Vec<Item>,Vec<Picture>) {
-        super::prepare(items,&Default::default())
+        super::prepare(items,&Default::default(),&[])
     }
 
     fn prose(left: f32, right: f32, baseline: f32, count: usize, column: [f32;2]) -> Para {
@@ -271,7 +273,7 @@ mod tests {
                 ..Default::default()
             };
             let (items,_)=super::super::flowing_items(&content);
-            let (items,pictures)=super::prepare(items,&content);
+            let (items,pictures)=super::prepare(items,&content,&[]);
             assert_eq!(pictures.len(),1,"left={left}; {:?}",items.iter().map(|i| match i {Item::Para(p)=>(p.rect,p.column,p.lines.len()),Item::Figure(f)=>(f.rect,f.column,0)}).collect::<Vec<_>>());
             assert!(layout::segments(&items,&content.graphics).iter().all(|s|s.columns.len()==1));
             assert_eq!(items.iter().map(|item|match item {Item::Para(p)=>p.lines.len(),_=>0}).sum::<usize>(),7);
@@ -348,7 +350,7 @@ mod tests {
         assert!(prepare(items).1.is_empty());
         let items=page(true);
         let content=crate::export::PageContent {glyphs:prose(60.0,160.0,110.0,1,[50.0,170.0]).lines.remove(0).glyphs,..Default::default()};
-        assert!(super::prepare(items,&content).1.is_empty());
+        assert!(super::prepare(items,&content,&[]).1.is_empty());
     }
 
     #[test]

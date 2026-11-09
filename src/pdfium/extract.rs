@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::ffi::{c_int, c_uint, c_ulong};
 
 use super::{Bitmap, Page, Placement, sys};
-use crate::export::{FontInfo, Glyph, Graphic, GraphicKind, PageContent};
+use crate::export::{FontInfo, Glyph, Graphic, GraphicKind, PageContent, Rule};
 
 /// The fonts of a whole document, numbered as the glyphs name them.
 #[derive(Default)]
@@ -296,7 +296,7 @@ impl Page {
                 break;
             }
             let object = unsafe { (api.FPDFPage_GetObject)(self.handle.get(), index) };
-            self.graphics_of(object, identity, Some(index as usize), (0, None), &mut content.graphics, &view_rect);
+            self.graphics_of(object, identity, Some(index as usize), (0, None), (&mut content.graphics, &mut content.rules), &view_rect);
         }
         content
     }
@@ -304,7 +304,7 @@ impl Page {
     /// `object`'s graphics into `out`: `matrix` takes its space (a form
     /// XObject's) to page space; `top` is its index on the page when it
     /// is a top-level object.
-    fn graphics_of(&self, object: sys::FPDF_PAGEOBJECT, matrix: [f32; 6], top: Option<usize>, traversal: (u32, Option<[f32; 4]>), out: &mut Vec<Graphic>, view_rect: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]) {
+    fn graphics_of(&self, object: sys::FPDF_PAGEOBJECT, matrix: [f32; 6], top: Option<usize>, traversal: (u32, Option<[f32; 4]>), (out, rules): (&mut Vec<Graphic>, &mut Vec<Rule>), view_rect: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]) {
         let (depth, inherited_clip) = traversal;
         let api = self.api();
         if object.is_null() || out.len() >= MAX_GRAPHICS {
@@ -385,6 +385,9 @@ impl Page {
                     }
                     last = Some((x, y));
                 }
+                if !curved && rules.len() < MAX_GRAPHICS {
+                    self.rules_of(object, matrix, clip, rules, view_rect);
+                }
                 out.push(Graphic { rect, kind: GraphicKind::Path { curved }, object: None });
             }
             sys::FPDF_PAGEOBJ_IMAGE => {
@@ -412,10 +415,109 @@ impl Page {
                 let n = unsafe { (api.FPDFFormObj_CountObjects)(object) }.max(0);
                 for i in 0..n {
                     let child = unsafe { (api.FPDFFormObj_GetObject)(object, i as c_ulong) };
-                    self.graphics_of(child, inner, None, (depth + 1, clip), out, view_rect);
+                    self.graphics_of(child, inner, None, (depth + 1, clip), (out, rules), view_rect);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The straight marks of a path with no curves (`Rule`): each level or
+    /// upright segment of a stroked path, each rectangle of a filled one.
+    /// `matrix` takes the path's container (a form XObject) to page space.
+    fn rules_of(&self, object: sys::FPDF_PAGEOBJECT, matrix: [f32; 6], clip: Option<[f32; 4]>, rules: &mut Vec<Rule>, view_rect: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]) {
+        let api = self.api();
+        let (mut fill_mode, mut stroke) = (0 as c_int, 0);
+        if unsafe { (api.FPDFPath_GetDrawMode)(object, &mut fill_mode, &mut stroke) } == 0 {
+            return;
+        }
+        let colour = |get: unsafe extern "C" fn(sys::FPDF_PAGEOBJECT, *mut c_uint, *mut c_uint, *mut c_uint, *mut c_uint) -> sys::FPDF_BOOL| {
+            let (mut r, mut g, mut b, mut a) = (0, 0, 0, 0);
+            (unsafe { get(object, &mut r, &mut g, &mut b, &mut a) } != 0 && a > 0).then(|| [r.min(255) as u8, g.min(255) as u8, b.min(255) as u8])
+        };
+        let fill = if fill_mode != 0 { colour(api.FPDFPageObj_GetFillColor) } else { None };
+        let line = if stroke != 0 { colour(api.FPDFPageObj_GetStrokeColor) } else { None };
+        if fill.is_none() && line.is_none() {
+            return;
+        }
+        let mut m = sys::FS_MATRIX { a: 1.0, d: 1.0, ..Default::default() };
+        unsafe { (api.FPDFPageObj_GetMatrix)(object, &mut m) };
+        let full = [
+            matrix[0] * m.a + matrix[2] * m.b,
+            matrix[1] * m.a + matrix[3] * m.b,
+            matrix[0] * m.c + matrix[2] * m.d,
+            matrix[1] * m.c + matrix[3] * m.d,
+            matrix[0] * m.e + matrix[2] * m.f + matrix[4],
+            matrix[1] * m.e + matrix[3] * m.f + matrix[5],
+        ];
+        let point = |x: f32, y: f32| {
+            let r = view_rect(full[0] * x + full[2] * y + full[4], full[1] * x + full[3] * y + full[5], full[0] * x + full[2] * y + full[4], full[1] * x + full[3] * y + full[5]);
+            [r[0], r[1]]
+        };
+        let mut width = 1.0f32;
+        unsafe { (api.FPDFPageObj_GetStrokeWidth)(object, &mut width) };
+        // A zero width is the thinnest line the device draws.
+        let width = (width * (full[0] * full[3] - full[1] * full[2]).abs().sqrt()).max(0.25);
+        let mut push = |r: [f32; 4], filled: bool, color: [u8; 3]| {
+            let r = match clip {
+                Some(c) => [r[0].max(c[0]), r[1].max(c[1]), r[2].min(c[2]), r[3].min(c[3])],
+                None => r,
+            };
+            if r[2] >= r[0] && r[3] >= r[1] && rules.len() < MAX_GRAPHICS {
+                rules.push(Rule { rect: r, filled, color });
+            }
+        };
+        // The subpaths' points, each closed back to its start when asked.
+        let n = unsafe { (api.FPDFPath_CountSegments)(object) }.clamp(0, MAX_SEGMENTS);
+        let mut subpaths: Vec<Vec<[f32; 2]>> = Vec::new();
+        for s in 0..n {
+            let segment = unsafe { (api.FPDFPath_GetPathSegment)(object, s) };
+            if segment.is_null() {
+                continue;
+            }
+            let (mut x, mut y) = (0f32, 0f32);
+            if unsafe { (api.FPDFPathSegment_GetPoint)(segment, &mut x, &mut y) } == 0 {
+                continue;
+            }
+            let p = point(x, y);
+            match unsafe { (api.FPDFPathSegment_GetType)(segment) } {
+                sys::FPDF_SEGMENT_MOVETO => subpaths.push(vec![p]),
+                _ => match subpaths.last_mut() {
+                    Some(sp) => sp.push(p),
+                    None => subpaths.push(vec![p]),
+                },
+            }
+            if unsafe { (api.FPDFPathSegment_GetClose)(segment) } != 0
+                && let Some(sp) = subpaths.last_mut()
+                && let Some(&first) = sp.first()
+            {
+                sp.push(first);
+            }
+        }
+        for sp in &subpaths {
+            if let Some(color) = line {
+                for pair in sp.windows(2) {
+                    let ([x0, y0], [x1, y1]) = (pair[0], pair[1]);
+                    let half = width / 2.0;
+                    if (y0 - y1).abs() < 0.5 && (x0 - x1).abs() > 0.5 {
+                        push([x0.min(x1), y0.min(y1) - half, x0.max(x1), y0.max(y1) + half], false, color);
+                    } else if (x0 - x1).abs() < 0.5 && (y0 - y1).abs() > 0.5 {
+                        push([x0.min(x1) - half, y0.min(y1), x0.max(x1) + half, y0.max(y1)], false, color);
+                    }
+                }
+            }
+            if let Some(color) = fill {
+                // A rectangle: every side level or upright.
+                let r = sp.iter().fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY], |r, &[x, y]| [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)]);
+                let square = sp.len() >= 4 && sp.windows(2).all(|p| (p[0][0] - p[1][0]).abs() < 0.5 || (p[0][1] - p[1][1]).abs() < 0.5)
+                    && sp.iter().all(|&[x, y]| ((x - r[0]).abs() < 0.5 || (x - r[2]).abs() < 0.5) && ((y - r[1]).abs() < 0.5 || (y - r[3]).abs() < 0.5));
+                // A sliver is a rule whatever its outline (rules are often
+                // filled with bevelled or rounded ends).
+                let sliver = sp.len() >= 3 && ((r[2] - r[0]).min(r[3] - r[1]) <= 3.0) && (r[2] - r[0]).max(r[3] - r[1]) >= 4.0;
+                if (square || sliver) && r[2] - r[0] > 0.1 && r[3] - r[1] > 0.1 {
+                    push(r, true, color);
+                }
+            }
         }
     }
 

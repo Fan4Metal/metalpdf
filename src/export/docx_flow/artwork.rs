@@ -484,7 +484,7 @@ mod tests {
     }
 
     fn page(glyphs: Vec<Glyph>, graphics: Vec<Graphic>) -> PageContent {
-        PageContent { size: [600.0, 800.0], glyphs, graphics, turns: 0 }
+        PageContent { size: [600.0, 800.0], glyphs, graphics, turns: 0, ..Default::default() }
     }
 
     #[test]

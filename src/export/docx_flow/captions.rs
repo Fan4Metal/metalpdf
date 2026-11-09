@@ -218,7 +218,7 @@ mod tests {
             let body:String=items.iter().filter_map(|i|match i {layout::Item::Para(p)=>Some(p.lines.iter().map(|l|l.text()).collect::<String>()),_=>None}).collect();
             assert!(!body.contains("portrait") && !body.contains("Scientist"));
             assert_eq!(body.matches("Ordinary").count(),11);
-            let (items,pictures)=super::super::wrapping::prepare(items,&content);
+            let (items,pictures)=super::super::wrapping::prepare(items,&content,&[]);
             assert_eq!(pictures.len(),1);
             assert!(pictures[0].figure.rect[3]>=217.5);
             assert!(matches!(items[pictures[0].anchor],layout::Item::Para(_)));
