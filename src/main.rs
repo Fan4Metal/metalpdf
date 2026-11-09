@@ -5,6 +5,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 // First, so that `tr!` is in scope in the modules below.
+/// A line on standard output, for the command line modes. A reader that
+/// went away (`| Select-Object -First 1`, `| head`) is no error: `println!`
+/// panicked on the closed pipe, and the panic hook showed a message box.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// The same on standard error.
+macro_rules! esay {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 #[macro_use]
 mod i18n;
 
@@ -94,35 +112,35 @@ fn main() -> eframe::Result {
                     std::fs::write(&out, icon::ico(&icon::ICO_SIZES)).map_err(|e| e.to_string())
                 };
                 if let Err(e) = result {
-                    eprintln!("cannot write {}: {e}", out.to_string_lossy());
+                    esay!("cannot write {}: {e}", out.to_string_lossy());
                     std::process::exit(1);
                 }
                 return Ok(());
             }
             Some("-V" | "--version") => {
                 win::attach_parent_console();
-                println!("{APP_NAME} {VERSION}");
+                say!("{APP_NAME} {VERSION}");
                 return Ok(());
             }
             Some("-h" | "--help") => {
                 win::attach_parent_console();
-                println!("{APP_NAME} {VERSION}");
-                println!("metalpdf [FILE.pdf ...]");
-                println!("  --register | --unregister   offer MetalPDF for .pdf files in Windows (per user) / withdraw it");
-                println!("  --new-instance              a window of its own instead of a tab in the running one");
-                println!("  --bench FILE.pdf            the engine's timings for one file, no window");
-                println!("  --export FILE.pdf OUT.docx|OUT.pptx   save as a Word document or a PowerPoint presentation, no window");
-                println!("  --export-paragraphs FILE.pdf OUT.docx   save as ordinary Word paragraphs, no window");
-                println!("  --export-icon FILE.ico|png  the app icon");
-                println!("  --screenshot FILE.png       the window's picture after a few frames, then exit");
-                println!("  --version, --help");
+                say!("{APP_NAME} {VERSION}");
+                say!("metalpdf [FILE.pdf ...]");
+                say!("  --register | --unregister   offer MetalPDF for .pdf files in Windows (per user) / withdraw it");
+                say!("  --new-instance              a window of its own instead of a tab in the running one");
+                say!("  --bench FILE.pdf            the engine's timings for one file, no window");
+                say!("  --export FILE.pdf OUT.docx|OUT.pptx   save as a Word document or a PowerPoint presentation, no window");
+                say!("  --export-paragraphs FILE.pdf OUT.docx   save as ordinary Word paragraphs, no window");
+                say!("  --export-icon FILE.ico|png  the app icon");
+                say!("  --screenshot FILE.png       the window's picture after a few frames, then exit");
+                say!("  --version, --help");
                 return Ok(());
             }
             Some("--bench") => {
                 // The engine's timings for one file, without a window.
                 win::attach_parent_console();
                 let Some(file) = args.next() else {
-                    eprintln!("--bench needs a PDF file");
+                    esay!("--bench needs a PDF file");
                     std::process::exit(2);
                 };
                 std::process::exit(bench::run(Path::new(&file)));
@@ -132,7 +150,7 @@ fn main() -> eframe::Result {
                 // without a window.
                 win::attach_parent_console();
                 let (Some(input), Some(output)) = (args.next(), args.next()) else {
-                    eprintln!("{flag} needs a PDF file and an output file (.docx for paragraphs; .docx or .pptx for --export)");
+                    esay!("{flag} needs a PDF file and an output file (.docx for paragraphs; .docx or .pptx for --export)");
                     std::process::exit(2);
                 };
                 let started = std::time::Instant::now();
@@ -143,11 +161,11 @@ fn main() -> eframe::Result {
                 };
                 match result {
                     Ok(pages) => {
-                        println!("{pages} pages written to {} in {:.2} s", output.to_string_lossy(), started.elapsed().as_secs_f64());
+                        say!("{pages} pages written to {} in {:.2} s", output.to_string_lossy(), started.elapsed().as_secs_f64());
                         return Ok(());
                     }
                     Err(e) => {
-                        eprintln!("cannot export: {e}");
+                        esay!("cannot export: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -171,7 +189,7 @@ fn main() -> eframe::Result {
             Some("--screenshot") => {
                 let Some(file) = args.next() else {
                     win::attach_parent_console();
-                    eprintln!("--screenshot needs a PNG file name");
+                    esay!("--screenshot needs a PNG file name");
                     std::process::exit(2);
                 };
                 let _ = SCREENSHOT.set(PathBuf::from(file));
