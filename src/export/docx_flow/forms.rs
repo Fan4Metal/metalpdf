@@ -321,11 +321,71 @@ pub(super) fn write(x: &mut String, table: &Table, margin_left: f32, out: &mut s
             if items.is_empty() {
                 x.push_str(r#"<w:p><w:pPr><w:spacing w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr></w:p>"#);
             }
+            // Code (a monospaced font): every line a paragraph of its own,
+            // where it starts; joined, a program's output (right-aligned
+            // names, a value a line) ran together.
+            let mono = {
+                let n = cell.glyphs.iter().filter(|g| out.fonts.get(g.font as usize).is_some_and(|f| crate::fonts::style_of(&f.name, f.flags).mono)).count();
+                n * 3 > cell.glyphs.len() * 2
+            };
+            // A monospaced face is 0.6 em a character: the narrowing that
+            // keeps the cell's longest line on one line as in the PDF (the
+            // size rounded to half points, 9.3 to 9.5, made a full line
+            // wrap), for the cell's fonts while it is written.
+            let saved: Vec<(u16, Option<i64>)> = if mono {
+                let lines = layout::lines(cell.glyphs.clone());
+                let squeeze = lines
+                    .iter()
+                    .filter_map(|l| {
+                        let chars = l.glyphs.len() + l.glyphs.iter().skip(1).filter(|g| g.space_before).count();
+                        let size = l.glyphs.iter().map(|g| (g.size * 2.0).round() / 2.0).fold(0.0, f32::max);
+                        let room = cell.rect[2] - l.rect[0] - 1.0;
+                        (chars > 0 && size > 0.0 && room > 0.0).then(|| room / (chars as f32 * 0.6 * size))
+                    })
+                    .fold(1.0f32, f32::min);
+                let mut fonts: Vec<u16> = cell.glyphs.iter().map(|g| g.font).collect();
+                fonts.sort_unstable();
+                fonts.dedup();
+                let percent = ((squeeze * 100.0).floor() as i64).clamp(50, 100);
+                fonts
+                    .into_iter()
+                    .map(|f| {
+                        let old = out.scales.get(&f).copied();
+                        if percent < 100 {
+                            out.scales.insert(f, old.map_or(percent, |o| o.min(percent)));
+                        }
+                        (f, old)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let items: Vec<layout::Item> = if mono {
+                items
+                    .into_iter()
+                    .flat_map(|item| match item {
+                        layout::Item::Para(p) if p.lines.len() > 1 => p
+                            .lines
+                            .iter()
+                            .map(|l| layout::Item::Para(layout::Para { lines: vec![l.clone()], rect: l.rect, marker: None, ..p.clone() }))
+                            .collect(),
+                        other => vec![other],
+                    })
+                    .collect()
+            } else {
+                items
+            };
             for item in items {
                 let layout::Item::Para(mut para) = item else { continue };
                 para.column = [cell.rect[0], cell.rect[2]];
-                para.align = layout::alignment(&para.lines, para.column, para.size);
+                para.align = if mono { layout::Align::Left } else { layout::alignment(&para.lines, para.column, para.size) };
                 let mut p = doc_para(&para, None);
+                if mono {
+                    p.align = layout::Align::Left;
+                    p.left = (para.rect[0] - cell.rect[0]).max(0.0);
+                    p.first = 0.0;
+                    p.pitch = p.pitch.max(1.1 * p.size);
+                }
                 // A short PDF line does not imply an extra right indent in
                 // a cell: that would shrink the column and rewrap the text.
                 if matches!(p.align, layout::Align::Left | layout::Align::Justify) {
@@ -345,6 +405,12 @@ pub(super) fn write(x: &mut String, table: &Table, margin_left: f32, out: &mut s
                 paragraph_runs(x, &p, out);
                 x.push_str("</w:p>");
                 bottom = p.bottom;
+            }
+            for (f, old) in saved {
+                match old {
+                    Some(s) => out.scales.insert(f, s),
+                    None => out.scales.remove(&f),
+                };
             }
             x.push_str("</w:tc>");
         }

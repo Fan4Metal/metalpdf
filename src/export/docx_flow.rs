@@ -99,6 +99,17 @@ struct DocPara {
     drop_cap: Option<DropCap>,
     artwork: Vec<InlinePicture>,
     floating: Vec<FloatingPicture>,
+    /// A rule drawn above and below it, as its borders.
+    rules: [Option<ParaRule>; 2],
+}
+
+/// A rule across the page drawn as a paragraph's border, so that it goes
+/// with its text: its colour, thickness and distance from the text.
+#[derive(Clone, Copy, Debug)]
+struct ParaRule {
+    color: [u8; 3],
+    width: f32,
+    space: f32,
 }
 
 enum Block {
@@ -139,6 +150,128 @@ struct TableOut {
     columns: Vec<[f32; 2]>,
     rows: Vec<([f32; 2], Vec<Vec<Block>>)>,
     borders: bool,
+    /// Side heads: the cells' text at the top, the second column's where
+    /// the PDF's starts.
+    side_heads: bool,
+}
+
+/// A segment of two columns whose left one is short labels each at the top
+/// of a part of the right one (a manual's "Description", "Example" beside
+/// their text) as a table without borders, a row a label: as Word's
+/// columns, the right column ran on after the labels', its tables split
+/// over pages.
+fn side_heads(s: &layout::Segment, items: &[Item], blocks: &mut [Option<Block>]) -> Option<TableOut> {
+    if !s.side || s.columns.len() != 2 {
+        return None;
+    }
+    let (left, right) = (s.columns[0], s.columns[1]);
+    let mut labels: Vec<usize> = s.items.iter().filter(|m| m.0 == 0).map(|m| m.1).collect();
+    let body: Vec<usize> = s.items.iter().filter(|m| m.0 == 1).map(|m| m.1).collect();
+    let size = |k: usize| match &items[k] {
+        Item::Para(p) => p.size,
+        Item::Figure(_) => 10.0,
+    };
+    labels.sort_by(|&a, &b| items[a].rect()[1].total_cmp(&items[b].rect()[1]));
+    // A row from a label to the next; what is above the first label is
+    // a row of its own with no label.
+    let starts: Vec<f32> = labels.iter().map(|&k| items[k].rect()[1] - 1.2 * size(k)).collect();
+    let row_of = |top: f32| starts.iter().rposition(|&s| s <= top);
+    let mut rows: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
+    if body.iter().any(|&k| row_of(items[k].rect()[1]).is_none()) {
+        rows.push((None, Vec::new()));
+    }
+    let lead = rows.len();
+    rows.extend(labels.iter().map(|&k| (Some(k), Vec::new())));
+    // The parts of the right column by row, each with its box: a
+    // paragraph whose lines run past a label's start (values a line each,
+    // joined as their pitch was the group's usual one) cut there.
+    let mut parts: Vec<Vec<([f32; 4], f32, Block)>> = (0..rows.len()).map(|_| Vec::new()).collect();
+    for &k in &body {
+        let Some(block) = blocks[k].take() else { continue };
+        let column = items[k].column();
+        if let (Item::Para(p), Block::Para(d)) = (&items[k], &block)
+            && d.artwork.is_empty()
+            && d.floating.is_empty()
+            && d.drop_cap.is_none()
+            && p.lines.iter().any(|l| row_of(l.rect[1]) != row_of(p.lines[0].rect[1]))
+        {
+            let mut from = 0;
+            for n in 1..=p.lines.len() {
+                if n == p.lines.len() || row_of(p.lines[n].rect[1]) != row_of(p.lines[from].rect[1]) {
+                    let lines = p.lines[from..n].to_vec();
+                    let rect = lines.iter().fold(lines[0].rect, |a, l| layout::union(a, l.rect));
+                    let piece = layout::Para { lines, rect, marker: if from == 0 { p.marker } else { None }, ..p.clone() };
+                    let r = row_of(rect[1]).map_or(0, |r| r + lead);
+                    parts[r].push((rect, column[0], Block::Para(doc_para(&piece, None))));
+                    from = n;
+                }
+            }
+            continue;
+        }
+        let rect = items[k].rect();
+        let r = row_of(rect[1]).map_or(0, |r| r + lead);
+        parts[r].push((rect, column[0], block));
+    }
+    let out = rows
+        .into_iter()
+        .zip(parts)
+        .map(|((label, _), mut ks)| {
+            let span = label.iter().map(|&k| items[k].rect()).chain(ks.iter().map(|k| k.0)).fold([f32::INFINITY, f32::NEG_INFINITY], |a, r| [a[0].min(r[1]), a[1].max(r[3])]);
+            ks.sort_by(|a, b| a.0[1].total_cmp(&b.0[1]).then(a.0[0].total_cmp(&b.0[0])));
+            let mut body: Vec<([f32; 4], Block)> = Vec::new();
+            for (r, column_left, mut block) in ks {
+                // Indented from the cell as the item's column is from the
+                // right column (less when its column is the page's).
+                let shift = column_left - right[0];
+                match &mut block {
+                    Block::Para(p) => {
+                        p.left = (p.left + shift).max(0.0);
+                        p.first = p.first.max(-p.left);
+                    }
+                    Block::Picture { left, .. } => *left = (*left + shift).max(0.0),
+                    Block::Grid(_) => {}
+                }
+                // A one-line label beside its text (a note's "Note:"): the
+                // text's paragraph, the label hanging before a tab.
+                if let (Some((pr, Block::Para(prev))), Block::Para(p)) = (body.last_mut(), &mut block)
+                    && prev.lines == 1
+                    && prev.tabs.is_empty()
+                    && pr[2] < r[0]
+                    && (pr[1] - r[1]).abs() < 0.5 * p.size
+                {
+                    let label_left = prev.left;
+                    let mut spans = std::mem::take(&mut prev.spans);
+                    if let Some(last) = spans.last() {
+                        spans.push(Span { text: "\t".into(), ..last.clone() });
+                    }
+                    spans.append(&mut p.spans);
+                    p.spans = spans;
+                    p.artwork.append(&mut prev.artwork);
+                    p.first = label_left - p.left;
+                    p.tabs.insert(0, Tab { pos: p.left, right: false, leader: false });
+                    p.chars += prev.chars;
+                    p.top = p.top.min(prev.top);
+                    body.pop();
+                }
+                body.push((r, block));
+            }
+            // The label as it is in its cell: from the left, on one line
+            // when it fits (no justification, no indents from the PDF's
+            // column).
+            let label = label.and_then(|k| blocks[k].take()).map(|mut b| {
+                if let Block::Para(p) = &mut b {
+                    p.align = layout::Align::Left;
+                    p.left = 0.0;
+                    p.right = 0.0;
+                    p.first = 0.0;
+                }
+                b
+            });
+            let cells = vec![label.into_iter().collect(), body.into_iter().map(|(_, b)| b).collect()];
+            (span, cells)
+        })
+        .collect();
+    Some(TableOut { columns: vec![left, right], rows: out, borders: false, side_heads: true })
 }
 
 struct PageOut {
@@ -342,6 +475,62 @@ impl Writer {
                 }
             }
         }
+        // Rules across the text that no table, figure or running head took:
+        // the borders of the paragraph just above or below them.
+        let taken: Vec<[f32; 4]> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Figure(f) => Some(f.rect),
+                Item::Para(_) => None,
+            })
+            .chain(floating.iter().map(|p| p.figure.rect))
+            .chain(prepared.decorations.iter().copied())
+            .chain(form.iter().flat_map(|f| f.decorations.iter().copied().chain([f.table.rect])))
+            .chain(grids.iter().map(|t| t.rect))
+            .collect();
+        let mut rules: Vec<&super::Rule> = flow_content
+            .rules
+            .iter()
+            .filter(|r| {
+                let (rw, rh) = (r.rect[2] - r.rect[0], r.rect[3] - r.rect[1]);
+                rh <= 3.0 && rw >= (0.25 * w).max(60.0) && r.color.iter().any(|&c| c < 245) && !taken.iter().any(|t| r.rect[0] < t[2] + 1.0 && t[0] < r.rect[2] - 1.0 && r.rect[1] < t[3] + 1.0 && t[1] < r.rect[3] - 1.0)
+            })
+            .collect();
+        rules.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]));
+        rules.dedup_by(|b, a| (b.rect[1] - a.rect[1]).abs() < 1.5 && b.rect[0] < a.rect[2] && a.rect[0] < b.rect[2]);
+        for rule in rules {
+            let r = rule.rect;
+            let mut above: Option<(usize, f32)> = None;
+            let mut below: Option<(usize, f32)> = None;
+            for (k, b) in blocks.iter().enumerate() {
+                let Some(Block::Para(p)) = b else { continue };
+                let pr = items[k].rect();
+                if !(pr[0] < r[2] && r[0] < pr[2]) {
+                    continue;
+                }
+                let reach = 2.5 * p.size;
+                let gap_above = r[1] - p.bottom;
+                if (-1.0..reach).contains(&gap_above) && above.is_none_or(|(_, g)| gap_above < g) {
+                    above = Some((k, gap_above));
+                }
+                let gap_below = p.top - r[3];
+                if (-1.0..reach).contains(&gap_below) && below.is_none_or(|(_, g)| gap_below < g) {
+                    below = Some((k, gap_below));
+                }
+            }
+            let thickness = (r[3] - r[1]).max(0.25);
+            let (side, (k, gap)) = match (above, below) {
+                (Some(a), Some(b)) if b.1 < a.1 => (0, b),
+                (Some(a), _) => (1, a),
+                (None, Some(b)) => (0, b),
+                (None, None) => continue,
+            };
+            if let Some(Some(Block::Para(p))) = blocks.get_mut(k)
+                && p.rules[side].is_none()
+            {
+                p.rules[side] = Some(ParaRule { color: rule.color, width: thickness, space: gap.max(0.0) });
+            }
+        }
         // A table has its rules drawn when paths lie along it.
         let ruled = |r: [f32; 4]| {
             content.graphics.iter().any(|g| {
@@ -355,39 +544,59 @@ impl Writer {
                     let (first, last) = (t.columns[0], t.columns[t.columns.len() - 1]);
                     let rect = [first[0], t.rows[0].0[0], last[1], t.rows[t.rows.len() - 1].0[1]];
                     let rows = t.rows.iter().map(|(span, cells)| (*span, cells.iter().map(|ks| ks.iter().filter_map(|&k| blocks[k].take()).collect()).collect())).collect();
-                    SegmentOut { columns: vec![[first[0], last[1]]], blocks: Vec::new(), table: Some(TableOut { columns: t.columns, rows, borders: ruled(rect) }) }
+                    SegmentOut { columns: vec![[first[0], last[1]]], blocks: Vec::new(), table: Some(TableOut { columns: t.columns, rows, borders: ruled(rect), side_heads: false }) }
                 }
-                None if s.line && s.items.iter().all(|&(_,k)|matches!(blocks[k],Some(Block::Para(_)))) => {
+                None if s.line
+                    && matches!(s.items.first().and_then(|&(_, k)| blocks[k].as_ref()), Some(Block::Para(_)))
+                    && s.items.iter().all(|&(_, k)| matches!(blocks[k], Some(Block::Para(_) | Block::Picture { .. }))) =>
+                {
                     // One paragraph, the parts after the first behind tabs:
-                    // the last one right-aligned when it ends at the right.
+                    // the last one right-aligned when it ends at the right;
+                    // a picture (a number set a digit an image) in the line.
                     let left = s.columns[0][0];
                     let right = s.columns[s.columns.len() - 1][1];
-                    let mut parts = s.items.iter().filter_map(|&(_, k)| match blocks[k].take() {
-                        Some(Block::Para(p)) => Some((p, items[k].rect())),
-                        _ => None,
-                    });
-                    let Some((mut line, _)) = parts.next() else {
+                    let mut parts = s.items.iter().filter_map(|&(_, k)| blocks[k].take().map(|b| (b, items[k].rect())));
+                    let Some((Block::Para(mut line), _)) = parts.next() else {
                         return SegmentOut { columns: s.columns, blocks: Vec::new(), table: None };
                     };
-                    let rest: Vec<(DocPara, [f32; 4])> = parts.collect();
+                    let rest: Vec<(Block, [f32; 4])> = parts.collect();
                     let n = rest.len();
-                    for (i, (p, r)) in rest.into_iter().enumerate() {
-                        let flush_right = i + 1 == n && (right - r[2]).abs() < p.size;
+                    for (i, (b, r)) in rest.into_iter().enumerate() {
+                        let flush_right = i + 1 == n && (right - r[2]).abs() < line.size;
                         line.tabs.push(Tab { pos: if flush_right { r[2] - left } else { r[0] - left }, right: flush_right, leader: false });
                         if let Some(last) = line.spans.last() {
                             line.spans.push(Span { text: "\t".into(), ..last.clone() });
                         }
-                        line.spans.extend(p.spans);
-                        line.artwork.extend(p.artwork);
-                        line.floating.extend(p.floating);
-                        line.chars += p.chars;
-                        line.bottom = line.bottom.max(p.bottom);
+                        match b {
+                            Block::Para(p) => {
+                                for side in 0..2 {
+                                    line.rules[side] = line.rules[side].or(p.rules[side]);
+                                }
+                                line.spans.extend(p.spans);
+                                line.artwork.extend(p.artwork);
+                                line.floating.extend(p.floating);
+                                line.chars += p.chars;
+                                line.bottom = line.bottom.max(p.bottom);
+                            }
+                            Block::Picture { rel, width, height, bottom, .. } => {
+                                let marker = char::from_u32(0x10_0000 + line.artwork.len() as u32).unwrap_or('\u{10ffff}');
+                                if let Some(last) = line.spans.last() {
+                                    line.spans.push(Span { text: marker.to_string(), ..last.clone() });
+                                }
+                                line.artwork.push(InlinePicture { marker, rel, width, height, shift: line.last_baseline - bottom });
+                                line.bottom = line.bottom.max(bottom);
+                            }
+                            Block::Grid(_) => {}
+                        }
                     }
                     line.align = Align::Left;
                     line.right = 0.0;
                     SegmentOut { columns: vec![[left, right]], blocks: vec![(0, Block::Para(line))], table: None }
                 }
-                None => SegmentOut { blocks: s.items.iter().filter_map(|&(c, k)| blocks[k].take().map(|b| (c, b))).collect(), columns: s.columns, table: None },
+                None => match side_heads(&s, &items, &mut blocks) {
+                    Some(t) => SegmentOut { columns: vec![[s.columns[0][0], s.columns[1][1]]], blocks: Vec::new(), table: Some(t) },
+                    None => SegmentOut { blocks: s.items.iter().filter_map(|&(c, k)| blocks[k].take().map(|b| (c, b))).collect(), columns: s.columns, table: None },
+                },
             })
             .filter(|s| !s.blocks.is_empty() || s.table.is_some())
             .collect();
@@ -475,7 +684,7 @@ impl Writer {
                 let pg = &self.pages[pi];
                 let size = pg.size;
                 let mut margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), ((size[1]-e[3])/2.0).clamp(14.0, 0.15*size[1])]);
-                let grid_carrier = !pg.decorations.is_empty() && pg.segments.first().and_then(|s|s.blocks.first()).is_some_and(|(_,b)|matches!(b,Block::Grid(_)));
+                let grid_carrier = !pg.decorations.is_empty() && pg.segments.first().is_some_and(|s| s.table.is_some() || s.blocks.first().is_some_and(|(_, b)| matches!(b, Block::Grid(_))));
                 if grid_carrier {margins[1]=(margins[1]-1.0).max(0.0);}
                 out.margin_left=margins[0];
                 let text_w = (size[0] - margins[0] - margins[2]).max(72.0);
@@ -499,6 +708,7 @@ impl Writer {
                 let segs = &pg.segments;
                 // The bottom of what came before on the page.
                 let mut above: Option<f32> = None;
+                let mut carry: Option<Prev> = None;
                 let mut si = 0;
                 while si < segs.len() {
                     let multi = |s: &SegmentOut| s.columns.len() >= 2 && s.table.is_none();
@@ -514,6 +724,7 @@ impl Writer {
                     for seg in &segs[si..sj] {
                         if let Some(t) = &seg.table {
                             above = Some(table_xml(&mut content, t, above.unwrap_or(margins[1]), margins[0], text_w, &level, &mut out));
+                            carry = None;
                             ends_in_table = true;
                             continue;
                         }
@@ -528,7 +739,12 @@ impl Writer {
                             // or the segment's top in the second column on,
                             // with a column break before it.
                             if new_column {
-                                prev = Prev { baseline: None, bottom: Some(if *c == 0 { above.unwrap_or(margins[1]) } else { seg_top.min(block.top()) }) };
+                                prev = match carry.take() {
+                                    // After a segment of one column, from its
+                                    // last baseline, as within a segment.
+                                    Some(p) if *c == 0 => p,
+                                    _ => Prev { baseline: None, bottom: Some(if *c == 0 { above.unwrap_or(margins[1]) } else { seg_top.min(block.top()) }) },
+                                };
                             }
                             column = *c;
                             // A table is indented from its Word column: the
@@ -537,6 +753,7 @@ impl Writer {
                             block_xml(&mut content, block, &mut prev, col_w, new_column && *c > 0, &level, &mut out);
                         }
                         above = Some(seg.blocks.iter().map(|(_, b)| b.bottom()).fold(f32::NEG_INFINITY, f32::max));
+                        carry = (!multi(seg)).then_some(prev);
                     }
                     if ends_in_table {
                         // A section cannot end in a table: a paragraph a
@@ -781,6 +998,16 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             if let Some(n) = level(p) {
                 let _ = write!(x, r#"<w:pStyle w:val="Heading{n}"/>"#);
             }
+            if p.rules.iter().any(Option::is_some) {
+                x.push_str("<w:pBdr>");
+                for (side, rule) in ["top", "bottom"].iter().zip(&p.rules) {
+                    if let Some(r) = rule {
+                        let [cr, cg, cb] = r.color;
+                        let _ = write!(x, r#"<w:{side} w:val="single" w:sz="{}" w:space="{}" w:color="{cr:02X}{cg:02X}{cb:02X}"/>"#, ((r.width * 8.0).round() as i32).clamp(2, 96), (r.space.round() as i32).clamp(0, 31));
+                    }
+                }
+                x.push_str("</w:pBdr>");
+            }
             if !p.tabs.is_empty() {
                 x.push_str("<w:tabs>");
                 for tab in &p.tabs {
@@ -813,7 +1040,9 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             }
             for picture in &p.floating { wrapping::write(x, picture, p.top, before, out); }
             paragraph_runs(x, p, out);
-            *prev = Prev { baseline: Some(p.last_baseline), bottom: Some(p.bottom) };
+            // A rule below makes the paragraph that much taller.
+            let below = p.rules[1].map_or(0.0, |r| r.space + r.width);
+            *prev = Prev { baseline: Some(p.last_baseline + below), bottom: Some(p.bottom + below) };
         }
         Block::Picture { rel, width, height, align, left, top, bottom, region } => {
             let k = (col_w / width).min(1.0);
@@ -867,6 +1096,8 @@ fn para_before(p: &DocPara, prev: &Prev) -> f32 {
         (None, Some(bottom)) => p.top - bottom,
         (None, None) => 0.0,
     };
+    // A rule above takes its room out of the gap.
+    let gap = gap - p.rules[0].map_or(0.0, |r| r.space + r.width);
     if contents { gap.max(0.0) } else { paragraph_gap(gap, p.size) }
 }
 
@@ -886,7 +1117,7 @@ fn table_xml(x: &mut String, t: &TableOut, above: f32, margin_left: f32, text_w:
     let k = t.columns.len();
     let mut edges = vec![t.columns[0][0] - CELL_PAD];
     for i in 1..k {
-        edges.push((t.columns[i - 1][1] + t.columns[i][0]) / 2.0);
+        edges.push(if t.side_heads { t.columns[i][0] - CELL_PAD } else { (t.columns[i - 1][1] + t.columns[i][0]) / 2.0 });
     }
     edges.push(t.columns[k - 1][1] + CELL_PAD);
     let mut widths: Vec<f32> = edges.windows(2).map(|w| (w[1] - w[0]).max(18.0)).collect();
@@ -904,9 +1135,14 @@ fn table_xml(x: &mut String, t: &TableOut, above: f32, margin_left: f32, text_w:
     let pad = if gaps.is_empty() { 3.0 } else { gaps.iter().sum::<f32>() / gaps.len() as f32 };
     let mut ys = vec![rows[0].0[0] - pad];
     for r in 1..n {
-        ys.push((rows[r - 1].0[1] + rows[r].0[0]) / 2.0);
+        // Text at the top of its cell: the row starts where its text does.
+        ys.push(if t.side_heads { rows[r].0[0] - 1.0 } else { (rows[r - 1].0[1] + rows[r].0[0]) / 2.0 });
     }
     ys.push(rows[n - 1].0[1] + pad);
+    if t.side_heads {
+        ys[0] = rows[0].0[0] - 1.0;
+        ys[n] = rows[n - 1].0[1] + 1.0;
+    }
     let before = paragraph_gap(ys[0] - above, 10.0);
     if before > 1.0 {
         let _ = write!(x, r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/></w:pPr></w:p>"#, tw(before.min(400.0)));
@@ -927,7 +1163,7 @@ fn table_xml(x: &mut String, t: &TableOut, above: f32, margin_left: f32, text_w:
     for (r, (_, cells)) in rows.iter().enumerate() {
         let _ = write!(x, r#"<w:tr><w:trPr><w:trHeight w:val="{}" w:hRule="atLeast"/></w:trPr>"#, tw(ys[r + 1] - ys[r]));
         for (c, blocks) in cells.iter().enumerate() {
-            let _ = write!(x, r#"<w:tc><w:tcPr><w:tcW w:w="{}" w:type="dxa"/><w:vAlign w:val="center"/></w:tcPr>"#, tw(widths[c]));
+            let _ = write!(x, r#"<w:tc><w:tcPr><w:tcW w:w="{}" w:type="dxa"/><w:vAlign w:val="{}"/></w:tcPr>"#, tw(widths[c]), if t.side_heads { "top" } else { "center" });
             if blocks.is_empty() {
                 x.push_str("<w:p/>");
             }
@@ -1029,6 +1265,7 @@ fn doc_para(p: &layout::Para, cap: Option<&DropCap>) -> DocPara {
         drop_cap: None,
         artwork: Vec::new(),
         floating: Vec::new(),
+        rules: [None, None],
     };
     let centre = (col[0]+col[1])/2.0;
     if n <= 3 && p.marker.is_none() && p.rect[2]-p.rect[0] < 0.8*(col[1]-col[0])
@@ -1302,6 +1539,26 @@ mod tests {
         assert!(!body.contains(r#"<w:sz w:val="102""#));
         assert!(body.contains(r#"<w:sz w:val="22""#));
         assert_eq!(prev.baseline, Some(170.0));
+    }
+
+    #[test]
+    fn a_rule_under_a_paragraph_is_its_border_and_takes_its_room() {
+        let (items, _) = flowing_items(&initial_page());
+        let Item::Para(p) = &items[1] else { panic!() };
+        let fonts = [FontInfo { name: "Arial".into(), ..Default::default() }];
+        let mut lookup = crate::fonts::Fonts::default();
+        let mut faces = Faces::default();
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left: 0.0, textboxes: docx::TextBoxes::new() };
+        let mut para = doc_para(p, None);
+        para.rules[1] = Some(ParaRule { color: [0xFF, 0xDD, 0x2D], width: 1.0, space: 8.0 });
+        let (baseline, bottom) = (para.last_baseline, para.bottom);
+        let mut xml = String::new();
+        let mut prev = Prev::default();
+        block_xml(&mut xml, &Block::Para(para), &mut prev, 340.0, false, &|_| None, &mut out);
+        assert!(xml.contains(r#"<w:pBdr><w:bottom w:val="single" w:sz="8" w:space="8" w:color="FFDD2D"/></w:pBdr>"#), "{xml}");
+        // The pBdr goes before the spacing, as WordprocessingML orders it.
+        assert!(xml.find("<w:pBdr>").unwrap() < xml.find("<w:spacing").unwrap());
+        assert_eq!((prev.baseline, prev.bottom), (Some(baseline + 9.0), Some(bottom + 9.0)));
     }
 
     #[test]

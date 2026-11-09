@@ -474,6 +474,9 @@ fn figures_with_labels(content: &PageContent, glyphs: &[Glyph], labels: bool) ->
         members: usize,
         image: Option<usize>,
         images: usize,
+        /// The area of the images too small to count alone (a number set
+        /// as a picture a digit).
+        crumbs: f32,
     }
     let mut clusters: std::collections::HashMap<usize, Cluster> = std::collections::HashMap::new();
     for (b, &(i, r)) in boxes.iter().enumerate() {
@@ -490,6 +493,13 @@ fn figures_with_labels(content: &PageContent, glyphs: &[Glyph], labels: bool) ->
                     c.rich = true;
                     c.images += 1;
                     c.image = g.object;
+                } else if bw >= 2.0 && bh >= 2.0 {
+                    c.crumbs += bw * bh;
+                    if c.crumbs >= 64.0 && c.images == 0 {
+                        c.seeds += 1;
+                        c.rich = true;
+                        c.images += 1;
+                    }
                 }
             }
             GraphicKind::Shading => {
@@ -577,6 +587,44 @@ fn common(a: &[[f32; 2]], b: &[[f32; 2]], gutter: f32) -> Vec<[f32; 2]> {
     out
 }
 
+/// A row's label and value: one box each side of `mid`.
+fn pair(row: &[usize], rects: &[Rect], mid: f32) -> Option<(usize, usize)> {
+    let [a, b] = row else { return None };
+    let (l, r) = if rects[*a][0] <= rects[*b][0] { (*a, *b) } else { (*b, *a) };
+    (rects[l][2] <= mid && rects[r][0] >= mid).then_some((l, r))
+}
+
+/// Whether the rows a band parts are labels and their values (a receipt,
+/// a manual's list) rather than two columns of text or a table: every row
+/// a narrow label with its value close after it, or most rows a box each
+/// side with the values set flush right, their starts ragged.
+fn key_value(rows: &[Vec<usize>], rects: &[Rect], mid: f32, column: [f32; 2]) -> bool {
+    let pairs: Vec<(usize, usize)> = rows.iter().filter_map(|r| pair(r, rects, mid)).collect();
+    // Every row a narrow label and its value (a manual's "Changes
+    // settings: Yes"), however few: two columns of text are not narrow.
+    // The values start soon after the labels: a gutter wider than the
+    // labels' column parts columns.
+    let label_w = pairs.iter().map(|&(l, _)| rects[l][2] - column[0]).fold(0.0, f32::max);
+    let gap = pairs.iter().map(|&(_, r)| rects[r][0]).fold(f32::INFINITY, f32::min) - pairs.iter().map(|&(l, _)| rects[l][2]).fold(f32::NEG_INFINITY, f32::max);
+    let narrow = pairs.len() >= 2 && pairs.len() == rows.len() && label_w <= 0.3 * (column[1] - column[0]) && gap < label_w;
+    if narrow {
+        return true;
+    }
+    if pairs.len() < 3 || pairs.len() * 3 < rows.len() * 2 {
+        return false;
+    }
+    let mut heights: Vec<f32> = pairs.iter().flat_map(|&(l, r)| [rects[l][3] - rects[l][1], rects[r][3] - rects[r][1]]).collect();
+    heights.sort_by(f32::total_cmp);
+    let h = heights[heights.len() / 2].max(1.0);
+    let spread = |xs: &mut dyn Iterator<Item = f32>| {
+        let (lo, hi) = xs.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)));
+        hi - lo
+    };
+    // Values set flush right, their starts ragged (a receipt): a table's
+    // columns start level.
+    spread(&mut pairs.iter().map(|&(_, r)| rects[r][2])) <= 0.5 * h && spread(&mut pairs.iter().map(|&(_, r)| rects[r][0])) >= 2.0 * h
+}
+
 /// The recursive XY cut of `idx` (step 3 above), its groups into `out` in
 /// reading order.
 pub fn cut(idx: &[usize], rects: &[Rect], column: [f32; 2], gutter: f32, out: &mut Vec<Group>) {
@@ -650,7 +698,24 @@ pub fn cut(idx: &[usize], rects: &[Rect], column: [f32; 2], gutter: f32, out: &m
         let mid = (band[0] + band[1]) / 2.0;
         let members: Vec<usize> = rows[start..j].iter().flatten().copied().collect();
         let (left, right): (Vec<usize>, Vec<usize>) = members.iter().partition(|&&m| centre(rects[m])[0] < mid);
-        if !left.is_empty() && !right.is_empty() {
+        if !left.is_empty() && !right.is_empty() && key_value(&rows[start..j], rects, mid, column) {
+            // A label and its value a row: each row a group of its own (a
+            // row with both is one line, the value behind a tab).
+            flush(&rows[from..start], out);
+            let mut loose: Vec<Vec<usize>> = Vec::new();
+            for row in &rows[start..j] {
+                if let Some((l, r)) = pair(row, rects, mid) {
+                    flush(&loose, out);
+                    loose.clear();
+                    out.push(Group { column: [column[0], band[0]], members: vec![l] });
+                    out.push(Group { column: [band[1], column[1]], members: vec![r] });
+                } else {
+                    loose.push(row.clone());
+                }
+            }
+            flush(&loose, out);
+            from = j;
+        } else if !left.is_empty() && !right.is_empty() {
             flush(&rows[from..start], out);
             cut(&left, rects, [column[0], band[0]], gutter, out);
             cut(&right, rects, [band[1], column[1]], gutter, out);
@@ -704,7 +769,14 @@ fn paragraphs(group: &Group, lines: &[Line], figures: &[super::layout::Figure], 
             (p > 0.5 * s && p < 2.5 * s && a.size.min(b.size) > 0.85 * s).then_some(p / s)
         })
         .collect();
-    let usual = median(pitches);
+    // The lower quartile, not the median: a paragraph's lines are the
+    // closest, and lone lines spaced apart (a list of values beside their
+    // labels) must not make its pitch the usual one.
+    let usual = (!pitches.is_empty()).then(|| {
+        let mut p = pitches;
+        p.sort_by(f32::total_cmp);
+        p[(p.len() - 1) / 4]
+    });
     let mut current: Vec<Line> = Vec::new();
     let mut current_marker: Option<usize> = None;
     let finish = |current: &mut Vec<Line>, marker: &mut Option<usize>, out: &mut Vec<Item>| {
@@ -737,7 +809,12 @@ fn paragraphs(group: &Group, lines: &[Line], figures: &[super::layout::Figure], 
             // Indented against the paragraph's body: a new paragraph's
             // first line (not a list item's continuation).
             let indented = line.rect[0] > body_left + 0.8 * s && !continues_list && (current.len() >= 2 || first_left < left + 0.8 * s);
+            // A few words a line, spaced apart: labels or values a line
+            // each, not a paragraph (prose double spaced has long lines).
+            let words = |l: &Line| 1 + l.glyphs.iter().skip(1).filter(|g| g.space_before).count();
+            let listed = pitch > 1.6 * s && words(prev) <= 3 && words(line) <= 3 && !soft;
             let breaks = pitch <= 0.3 * s
+                || listed
                 || pitch > normal * 1.3 + 0.5
                 || !(0.85..=1.18).contains(&ratio)
                 || line_marker.is_some()
@@ -827,6 +904,9 @@ pub struct Segment {
     /// left and the chapter at the right): one paragraph, its parts
     /// parted by tabs.
     pub line: bool,
+    /// Two columns, the left one labels each at the top of a part of the
+    /// right one (`side_heads`).
+    pub side: bool,
 }
 
 /// A table found in a segment: its columns' edges and its rows, each a
@@ -915,6 +995,50 @@ impl Item {
     }
 }
 
+/// Whether two columns are short labels, each at the top of a part of the
+/// other, wider column (a manual's "Description", "Example" beside their
+/// text): `members` are (column, item).
+pub fn side_heads(items: &[Item], cols: &[[f32; 2]], members: &[(usize, usize)]) -> bool {
+    let [left, right] = cols else { return false };
+    if left[1] - left[0] > 0.35 * (right[1] - left[0]) {
+        return false;
+    }
+    let labels: Vec<&Para> = members
+        .iter()
+        .filter(|m| m.0 == 0)
+        .filter_map(|m| match &items[m.1] {
+            Item::Para(p) => Some(p),
+            Item::Figure(_) => None,
+        })
+        .collect();
+    let body: Vec<[f32; 4]> = members.iter().filter(|m| m.0 == 1).map(|m| items[m.1].rect()).collect();
+    let n_labels = members.iter().filter(|m| m.0 == 0).count();
+    // Parts of text beside the labels, not a value a label (a receipt's
+    // lines, a formula after the words that lead to it): a figure counts
+    // as a line.
+    let body_lines: usize = members
+        .iter()
+        .filter(|m| m.0 == 1)
+        .map(|m| match &items[m.1] {
+            Item::Para(p) => p.lines.len(),
+            Item::Figure(_) => 1,
+        })
+        .sum();
+    if labels.is_empty() || labels.len() < n_labels || body.is_empty() || body_lines < n_labels + 2 {
+        return false;
+    }
+    // Words, not a list's bullets or numbers set apart from their items.
+    let label = |p: &Para| {
+        let glyphs = || p.lines.iter().flat_map(|l| &l.glyphs);
+        p.lines.len() <= 2 && glyphs().count() <= 40 && glyphs().filter(|g| g.ch.is_alphabetic()).count() >= 2
+    };
+    if !labels.iter().all(|p| label(p)) {
+        return false;
+    }
+    let aligned = labels.iter().filter(|p| body.iter().any(|r| (r[1] - p.rect[1]).abs() < 1.2 * p.size)).count();
+    aligned * 3 >= labels.len() * 2
+}
+
 /// The page's items in segments: runs of items whose columns have
 /// another beside them make a segment of those columns, read left to
 /// right (two to four, each with two lines at least: else a row of a
@@ -926,7 +1050,7 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
     let side = |c: [f32; 2]| columns.iter().any(|&o| apart(o, c));
     let single = |range: std::ops::Range<usize>| {
         let column = range.clone().map(|k| columns[k]).fold([f32::INFINITY, f32::NEG_INFINITY], |a, c| [a[0].min(c[0]), a[1].max(c[1])]);
-        Segment { columns: vec![column], items: range.map(|k| (0, k)).collect(), table: None, line: false }
+        Segment { columns: vec![column], items: range.map(|k| (0, k)).collect(), table: None, line: false, side: false }
     };
     let mut out: Vec<Segment> = Vec::new();
     let mut i = 0;
@@ -939,6 +1063,36 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
             out.push(single(i..j));
             i = j;
             continue;
+        }
+        // Side heads: labels in a narrow column on the left, the rest to its
+        // right, in columns of its own or not (a note's label beside it).
+        {
+            let labels = columns[i];
+            let label = |c: [f32; 2]| (c[0] - labels[0]).abs() < 1.0;
+            let mut label_col = labels;
+            let mut right: Option<[f32; 2]> = None;
+            let mut run = vec![(0, i)];
+            let mut j = i + 1;
+            while j < items.len() {
+                let c = columns[j];
+                if c[0] >= label_col[1] - 1.0 {
+                    right = Some(right.map_or(c, |r| [r[0].min(c[0]), r[1].max(c[1])]));
+                    run.push((1, j));
+                } else if label(c) && right.is_none_or(|r| c[1] < r[0] - 1.0) {
+                    label_col = [label_col[0], label_col[1].max(c[1])];
+                    run.push((0, j));
+                } else {
+                    break;
+                }
+                j += 1;
+            }
+            if let Some(right) = right
+                && side_heads(items, &[label_col, right], &run)
+            {
+                out.push(Segment { columns: vec![label_col, right], items: run, table: None, line: false, side: true });
+                i = j;
+                continue;
+            }
         }
         let mut cols = vec![columns[i]];
         let mut members = vec![(0, i)];
@@ -957,14 +1111,22 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
             j += 1;
         }
         let lines_in = |col: usize| members.iter().filter(|m| m.0 == col).map(|m| items[m.1].lines()).sum::<usize>();
-        let first_top = items[members[0].1].rect()[1];
+        let first = items[members[0].1].rect();
+        let first_size = match &items[members[0].1] {
+            Item::Para(p) if p.lines.len() == 1 => Some(p.size),
+            _ => None,
+        };
+        // A row of one-line parts; after the first, a picture no taller
+        // than a line or two on the same line (a number set as images).
         let one_line = cols.len() >= 2
-            && members.iter().all(|&(_, k)| match &items[k] {
-                Item::Para(p) => p.lines.len() == 1 && (p.rect[1] - first_top).abs() < 0.5 * p.size,
-                Item::Figure(_) => false,
+            && first_size.is_some_and(|size| {
+                members.iter().all(|&(_, k)| match &items[k] {
+                    Item::Para(p) => p.lines.len() == 1 && (p.rect[1] - first[1]).abs() < 0.5 * p.size,
+                    Item::Figure(f) => f.rect[3] - f.rect[1] <= 2.5 * size && f.rect[1] < first[3] && f.rect[3] > first[1],
+                })
             });
         if one_line {
-            out.push(Segment { columns: cols, items: members, table: None, line: true });
+            out.push(Segment { columns: cols, items: members, table: None, line: true, side: false });
         } else if cols.len() >= 2
             && let Some(table) = table_of(items, &cols, &members, graphics)
         {
@@ -976,19 +1138,25 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
             after.sort_by(|&a, &b| items[a].rect()[1].total_cmp(&items[b].rect()[1]));
             let loose = |ks: Vec<usize>| {
                 let column = ks.iter().map(|&k| columns[k]).fold([f32::INFINITY, f32::NEG_INFINITY], |a, c| [a[0].min(c[0]), a[1].max(c[1])]);
-                Segment { columns: vec![column], items: ks.into_iter().map(|k| (0, k)).collect(), table: None, line: false }
+                Segment { columns: vec![column], items: ks.into_iter().map(|k| (0, k)).collect(), table: None, line: false, side: false }
             };
             if !before.is_empty() {
                 out.push(loose(before));
             }
-            out.push(Segment { columns: cols, items: inside.iter().map(|&k| (0, k)).collect(), table: Some(table), line: false });
+            out.push(Segment { columns: cols, items: inside.iter().map(|&k| (0, k)).collect(), table: Some(table), line: false, side: false });
             if !after.is_empty() {
                 out.push(loose(after));
             }
+        } else if side_heads(items, &cols, &members) {
+            out.push(Segment { columns: cols, items: members, table: None, line: false, side: true });
         } else if (2..=4).contains(&cols.len()) && (0..cols.len()).all(|c| lines_in(c) >= 2) {
-            out.push(Segment { columns: cols, items: members, table: None, line: false });
+            out.push(Segment { columns: cols, items: members, table: None, line: false, side: false });
         } else {
-            out.push(single(i..j));
+            // Side by side but no columns: one column, read top down (the
+            // cut gave the left one first).
+            let mut s = single(i..j);
+            s.items.sort_by(|a, b| items[a.1].rect()[1].total_cmp(&items[b.1].rect()[1]));
+            out.push(s);
         }
         i = j;
     }
@@ -1003,7 +1171,53 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
             _ => merged.push(s),
         }
     }
-    merged
+    merged.into_iter().flat_map(|s| side_pairs(s, items)).collect()
+}
+
+/// A one-column segment cut round its side heads too close to their part
+/// for the cut to part them (a manual's "Change history" a few points
+/// from its table): a short label, and on its top line to its right a
+/// figure (a table) or a paragraph of lines, make a segment of side heads.
+fn side_pairs(s: Segment, items: &[Item]) -> Vec<Segment> {
+    if s.columns.len() != 1 || s.table.is_some() || s.line {
+        return vec![s];
+    }
+    let right_edge = s.columns[0][1];
+    let mut out = Vec::new();
+    let mut rest: Vec<(usize, usize)> = Vec::new();
+    let mut n = 0;
+    while n < s.items.len() {
+        let k = s.items[n].1;
+        let pair = s.items.get(n + 1).map(|m| m.1).filter(|&next| {
+            let Item::Para(p) = &items[k] else { return false };
+            let glyphs = || p.lines.iter().flat_map(|l| &l.glyphs);
+            let label = p.lines.len() <= 2 && glyphs().count() <= 40 && glyphs().filter(|g| g.ch.is_alphabetic()).count() >= 2;
+            let r = items[next].rect();
+            let body = match &items[next] {
+                Item::Figure(_) => true,
+                Item::Para(q) => q.lines.len() >= 2,
+            };
+            label && body && r[0] > p.rect[2] + 2.0 && (r[1] - p.rect[1]).abs() < 0.8 * p.size && r[0] - s.columns[0][0] < 0.35 * (right_edge - s.columns[0][0])
+        });
+        match pair {
+            Some(next) => {
+                if !rest.is_empty() {
+                    out.push(Segment { columns: s.columns.clone(), items: std::mem::take(&mut rest), table: None, line: false, side: false });
+                }
+                let (l, r) = (items[k].rect(), items[next].rect());
+                out.push(Segment { columns: vec![[l[0], l[2]], [r[0], right_edge.max(r[2])]], items: vec![(0, k), (1, next)], table: None, line: false, side: true });
+                n += 2;
+            }
+            None => {
+                rest.push(s.items[n]);
+                n += 1;
+            }
+        }
+    }
+    if !rest.is_empty() {
+        out.push(Segment { columns: s.columns, items: rest, table: None, line: false, side: false });
+    }
+    out
 }
 
 /// How a span sits against its line's baseline.
@@ -1192,6 +1406,65 @@ mod tests {
         assert_eq!(t.len(), 3, "{t:?}");
         assert!(t[1].starts_with("left column line 0") && t[1].ends_with("line 4 goes on"), "{t:?}");
         assert!(t[2].starts_with("right column line 0"), "{t:?}");
+    }
+
+    /// `s` set at `baseline` so that it ends at `right`.
+    fn flush_right(s: &str, right: f32, baseline: f32) -> Vec<Glyph> {
+        let width: f32 = s.chars().map(|c| if c == ' ' { 2.5 } else { 5.0 }).sum();
+        text(s, right - width, baseline)
+    }
+
+    #[test]
+    fn a_receipt_s_labels_and_values_are_lines_not_columns() {
+        let mut g = Vec::new();
+        for (k, (label, value)) in [("Transfer", "To a card"), ("Status", "Done"), ("Sum", "87 000"), ("Fee", "1 005"), ("Sender", "Ivan Petrov")].into_iter().enumerate() {
+            let y = 100.0 + 20.0 * k as f32;
+            g.extend(text(label, 20.0, y));
+            g.extend(flush_right(value, 250.0, y));
+        }
+        let items = analyse(&page(g), OPTS);
+        let segs = segments(&items, &[]);
+        assert_eq!(segs.len(), 5, "{segs:?}");
+        assert!(segs.iter().all(|s| s.line && s.columns.len() == 2), "{segs:?}");
+        assert_eq!(texts(&items).iter().filter(|t| t.as_str() == "Transfer" || t.as_str() == "To a card").count(), 2);
+    }
+
+    #[test]
+    fn labels_beside_their_parts_are_side_heads() {
+        let mut g = text("Description", 40.0, 100.0);
+        for k in 0..3 {
+            g.extend(text(&format!("The command does something useful line {k} and more"), 150.0, 100.0 + 12.0 * k as f32));
+        }
+        g.extend(text("Example", 40.0, 160.0));
+        for k in 0..2 {
+            g.extend(text(&format!("(config)> command number {k} with its output"), 150.0, 160.0 + 12.0 * k as f32));
+        }
+        let items = analyse(&page(g), OPTS);
+        let segs = segments(&items, &[]);
+        let side: Vec<&Segment> = segs.iter().filter(|s| s.side).collect();
+        assert_eq!(side.len(), 1, "{segs:?}");
+        assert_eq!(side[0].columns.len(), 2);
+        assert_eq!(side[0].items.iter().filter(|m| m.0 == 0).count(), 2);
+    }
+
+    #[test]
+    fn short_lines_spaced_apart_are_paragraphs_of_their_own() {
+        let mut g = text("Yes", 40.0, 100.0);
+        g.extend(text("No", 40.0, 122.0));
+        g.extend(text("Interface type", 40.0, 144.0));
+        assert_eq!(texts(&analyse(&page(g), OPTS)), ["Yes", "No", "Interface type"]);
+    }
+
+    #[test]
+    fn a_number_set_a_digit_a_picture_is_a_figure() {
+        let mut content = page(text("Card", 20.0, 243.0));
+        for k in 0..16 {
+            let x = 142.0 + 6.0 * k as f32 + if k >= 4 { 4.0 } else { 0.0 };
+            content.graphics.push(Graphic { rect: [x, 235.0, x + 5.0, 245.0], kind: GraphicKind::Image, object: None });
+        }
+        let found = figures(&content, &content.glyphs);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].rect[0] <= 142.0 && found[0].rect[2] >= 230.0);
     }
 
     #[test]
