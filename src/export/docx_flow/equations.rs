@@ -3,7 +3,106 @@ use crate::export::{FontInfo,Glyph,PageContent,layout};
 type Rect=[f32;4];
 
 #[derive(Default)]
-pub(super) struct Prepared {pub blocks:Vec<Rect>}
+pub(super) struct Prepared {
+    pub blocks: Vec<Rect>,
+    /// In prose that stays a paragraph: what goes in its lines as small
+    /// pictures (a letter with an accent over it, a symbol of a legacy
+    /// font), the rest of the expression being text.
+    pub inline: Vec<super::artwork::Inline>,
+}
+
+/// A character of a legacy TeX or symbol font that is safe as text in
+/// a Word font: letters, digits and the common signs. Others (big
+/// operators, arrows of odd fonts, glyphs mapped to private codes) keep
+/// their drawn shape as a picture.
+fn plain(c: char, font: &FontInfo) -> bool {
+    // Not the modifier letters and combining marks: accents set apart.
+    let accent = matches!(c, '\u{2b0}'..='\u{36f}');
+    // The letters of the symbol fonts are script, fraktur, blackboard:
+    // `H` in CMSY is ℋ, `R` in MSBM is ℝ.
+    let letters_drawn_otherwise = ["cmsy", "cmbsy", "rsfs", "eufm", "msbm", "msam"].iter().any(|p| name(font).starts_with(p));
+    !accent && (c.is_alphanumeric() && !(letters_drawn_otherwise && c.is_alphabetic()) || "()[]{},.;:=+-−'′/|<>*!?·×±∞→←↔≤≥≠≈∼∈∂∇⟨⟩".contains(c))
+}
+
+/// Prose with expressions in it, not an expression: mostly letters of
+/// the body, a few symbols. It stays an ordinary paragraph.
+fn prose(p: &layout::Para, math: &dyn Fn(&Glyph) -> bool) -> bool {
+    let glyphs: Vec<&Glyph> = p.lines.iter().flat_map(|l| &l.glyphs).collect();
+    let symbols = glyphs.iter().filter(|g| math(g)).count();
+    let letters = glyphs.iter().filter(|g| !math(g) && g.ch.is_alphabetic()).count();
+    letters >= 25 && symbols as f32 <= 0.3 * glyphs.len() as f32
+}
+
+/// The pictures prose with expressions needs: characters drawn over one
+/// another (an accent, a small fraction), each pile one picture, and the
+/// characters of legacy fonts that are not `plain`.
+fn inline_pieces(p: &layout::Para, raw: &[Glyph], fonts: &[FontInfo]) -> Vec<super::artwork::Inline> {
+    // Every character with the line it is on (an accent drawn apart can
+    // be a line of its own).
+    // The page's own characters (the lines dropped the accents that make
+    // no character with their letter), each with the line it is on.
+    let line_of = |g: &Glyph| {
+        let c = [(g.rect[0] + g.rect[2]) / 2.0, (g.rect[1] + g.rect[3]) / 2.0];
+        p.lines.iter().position(|l| c[0] >= l.rect[0] - 0.5 && c[0] <= l.rect[2] + 0.5 && c[1] >= l.rect[1] - 0.3 * l.size && c[1] <= l.rect[3] + 0.3 * l.size)
+    };
+    let gs: Vec<(&Glyph, usize)> = raw.iter().filter(|g| !g.invisible && !g.ch.is_whitespace()).filter_map(|g| line_of(g).map(|k| (g, k))).collect();
+    let width = |g: &Glyph| g.rect[2] - g.rect[0];
+    let mut pile: Vec<usize> = (0..gs.len()).collect();
+    fn find(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    for i in 0..gs.len() {
+        for j in i + 1..gs.len() {
+            let (a, b) = (gs[i].0, gs[j].0);
+            let narrow = width(a).min(width(b));
+            let shared = a.rect[2].min(b.rect[2]) - a.rect[0].max(b.rect[0]);
+            // On one line: the characters of neighbouring lines stand over one another too.
+            let near = gs[i].1 == gs[j].1;
+            if narrow > 0.5 && shared > 0.5 * narrow && near && !(a.ch == b.ch && (a.x - b.x).abs() < 0.5) {
+                let (x, y) = (find(&mut pile, i), find(&mut pile, j));
+                pile[x] = y;
+            }
+        }
+    }
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    for i in 0..gs.len() {
+        let root = find(&mut pile, i);
+        groups.entry(root).or_default().push(i);
+    }
+    // Each picture with the line it sits on: the longest line among its
+    // characters' (an accent's own line is a character long).
+    let mut pieces: Vec<(Rect, usize)> = Vec::new();
+    let odd = |g: &Glyph| fonts.get(g.font as usize).is_some_and(|f| painted(f) && !plain(g.ch, f));
+    for members in groups.values() {
+        // A letter and its accent that make a character (`е` and `¨` are
+        // `ё`) are text: the lines join them.
+        let mut pair: Vec<Glyph> = members.iter().map(|&i| gs[i].0.clone()).collect();
+        let base: Vec<char> = pair.iter().map(|g| g.ch).collect();
+        layout::join_accents(&mut pair);
+        if members.len() >= 2 && pair.len() == 1 && !base.contains(&pair[0].ch) {
+            continue;
+        }
+        if members.len() >= 2 || odd(gs[members[0]].0) {
+            let rect = members.iter().map(|&i| gs[i].0.rect).reduce(layout::union).unwrap();
+            let line = members.iter().map(|&i| gs[i].1).max_by_key(|&k| p.lines[k].glyphs.len()).unwrap();
+            pieces.push((rect, line));
+        }
+    }
+    // Neighbours on a line as one picture.
+    pieces.sort_by(|a, b| a.1.cmp(&b.1).then(a.0[0].total_cmp(&b.0[0])));
+    let mut merged: Vec<(Rect, usize)> = Vec::new();
+    for (r, k) in pieces {
+        match merged.last_mut() {
+            Some((last, lk)) if *lk == k && r[0] - last[2] < 0.15 * p.lines[k].size => *last = layout::union(*last, r),
+            _ => merged.push((r, k)),
+        }
+    }
+    merged.into_iter().map(|(r, k)| super::artwork::Inline { rect: [r[0] - 0.3, r[1] - 0.3, r[2] + 0.3, r[3] + 0.3], baseline: p.lines[k].baseline }).collect()
+}
 
 fn name(font:&FontInfo)->String {font.name.rsplit('+').next().unwrap_or(&font.name).to_ascii_lowercase()}
 fn tex(font:&FontInfo)->bool {
@@ -81,8 +180,39 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
     let excluded:Vec<_>=layout::labelled_figures(content).into_iter().map(|f|f.rect).collect();
     let seeds:Vec<_>=content.glyphs.iter().filter(|g|math(g)&&!excluded.iter().any(|&r|centre_inside(g,r))).map(|g|g.rect).collect();
     if seeds.is_empty() {return Prepared::default();}
-    let items=layout::analyse(content,layout::Options {invisible:false,figures:false});
-    let mut blocks:Vec<Rect>=items.iter().filter(|item| seeds.iter().any(|r|touches(item.rect(),*r,0.0))).map(layout::Item::rect).collect();
+    let all_items=layout::analyse(content,layout::Options {invisible:false,figures:false});
+    // Prose with a variable or two in it stays a paragraph that rewraps
+    // when edited; only the expressions set apart are fixed compositions.
+    let mut inline = Vec::new();
+    let mut prose_lines: Vec<Rect> = Vec::new();
+    let mut display: Vec<Rect> = Vec::new();
+    let items: Vec<&layout::Item> = all_items.iter().filter(|item| match item {
+        layout::Item::Para(p) if seeds.iter().any(|r| touches(p.rect, *r, 0.0)) && prose(p, &math) => {
+            // Its lines that are an expression set apart (mostly symbols),
+            // or the parts of a fraction (lines crowded closer than a
+            // line's pitch), stay compositions; the rest flows.
+            let n = p.lines.len();
+            let set_apart: Vec<bool> = (0..n).map(|k| {
+                let l = &p.lines[k];
+                let symbols = l.glyphs.iter().filter(|g| math(g)).count();
+                let crowded = |o: usize| (p.lines[o].baseline - l.baseline).abs() < 0.8 * p.size;
+                symbols >= 2 && 2 * symbols >= l.glyphs.len() || k > 0 && crowded(k - 1) || k + 1 < n && crowded(k + 1)
+            }).collect();
+            let mut flowing = p.clone();
+            flowing.lines = p.lines.iter().zip(&set_apart).filter(|(_, apart)| !**apart).map(|(l, _)| l.clone()).collect();
+            display.extend(p.lines.iter().zip(&set_apart).filter(|(_, apart)| **apart).map(|(l, _)| l.rect));
+            inline.extend(inline_pieces(&flowing, &content.glyphs, fonts));
+            prose_lines.extend(flowing.lines.iter().map(|l| l.rect));
+            false
+        }
+        _ => true,
+    }).collect();
+    let in_prose = |row: &layout::Line| {
+        let c = [(row.rect[0] + row.rect[2]) / 2.0, row.baseline - 0.3 * row.size];
+        prose_lines.iter().any(|r| c[0] >= r[0] && c[0] <= r[2] && c[1] >= r[1] && c[1] <= r[3])
+    };
+    let mut blocks:Vec<Rect>=items.iter().filter(|item| seeds.iter().any(|r|touches(item.rect(),*r,0.0))).map(|item| item.rect()).collect();
+    blocks.extend(display);
     // Analyse may place a numerator, its denominator and the equation number
     // into different paragraphs. Include all intersecting rows and artwork
     // before merging so no part can be painted twice or cropped away.
@@ -94,7 +224,7 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
                 let row=item.rect();
                 if r[1]<=row[3] && r[3]>=row[1] {*r=layout::union(*r,row);}
             }
-            for row in &rows {
+            for row in rows.iter().filter(|row| !in_prose(row)) {
                 let t=row.text();
                 let number=t.starts_with('(') && t.ends_with(')') && t.chars().any(|c|c.is_ascii_digit())
                     && t.chars().all(|c|c.is_ascii_digit()||matches!(c,'('|')'|'.'|' '));
@@ -116,7 +246,7 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
     for r in &mut blocks {r[0]=(r[0]-0.5).max(0.0);r[1]=(r[1]-1.0).max(0.0);r[2]=(r[2]+0.5).min(content.size[0]);r[3]=(r[3]+1.0).min(content.size[1]);}
     content.glyphs.retain(|g|!blocks.iter().any(|&r|centre_inside(g,r)));
     content.graphics.retain(|g|!blocks.iter().any(|r|g.rect[0]>=r[0]&&g.rect[2]<=r[2]&&g.rect[1]>=r[1]&&g.rect[3]<=r[3]));
-    Prepared {blocks}
+    Prepared {blocks, inline}
 }
 
 #[cfg(test)]
@@ -142,16 +272,39 @@ mod tests {
         assert!(p.graphics.is_empty());
     }
     #[test]
-    fn inline_math_preserves_the_whole_paragraph_and_its_source_baselines() {
+    fn prose_with_a_variable_stays_a_paragraph_with_only_its_piles_as_pictures() {
         let mut glyphs=text("Ordinary prose before",50.0,100.0,0);
         glyphs.extend(text("α",157.0,100.0,1));
         glyphs.extend(text("and after the variable.",170.0,100.0,0));
         glyphs.extend(text("The same paragraph continues on this line.",50.0,113.0,0));
         glyphs.extend(text("A separate paragraph remains editable.",50.0,180.0,0));
         let mut p=PageContent {size:[600.0,800.0],glyphs, ..Default::default()};
+        let original=p.clone();
         let prepared=prepare(&mut p,&fonts());
-        assert_eq!(prepared.blocks.len(),1);assert!(prepared.blocks[0][3]>=115.0);
-        assert_eq!(p.glyphs.iter().map(|g|g.ch).collect::<String>(),"A separate paragraph remains editable.");
+        // The variable is a letter: text, the paragraph untouched.
+        assert!(prepared.blocks.is_empty() && prepared.inline.is_empty());
+        assert_eq!(p,original);
+        // A hat drawn over a letter of the expression, and a sign of a
+        // legacy font with no safe character: pictures in the line.
+        let mut hat=text("ˆ",157.0,100.0,1);hat[0].rect[0]+=0.5;hat[0].x+=0.5;
+        p.glyphs.extend(hat);
+        p.glyphs.extend(text("♮",261.0,113.0,1));
+        let prepared=prepare(&mut p,&fonts());
+        assert!(prepared.blocks.is_empty());
+        assert_eq!(prepared.inline.len(),2,"{:?}",prepared.inline.iter().map(|a|(a.rect,a.baseline)).collect::<Vec<_>>());
+        assert!(prepared.inline.iter().any(|a|a.rect[0]<=157.0 && a.rect[2]>=162.0 && a.baseline==100.0));
+        assert!(prepared.inline.iter().any(|a|a.rect[0]<=261.0 && a.baseline==113.0));
+    }
+
+    #[test]
+    fn an_expression_set_apart_is_still_one_composition() {
+        let mut glyphs=text("Ordinary prose before the expression goes on.",50.0,100.0,0);
+        glyphs.extend(text("αβ=γδ+",150.0,130.0,1));
+        glyphs.extend(text("A separate paragraph remains editable.",50.0,180.0,0));
+        let mut p=PageContent {size:[600.0,800.0],glyphs, ..Default::default()};
+        let prepared=prepare(&mut p,&fonts());
+        assert_eq!(prepared.blocks.len(),1);
+        assert_eq!(p.glyphs.iter().map(|g|g.ch).collect::<String>(),"Ordinary prose before the expression goes on.A separate paragraph remains editable.");
     }
     #[test]
     fn monospace_code_is_not_mistaken_for_an_equation() {

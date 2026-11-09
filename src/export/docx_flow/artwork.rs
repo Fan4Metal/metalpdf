@@ -26,7 +26,7 @@ fn touches(a: [f32; 4], b: [f32; 4], pad: f32) -> bool {
     a[0] <= b[2] + pad && b[0] <= a[2] + pad && a[1] <= b[3] + pad && b[1] <= a[3] + pad
 }
 
-pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo]) -> Prepared {
+pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo], extra: Vec<Inline>) -> Prepared {
     let mut content = original.clone();
     let mut decorations = Vec::new();
     let mut counts = std::collections::HashMap::new();
@@ -230,7 +230,8 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo])
         content.graphics.push(Graphic { rect: r, kind: GraphicKind::Image, object: None });
     }
     let lines = layout::lines(content.glyphs.clone());
-    let mut inline = Vec::new();
+    // What the equations found in prose first.
+    let mut inline = extra;
     let mut figures = Vec::new();
     for figure in layout::labelled_figures(&content) {
         let r = figure.rect;
@@ -448,6 +449,8 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo])
         i += 1;
     }
     for (i, art) in inline.iter().enumerate() {
+        // The space before the first character it stands for, before it.
+        let space_before = content.glyphs.iter().filter(|g| inside(g, art.rect, 0.0)).min_by(|a, b| a.x.total_cmp(&b.x)).is_some_and(|g| g.space_before);
         content.glyphs.retain(|g| !inside(g, art.rect, 0.0));
         content.graphics.retain(|g| !(g.rect[0] >= art.rect[0] - 0.5 && g.rect[1] >= art.rect[1] - 0.5 && g.rect[2] <= art.rect[2] + 0.5 && g.rect[3] <= art.rect[3] + 0.5));
         content.glyphs.push(Glyph {
@@ -459,7 +462,7 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo])
             size,
             font,
             color: [0; 3],
-            space_before: false,
+            space_before,
             invisible: false,
         });
     }
@@ -505,11 +508,15 @@ mod tests {
         PageContent { size: [600.0, 800.0], glyphs, graphics, turns: 0, ..Default::default() }
     }
 
+    fn prepare_page(p: &PageContent, fonts: &[crate::export::FontInfo]) -> Prepared {
+        prepare(p, fonts, Vec::new())
+    }
+
     #[test]
     fn the_running_head_and_rule_leave_body_paragraphs_alone() {
         let mut glyphs = text("17 Chapter", 50.0, 40.0);
         glyphs.extend(text("An ordinary editable body paragraph", 50.0, 90.0));
-        let p = prepare(&page(glyphs, vec![graphic([50.0, 50.0, 550.0, 51.0])]), &[]);
+        let p = prepare_page(&page(glyphs, vec![graphic([50.0, 50.0, 550.0, 51.0])]), &[]);
         assert_eq!(p.decorations.len(), 1);
         assert!(!p.whole_page);
         assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
@@ -520,7 +527,7 @@ mod tests {
         let mut glyphs = text("An ordinary editable body paragraph", 50.0, 90.0);
         glyphs.extend(text("406", 20.0, 748.0));
         glyphs.extend(text("Reference manual", 400.0, 752.0));
-        let p = prepare(&page(glyphs, vec![graphic([50.0, 742.0, 550.0, 742.5])]), &[]);
+        let p = prepare_page(&page(glyphs, vec![graphic([50.0, 742.0, 550.0, 742.5])]), &[]);
         assert_eq!(p.decorations.len(), 1);
         assert!(p.decorations[0][0] <= 20.0 && p.decorations[0][3] >= 754.0);
         assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
@@ -538,7 +545,7 @@ mod tests {
                 graphics.push(graphic([x, y, x + 100.0, y + 1.0]));
             }
         }
-        let p = prepare(&page(glyphs, graphics), &[]);
+        let p = prepare_page(&page(glyphs, graphics), &[]);
         let pictures: Vec<_> = p.content.graphics.iter().filter(|g| g.kind == GraphicKind::Image).collect();
         assert_eq!(pictures.len(), 1);
         assert!(pictures[0].rect[0] <= 100.0 && pictures[0].rect[2] >= 400.0 && pictures[0].rect[3] >= 301.0);
@@ -555,7 +562,7 @@ mod tests {
         let mut caption = text("Рис. 1. A plot", 100.0, 350.0);
         caption.iter_mut().for_each(|g| g.font = 1);
         glyphs.extend(caption);
-        let p = prepare(&page(glyphs, vec![graphic([100.0, 200.0, 400.0, 320.0])]), &[]);
+        let p = prepare_page(&page(glyphs, vec![graphic([100.0, 200.0, 400.0, 320.0])]), &[]);
         assert!(!p.content.glyphs.iter().any(|g| g.baseline == 190.0));
         assert!(p.content.glyphs.iter().any(|g| g.baseline == 100.0));
         assert!(p.content.glyphs.iter().any(|g| g.baseline == 350.0));
@@ -566,7 +573,7 @@ mod tests {
     fn outlined_fractions_are_inline_and_icons_do_not_capture_body_letters() {
         let mut glyphs = text("Before", 50.0, 250.0);
         glyphs.extend(text("after", 95.0, 250.0));
-        let p = prepare(&page(glyphs, vec![graphic([86.0, 243.0, 92.0, 244.0]), graphic([87.0, 237.0, 91.0, 242.0]), graphic([87.0, 246.0, 91.0, 253.0])]), &[]);
+        let p = prepare_page(&page(glyphs, vec![graphic([86.0, 243.0, 92.0, 244.0]), graphic([87.0, 237.0, 91.0, 242.0]), graphic([87.0, 246.0, 91.0, 253.0])]), &[]);
         assert_eq!(p.inline.len(), 1);
         assert_eq!(p.inline[0].baseline, 250.0);
         assert!(p.inline[0].rect[1] <= 237.0 && p.inline[0].rect[3] >= 253.0);
@@ -574,7 +581,7 @@ mod tests {
 
         let mut glyphs = text("Before", 50.0, 250.0);
         glyphs.extend(text("after", 106.0, 250.0));
-        let p = prepare(&page(glyphs, vec![graphic([86.0, 238.0, 100.0, 254.0]), graphic([89.0, 243.0, 96.0, 244.0])]), &[]);
+        let p = prepare_page(&page(glyphs, vec![graphic([86.0, 238.0, 100.0, 254.0]), graphic([89.0, 243.0, 96.0, 244.0])]), &[]);
         assert_eq!(p.inline.len(), 1);
         assert_eq!(p.content.glyphs.iter().filter(|g| g.source == -1).count(), 11);
     }
@@ -585,7 +592,7 @@ mod tests {
         for y in [200.0, 204.0, 208.0] {
             glyphs.extend(text(".", 60.0, y));
         }
-        let p = prepare(&page(glyphs, Vec::new()), &[]);
+        let p = prepare_page(&page(glyphs, Vec::new()), &[]);
         assert_eq!(p.content.glyphs.iter().filter(|g| g.ch == '⋮').count(), 1);
         assert!(!p.content.glyphs.iter().any(|g| g.ch == '.'));
     }
@@ -598,7 +605,7 @@ mod tests {
             graphics.push(graphic([x, 238.0, x + 15.0, 253.0]));
             glyphs.extend(text(",", x + 16.0, 250.0));
         }
-        let p = prepare(&page(glyphs, graphics), &[]);
+        let p = prepare_page(&page(glyphs, graphics), &[]);
         assert_eq!(p.inline.len(), 4);
         let row = layout::lines(p.content.glyphs);
         assert_eq!(row.len(), 1, "{row:?}");

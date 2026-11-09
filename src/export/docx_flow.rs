@@ -218,8 +218,8 @@ impl Writer {
         }
         grid::remove(&mut flow_content, &grids);
         captions::prepare(&mut flow_content);
-        let equations = equations::prepare(&mut flow_content, fonts);
-        let mut prepared = artwork::prepare(&flow_content, fonts);
+        let mut equations = equations::prepare(&mut flow_content, fonts);
+        let mut prepared = artwork::prepare(&flow_content, fonts, std::mem::take(&mut equations.inline));
         for &rect in &equations.blocks {
             prepared.content.graphics.push(super::Graphic {rect,kind:super::GraphicKind::Image,object:None});
         }
@@ -324,7 +324,11 @@ impl Writer {
                     let mid = (f.column[0] + f.column[1]) / 2.0;
                     let col_w = (f.column[1] - f.column[0]).max(1.0);
                     let centre = (f.rect[0] + f.rect[2]) / 2.0;
-                    let align = if (centre - mid).abs() < 0.08 * col_w {
+                    // A formula set apart can be a group of its own whose
+                    // column starts at it: centred on the text's width too.
+                    let body = items.iter().filter_map(|i| match i { Item::Para(p) => Some([p.column[0], p.column[1]]), _ => None }).reduce(|a, b| [a[0].min(b[0]), a[1].max(b[1])]);
+                    let on_body = body.is_some_and(|b| fw < 0.8 * (b[1] - b[0]) && (centre - (b[0] + b[1]) / 2.0).abs() < 0.04 * (b[1] - b[0]));
+                    let align = if (centre - mid).abs() < 0.08 * col_w || on_body {
                         Align::Center
                     } else if (f.rect[2] - f.column[1]).abs() < 0.04 * col_w && f.rect[0] > f.column[0] + 0.1 * col_w {
                         Align::Right

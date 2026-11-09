@@ -44,11 +44,16 @@ pub fn untagged(base_font: &str) -> &str {
 pub fn style_of(base_font: &str, flags: i32) -> Style {
     let name = untagged(base_font).to_ascii_lowercase();
     let has = |s: &str| name.contains(s);
+    // TeX's Computer Modern (CMR10, CMMI10, CMSY10, CMBX12…) and the AMS
+    // symbol fonts are serif; CMSS sans, CMTT typewriter; CMMI and CMTI
+    // italic. As sans, the variables of a formula in prose came out Arial.
+    let tex = |p: &str| name.starts_with(p) && name[p.len()..].starts_with(|c: char| c.is_ascii_digit());
+    let computer_modern = ["cmr", "cmmi", "cmsy", "cmex", "cmbx", "cmti", "cmsl", "cmmib", "cmbsy", "cmcsc", "msam", "msbm", "eufm"].iter().any(|p| tex(p));
     Style {
-        serif: has("times") || has("georgia") || has("garamond") || has("roman") || has("book") || has("cambria") || has("petersburg") || (has("serif") && !has("sans")),
-        mono: has("mono") || has("courier") || has("consol") || flags & FLAG_FIXED_PITCH != 0,
-        bold: has("bold") || has("black") || has("heavy") || has("semibold") || has("demibold") || flags & FLAG_FORCE_BOLD != 0,
-        italic: has("italic") || has("oblique") || flags & FLAG_ITALIC != 0,
+        serif: computer_modern || has("times") || has("georgia") || has("garamond") || has("roman") || has("book") || has("cambria") || has("petersburg") || (has("serif") && !has("sans")),
+        mono: tex("cmtt") || has("mono") || has("courier") || has("consol") || flags & FLAG_FIXED_PITCH != 0,
+        bold: tex("cmbx") || tex("cmmib") || tex("cmbsy") || has("bold") || has("black") || has("heavy") || has("semibold") || has("demibold") || flags & FLAG_FORCE_BOLD != 0,
+        italic: tex("cmmi") || tex("cmmib") || tex("cmti") || has("italic") || has("oblique") || flags & FLAG_ITALIC != 0,
     }
 }
 
@@ -407,6 +412,11 @@ mod tests {
         assert_eq!(style_of("Arial,BoldItalic", 0), Style { bold: true, italic: true, ..plain });
         assert_eq!(style_of("TimesNewRomanPS-BoldMT", 0), Style { serif: true, bold: true, ..plain });
         assert_eq!(style_of("ABCDEF+PetersburgC", 0), Style { serif: true, ..plain });
+        assert_eq!(style_of("ABCDEF+CMMI10", 0), Style { serif: true, italic: true, ..plain });
+        assert_eq!(style_of("CMR12", 0), Style { serif: true, ..plain });
+        assert_eq!(style_of("CMBX10", 0), Style { serif: true, bold: true, ..plain });
+        assert_eq!(style_of("CMTT10", 0), Style { mono: true, ..plain });
+        assert_eq!(style_of("CMSS10", 0), plain);
         assert_eq!(style_of("PetersburgC-Italic", 0), Style { serif: true, italic: true, ..plain });
         assert_eq!(style_of("CourierNewPSMT", 0), Style { mono: true, ..plain });
         assert_eq!(style_of("Helvetica-Oblique", 0), Style { italic: true, ..plain });
