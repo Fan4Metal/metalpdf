@@ -47,6 +47,24 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo])
     let [w, h] = content.size;
     // Running heads are independent of body reading order. Preserve the
     // number, title, and rule together, outside the flowing paragraphs.
+    // Running feet likewise: a rule near the bottom with small text on and
+    // under it (a page number beside the rule). Left in the flow, they went
+    // over to a page of their own whenever the body came out longer.
+    for g in &original.graphics {
+        let r = g.rect;
+        if r[2] - r[0] > 0.6 * w && r[3] - r[1] <= 1.5 && r[1] > 0.8 * h {
+            let below: Vec<_> = original.glyphs.iter().filter(|g| (g.rect[1] + g.rect[3]) / 2.0 > r[1] - 1.0).collect();
+            let body_below = original.glyphs.iter().any(|g| g.rect[1] > r[3] && g.size > 1.25 * size);
+            if !below.is_empty() && !body_below && below.iter().all(|g| !g.invisible) {
+                let region = below.iter().map(|g| g.rect).fold([r[0] - 1.0, r[1] - 1.0, r[2] + 1.0, r[3] + 1.0], layout::union);
+                let region = [region[0] - 1.0, region[1] - 1.0, region[2] + 1.0, region[3] + 1.0];
+                if region[1] > 0.75 * h {
+                    content.glyphs.retain(|g| !inside(g, region, 0.0));
+                    decorations.push(region);
+                }
+            }
+        }
+    }
     for g in &original.graphics {
         let r = g.rect;
         if r[2] - r[0] > 0.6 * w && r[3] - r[1] <= 1.5 && r[1] < 0.2 * h {
@@ -494,6 +512,17 @@ mod tests {
         let p = prepare(&page(glyphs, vec![graphic([50.0, 50.0, 550.0, 51.0])]), &[]);
         assert_eq!(p.decorations.len(), 1);
         assert!(!p.whole_page);
+        assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
+    }
+
+    #[test]
+    fn the_running_foot_and_its_page_number_are_page_furniture() {
+        let mut glyphs = text("An ordinary editable body paragraph", 50.0, 90.0);
+        glyphs.extend(text("406", 20.0, 748.0));
+        glyphs.extend(text("Reference manual", 400.0, 752.0));
+        let p = prepare(&page(glyphs, vec![graphic([50.0, 742.0, 550.0, 742.5])]), &[]);
+        assert_eq!(p.decorations.len(), 1);
+        assert!(p.decorations[0][0] <= 20.0 && p.decorations[0][3] >= 754.0);
         assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
     }
 

@@ -527,6 +527,9 @@ impl Writer {
                                 prev = Prev { baseline: None, bottom: Some(if *c == 0 { above.unwrap_or(margins[1]) } else { seg_top.min(block.top()) }) };
                             }
                             column = *c;
+                            // A table is indented from its Word column: the
+                            // PDF's column it is in, in a section of columns.
+                            out.margin_left = if multi(seg) { seg.columns.get(*c).map_or(margins[0], |col| col[0]) } else { margins[0] };
                             block_xml(&mut content, block, &mut prev, col_w, new_column && *c > 0, &level, &mut out);
                         }
                         above = Some(seg.blocks.iter().map(|(_, b)| b.bottom()).fold(f32::NEG_INFINITY, f32::max));
@@ -751,6 +754,11 @@ struct Prev {
 /// break before it when asked.
 fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_break: bool, level: &dyn Fn(&DocPara) -> Option<usize>, out: &mut Out) {
     if let Block::Grid(table)=block {
+        if column_break {
+            // A table has no run to carry the break: a paragraph a point
+            // high carries it, and the table starts the next column.
+            x.push_str(r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:br w:type="column"/></w:r></w:p>"#);
+        }
         let before=(table.rect[1]-prev.bottom.unwrap_or(table.rect[1])).max(0.0);
         if before>1.0 {let _=write!(x,r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/></w:pPr></w:p>"#,tw(before));}
         forms::write(x,table,out.margin_left,out);

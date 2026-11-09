@@ -250,11 +250,22 @@ fn table(content: &PageContent, els: &[El]) -> Option<Table> {
         #[allow(clippy::needless_range_loop)] // `j` names the grid line `upright` looks at too
         for j in 1..cols {
             let (parted, rule) = upright(i, j);
-            let crossed = lines.iter().any(|l| l.baseline > ys[i] && l.baseline < ys[i + 1] && super::forms::runs_across(l, xs[j]));
-            if crossed && rule.is_some() {
-                // Text struck through by a rule: not a table's cell edge.
-                return None;
+            let in_band = |l: &&layout::Line| l.baseline > ys[i] && l.baseline < ys[i + 1];
+            if rule.is_some() {
+                // A drawn rule parts the cells even with their text close
+                // up to it; one through the letters is not a cell's edge.
+                if lines.iter().filter(in_band).flat_map(|l| &l.glyphs).any(|g| {
+                    // The middle half of the letter: loose boxes reach out.
+                    let quarter = (g.rect[2] - g.rect[0]) / 4.0;
+                    g.rect[0] + quarter < xs[j] && g.rect[2] - quarter > xs[j] && quarter > 0.4
+                }) {
+                    return None;
+                }
+                band.push((start, j));
+                start = j;
+                continue;
             }
+            let crossed = lines.iter().filter(in_band).any(|l| super::forms::runs_across(l, xs[j]));
             if parted && !crossed {
                 band.push((start, j));
                 start = j;
@@ -417,6 +428,20 @@ mod tests {
         p.glyphs.extend(text("A long line of text running across the middle", 52.0, 114.0));
         let t = detect(&p);
         assert_eq!(t[0].rows[0].cells.len(), 1);
+    }
+
+    #[test]
+    fn text_close_up_to_a_rule_keeps_its_cell_and_text_through_one_is_no_table() {
+        let mut p = grid();
+        // Up to the rule at 300 and on just after it, a word space apart.
+        p.glyphs.extend(text("Keyword", 263.0, 170.0));
+        p.glyphs.extend(text("Next", 302.0, 170.0));
+        let t = detect(&p);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].rows[2].cells.len(), 3);
+        // A word drawn through the rule.
+        p.glyphs.extend(text("Struck", 288.0, 130.0));
+        assert!(detect(&p).is_empty());
     }
 
     #[test]
