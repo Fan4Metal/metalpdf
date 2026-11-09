@@ -40,6 +40,7 @@ impl FontTable {
 struct ObjectInfo {
     font: u16,
     invisible: bool,
+    rouble: bool,
 }
 
 /// At most this many objects are looked at in a page's graphics, and
@@ -237,8 +238,12 @@ impl Page {
                     let name = String::from_utf8_lossy(&buf[..(len as usize).saturating_sub(1).min(buf.len())]).into_owned();
                     let weight = unsafe { (api.FPDFText_GetFontWeight)(text, index) };
                     let faux_bold = mode == sys::FPDF_TEXTRENDERMODE_FILL_STROKE;
-                    ObjectInfo { font: fonts.id(name, flags, weight, faux_bold), invisible: mode == sys::FPDF_TEXTRENDERMODE_INVISIBLE || mode == sys::FPDF_TEXTRENDERMODE_CLIP }
+                    let rouble = name.to_ascii_lowercase().contains("alsrubl");
+                    ObjectInfo { font: fonts.id(name, flags, weight, faux_bold), invisible: mode == sys::FPDF_TEXTRENDERMODE_INVISIBLE || mode == sys::FPDF_TEXTRENDERMODE_CLIP, rouble }
                 });
+                // ALS Rubl, the rouble sign before Unicode had one, draws it
+                // on letters' codes (its text reads `i`, `p`, `P`).
+                let ch = if info.rouble && !ch.is_whitespace() { '\u{20bd}' } else { ch };
                 let mut rect = sys::FS_RECTF::default();
                 if unsafe { (api.FPDFText_GetLooseCharBox)(text, index, &mut rect) } == 0 {
                     continue;
