@@ -284,7 +284,24 @@ impl Page {
                 let scale = self.char_matrix(text, index).map_or(1.0, |m| (m.c * m.c + m.d * m.d).sqrt());
                 let from_box = ((rect[3] - rect[1]) / 1.15).max(1.0);
                 let mut size = raw * scale;
-                if !size.is_finite() || size <= 0.1 || !(0.5..=2.0).contains(&(size / from_box)) {
+                // A font whose line is far taller than its glyphs (Cambria
+                // Math, for its large operators: a box five ems high) keeps
+                // its size when the glyph itself fits it, the box cut to a
+                // line's height: taken from the box, an ℝ in a line of 10 pt
+                // was 48 pt high, and its line took in the five lines over
+                // and under it.
+                let tall_line = size.is_finite() && size > 0.1 && size / from_box < 0.5 && {
+                    let (mut l, mut r, mut b, mut t) = (0f64, 0f64, 0f64, 0f64);
+                    let found = unsafe { (api.FPDFText_GetCharBox)(text, index, &mut l, &mut r, &mut b, &mut t) } != 0;
+                    found && {
+                        let tight = view_rect(l as f32, b as f32, r as f32, t as f32);
+                        tight[3] - tight[1] <= 1.3 * size
+                    }
+                };
+                if tall_line {
+                    rect[1] = rect[1].max(origin[1] - 0.95 * size);
+                    rect[3] = rect[3].min(origin[1] + 0.3 * size);
+                } else if !size.is_finite() || size <= 0.1 || !(0.5..=2.0).contains(&(size / from_box)) {
                     size = from_box;
                 }
                 let (mut r, mut g, mut b, mut a): (c_uint, c_uint, c_uint, c_uint) = (0, 0, 0, 255);
