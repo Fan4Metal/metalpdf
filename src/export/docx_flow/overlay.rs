@@ -59,9 +59,15 @@ impl Layers {
                 rect,
                 exact:Vec::new(),
                 lines: {
+                    // Each character once: a run drawn twice a hair apart
+                    // to look bold (both copies hidden from the picture)
+                    // came out doubled in the text box ("CC = α²", "QQ"),
+                    // as Word's font does not lay them over each other.
+                    let mut seen = std::collections::HashSet::new();
                     let mut glyphs = assigned
                         .iter()
                         .filter(|(g, region)| *region == i && hidden.contains(&g.source))
+                        .filter(|(g, _)| seen.insert((g.ch, (g.x / 1.5).round() as i32, (g.baseline / 1.5).round() as i32)))
                         .map(|(g, _)| (*g).clone())
                         .collect();
                     layout::join_accents(&mut glyphs);
