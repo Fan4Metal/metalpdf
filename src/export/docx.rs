@@ -573,9 +573,12 @@ impl TextBoxes {
         if lines.is_empty() {
             return;
         }
+        // Rows: the lines on one baseline, side by side, in whatever order
+        // they come (a register's bit numbers came between its other
+        // labels, and went down in steps of two). Top down.
         let mut rows: Vec<Vec<&layout::Line>> = Vec::new();
         for line in lines {
-            if let Some(row) = rows.last_mut().filter(|r| {
+            if let Some(row) = rows.iter_mut().find(|r| {
                 let size = r.iter().map(|l| l.size).fold(line.size, f32::max);
                 (r[0].baseline - line.baseline).abs() < 0.6 * size
                     && r.iter()
@@ -586,6 +589,7 @@ impl TextBoxes {
                 rows.push(vec![line]);
             }
         }
+        rows.sort_by(|a, b| a[0].baseline.total_cmp(&b[0].baseline));
         let baselines: Vec<_> = rows
             .iter()
             .map(|r| r.iter().map(|l| l.baseline).fold(f32::NEG_INFINITY, f32::max))

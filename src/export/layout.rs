@@ -1099,6 +1099,29 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
     let mut out: Vec<Segment> = Vec::new();
     let mut i = 0;
     while i < items.len() {
+        // A row of three or more one-line parts on one level, left to
+        // right (a register's bit numbers): one line. Not a table's head,
+        // whose parts' edges the rows under it share.
+        if let Item::Para(first) = &items[i]
+            && first.lines.len() == 1
+        {
+            let top = first.rect[1];
+            let mut j = i + 1;
+            while let Some(Item::Para(p)) = items.get(j)
+                && p.lines.len() == 1
+                && (p.rect[1] - top).abs() < 0.5 * first.size
+                && p.rect[0] >= items[j - 1].rect()[2] - 1.0
+            {
+                j += 1;
+            }
+            let edges: Vec<f32> = (i + 1..j).map(|k| columns[k][0]).collect();
+            let head = items[j..].iter().take(2 * (j - i)).any(|it| edges.iter().any(|e| (it.column()[0] - e).abs() < 1.0));
+            if j - i >= 3 && !head {
+                out.push(Segment { columns: (i..j).map(|k| columns[k]).collect(), items: (i..j).enumerate().collect(), table: None, line: true, side: false });
+                i = j;
+                continue;
+            }
+        }
         if !side(columns[i]) {
             let mut j = i + 1;
             while j < items.len() && !side(columns[j]) {
@@ -1204,13 +1227,30 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
         }
         i = j;
     }
-    // Neighbouring one-column segments are one.
+    // Neighbouring one-column segments are one; so are neighbouring rows
+    // of one line on one level, left to right (a register's bit numbers,
+    // which the cut gave as pairs, went down a line a pair).
+    let top = |s: &Segment| s.items.iter().map(|m| items[m.1].rect()[1]).fold(f32::INFINITY, f32::min);
+    let line_size = |s: &Segment| s.items.iter().find_map(|m| match &items[m.1] {
+        Item::Para(p) => Some(p.size),
+        Item::Figure(_) => None,
+    });
     let mut merged: Vec<Segment> = Vec::new();
     for s in out {
         match merged.last_mut() {
             Some(last) if last.columns.len() == 1 && s.columns.len() == 1 && last.table.is_none() && s.table.is_none() && !last.line && !s.line => {
                 last.columns[0] = [last.columns[0][0].min(s.columns[0][0]), last.columns[0][1].max(s.columns[0][1])];
                 last.items.extend(s.items);
+            }
+            Some(last)
+                if last.line
+                    && s.line
+                    && line_size(last).is_some_and(|size| (top(last) - top(&s)).abs() < 0.5 * size)
+                    && last.columns.last().is_some_and(|c| s.columns[0][0] >= c[1] - 1.0) =>
+            {
+                let offset = last.columns.len();
+                last.columns.extend(s.columns);
+                last.items.extend(s.items.into_iter().map(|(c, k)| (c + offset, k)));
             }
             _ => merged.push(s),
         }
@@ -1552,6 +1592,20 @@ mod tests {
         assert_eq!(segs[0].columns.len(), 1);
         assert_eq!(segs[1].columns.len(), 2);
         assert_eq!(segs[1].items.iter().map(|m| m.0).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn a_row_of_labels_is_one_line() {
+        let mut g = text("A paragraph above the register that runs across the whole width of the page", 40.0, 60.0);
+        for (k, s) in ["Bit 7", "6", "5", "4", "3", "2", "1", "Bit 0"].into_iter().enumerate() {
+            g.extend(text(s, 50.0 + 40.0 * k as f32, 100.0));
+        }
+        g.extend(text("A paragraph below the register that runs across the whole width of the page", 40.0, 140.0));
+        let items = analyse(&page(g), OPTS);
+        let segs = segments(&items, &[]);
+        let row: Vec<&Segment> = segs.iter().filter(|s| s.items.iter().any(|m| (items[m.1].rect()[1] - 92.0).abs() < 3.0)).collect();
+        assert_eq!(row.len(), 1, "{segs:?}");
+        assert_eq!(row[0].items.len(), 8, "{segs:?}");
     }
 
     #[test]
