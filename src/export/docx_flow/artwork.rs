@@ -428,6 +428,22 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
     // smaller than the text, against its box. Left out, they were lines
     // of the text, out of their places, read after the figure.
     let label_lines = layout::lines(content.glyphs.clone());
+    let numbered = |text: &str| {
+        text.starts_with('(') && text.ends_with(')') && text.chars().any(|c| c.is_ascii_digit())
+            && text.chars().all(|c| c.is_ascii_digit() || "().-–, ".contains(c) || c.is_ascii_alphabetic())
+            && text.chars().count() <= 10
+    };
+    let punctuation_only = |text: &str| text.chars().all(|c| ",.;:".contains(c));
+    // The characters of numbers and punctuation, which a figure may take
+    // with it (one number's line does not keep the next one out).
+    let loose: Vec<([f32; 4], char)> = label_lines
+        .iter()
+        .filter(|l| {
+            let text: String = l.glyphs.iter().map(|g| g.ch).collect();
+            numbered(&text) || punctuation_only(&text)
+        })
+        .flat_map(|l| l.glyphs.iter().map(|g| (g.rect, g.ch)))
+        .collect();
     for r in figures.iter_mut() {
         loop {
             let before = *r;
@@ -437,10 +453,19 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
                 let near = 0.8 * l.size.max(2.5);
                 let gap_x = (r[0] - l.rect[2]).max(l.rect[0] - r[2]);
                 let gap_y = (r[1] - l.rect[3]).max(l.rect[1] - r[3]);
-                if l.size < 0.9 * size && l.glyphs.len() <= 12 && !caption && gap_x <= near && gap_y <= near && (gap_x > 0.0 || gap_y > 0.0) && !l.glyphs.iter().any(|g| g.invisible) {
-                    // Not when the grown box takes in text of the body size.
+                let outside = (gap_x > 0.0 || gap_y > 0.0) && !l.glyphs.iter().any(|g| g.invisible);
+                let label = l.size < 0.9 * size && l.glyphs.len() <= 12 && !caption && gap_x <= near && gap_y <= near;
+                // An expression drawn in part (a sum's sign, a fraction's
+                // bar) is a figure: its closing punctuation against it, and
+                // its number at the right on its level, are its too.
+                let punctuation = punctuation_only(&text) && gap_x <= 0.5 * l.size && gap_y <= 0.0;
+                let number = numbered(&text) && l.rect[0] > 0.55 * w && gap_x > 0.0 && gap_y < -0.3 * l.size;
+                if outside && (label || punctuation || number) {
+                    // Not when the grown box takes in text of the body size
+                    // other than the line's own and other numbers'.
                     let u = layout::union(*r, l.rect);
-                    if !content.glyphs.iter().any(|g| g.size >= 0.9 * size && inside(g, u, 0.0) && !inside(g, *r, 1.0)) {
+                    let own = |g: &Glyph| l.glyphs.iter().any(|o| o.rect == g.rect && o.ch == g.ch) || loose.iter().any(|(rect, ch)| *rect == g.rect && *ch == g.ch);
+                    if !content.glyphs.iter().any(|g| g.size >= 0.9 * size && inside(g, u, 0.0) && !inside(g, *r, 1.0) && !own(g)) {
                         *r = u;
                     }
                 }
@@ -695,6 +720,24 @@ mod tests {
         let left: String = p.content.glyphs.iter().filter(|g| g.size < 9.0).map(|g| g.ch).collect();
         assert_eq!(left, "");
         assert!(p.content.glyphs.iter().any(|g| g.ch == 'F'));
+    }
+
+    #[test]
+    fn an_expression_drawn_in_part_takes_its_punctuation_and_number() {
+        let mut glyphs = Vec::new();
+        for k in 0..6 {
+            glyphs.extend(text("An ordinary editable body paragraph line above the figure", 50.0, 60.0 + 14.0 * k as f32));
+        }
+        glyphs.extend(text(";", 301.0, 220.0));
+        glyphs.extend(text("(12.8)", 500.0, 220.0));
+        glyphs.extend(text("(12.9)", 500.0, 260.0));
+        for k in 0..6 {
+            glyphs.extend(text("An ordinary editable body paragraph line below the figure", 50.0, 320.0 + 14.0 * k as f32));
+        }
+        let graphics = vec![graphic([200.0, 200.0, 260.0, 280.0]), graphic([250.0, 210.0, 300.0, 280.0])];
+        let p = prepare_page(&page(glyphs, graphics), &[]);
+        let left: String = p.content.glyphs.iter().filter(|g| g.baseline > 150.0 && g.baseline < 300.0).map(|g| g.ch).collect();
+        assert_eq!(left, "");
     }
 
     #[test]
