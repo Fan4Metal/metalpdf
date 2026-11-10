@@ -26,6 +26,63 @@ fn touches(a: [f32; 4], b: [f32; 4], pad: f32) -> bool {
     a[0] <= b[2] + pad && b[0] <= a[2] + pad && a[1] <= b[3] + pad && b[1] <= a[3] + pad
 }
 
+/// Whether a line is a page number, or holds one: at most 25 characters
+/// with a number in them (`945`, `– 3 –`, `REV. A 3`, `xvii`).
+fn page_number_like(line: &layout::Line) -> bool {
+    let text = line.text();
+    let chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    let roman = text.split_whitespace().any(|w| !w.is_empty() && w.len() <= 6 && w.chars().all(|c| matches!(c, 'i' | 'v' | 'x' | 'l' | 'c' | 'I' | 'V' | 'X' | 'L' | 'C')));
+    chars <= 25 && (text.chars().any(|c| c.is_ascii_digit()) || roman)
+}
+
+/// Running heads and feet with no rule: the lines at the very top or the
+/// very bottom of the page, apart from the text by more than a line's gap,
+/// with a page number among them. Page furniture, kept in their places
+/// like those with rules; left in the flow, a page number went over to a
+/// page of its own whenever the body came out a line longer in Word.
+fn furniture_without_rules(content: &mut PageContent, decorations: &mut Vec<[f32; 4]>, size: f32) {
+    let [w, h] = content.size;
+    // On the page: a page cropped smaller than its sheet has text outside.
+    let lines: Vec<layout::Line> = layout::lines(content.glyphs.iter().filter(|g| !g.invisible && g.rect[1] >= 0.0 && g.rect[3] <= h && g.rect[0] >= 0.0 && g.rect[2] <= w).cloned().collect());
+    // A page that is mostly one figure (screenshots with text over them)
+    // keeps its text with the figure.
+    if lines.len() < 3 || layout::labelled_figures(content).iter().any(|f| (f.rect[2] - f.rect[0]) * (f.rect[3] - f.rect[1]) > 0.5 * w * h) {
+        return;
+    }
+    for bottom in [true, false] {
+        // The band: from the edge-most line inwards, the lines close on
+        // one another (side by side, or a line under another).
+        let mut order: Vec<&layout::Line> = lines.iter().collect();
+        order.sort_by(|a, b| if bottom { b.rect[3].total_cmp(&a.rect[3]) } else { a.rect[1].total_cmp(&b.rect[1]) });
+        let mut band: Vec<&layout::Line> = vec![order[0]];
+        let mut region = order[0].rect;
+        for l in &order[1..] {
+            let apart = if bottom { region[1] - l.rect[3] } else { l.rect[1] - region[3] };
+            if apart > 0.6 * l.size {
+                break;
+            }
+            band.push(l);
+            region = layout::union(region, l.rect);
+        }
+        let in_place = if bottom { region[1] > 0.86 * h } else { region[3] < 0.14 * h };
+        let rest: Vec<&layout::Line> = lines.iter().filter(|l| !band.iter().any(|b| std::ptr::eq(*b, *l))).collect();
+        let gap = if bottom { region[1] - rest.iter().map(|l| l.rect[3]).fold(f32::MIN, f32::max) } else { rest.iter().map(|l| l.rect[1]).fold(f32::MAX, f32::min) - region[3] };
+        if !in_place
+            || rest.is_empty()
+            || gap < 1.2 * size
+            || band.len() > 3
+            || band.iter().any(|l| l.size > 1.25 * size)
+            || !band.iter().any(|l| page_number_like(l))
+            || decorations.iter().any(|d| touches(*d, region, 0.0))
+        {
+            continue;
+        }
+        let region = [(region[0] - 1.0).max(0.0), (region[1] - 1.0).max(0.0), (region[2] + 1.0).min(w), (region[3] + 1.0).min(h)];
+        content.glyphs.retain(|g| !inside(g, region, 0.0));
+        decorations.push(region);
+    }
+}
+
 pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo], extra: Vec<Inline>) -> Prepared {
     let mut content = original.clone();
     let mut decorations = Vec::new();
@@ -98,6 +155,7 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
     if whole_page {
         return Prepared { content, inline: Vec::new(), decorations: Vec::new(), whole_page };
     }
+    furniture_without_rules(&mut content, &mut decorations, size);
     // A vertical ellipsis is often three separate text objects. Three
     // ordinary Word paragraphs would multiply its height by the body pitch.
     let dots = layout::lines(content.glyphs.clone());
@@ -531,6 +589,27 @@ mod tests {
         assert_eq!(p.decorations.len(), 1);
         assert!(p.decorations[0][0] <= 20.0 && p.decorations[0][3] >= 754.0);
         assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
+    }
+
+    #[test]
+    fn a_page_number_with_no_rule_is_page_furniture() {
+        let body = |glyphs: &mut Vec<Glyph>| {
+            for k in 0..20 {
+                glyphs.extend(text("An ordinary editable body paragraph line", 50.0, 100.0 + 14.0 * k as f32));
+            }
+        };
+        let mut glyphs = Vec::new();
+        body(&mut glyphs);
+        glyphs.extend(text("945", 290.0, 770.0));
+        let p = prepare_page(&page(glyphs, Vec::new()), &[]);
+        assert_eq!(p.decorations.len(), 1);
+        assert!(!p.content.glyphs.iter().any(|g| g.baseline == 770.0));
+        // A last short line with no number in it is the text's.
+        let mut glyphs = Vec::new();
+        body(&mut glyphs);
+        glyphs.extend(text("See the appendix.", 50.0, 770.0));
+        let p = prepare_page(&page(glyphs, Vec::new()), &[]);
+        assert!(p.decorations.is_empty());
     }
 
     #[test]
