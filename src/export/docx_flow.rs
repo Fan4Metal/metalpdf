@@ -383,7 +383,8 @@ impl Writer {
         let (items, drop_caps) = flowing_items(&prepared.content);
         let (items, floating) = wrapping::prepare(items, &prepared.content, &grids.iter().map(|t| t.rect).collect::<Vec<_>>());
         let mut render: Option<Option<crate::pdfium::Bitmap>> = None;
-        let decoration_regions: Vec<_> = prepared.decorations.iter().chain(form.iter().flat_map(|f| &f.decorations)).copied().collect();
+        // Word refuses a file with a drawing of no size or less.
+        let decoration_regions: Vec<_> = prepared.decorations.iter().chain(form.iter().flat_map(|f| &f.decorations)).copied().filter(|r| r[2] - r[0] >= 0.5 && r[3] - r[1] >= 0.5).collect();
         let regions = decoration_regions.iter().copied().chain(items.iter().filter_map(|item| match item {
             Item::Figure(f) if !form.as_ref().is_some_and(|form| same_rect(form.table.rect, f.rect)) && !grids.iter().any(|t| same_rect(t.rect, f.rect)) => Some(f.rect),
             _ => None,

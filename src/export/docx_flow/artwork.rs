@@ -83,6 +83,58 @@ fn furniture_without_rules(content: &mut PageContent, decorations: &mut Vec<[f32
     }
 }
 
+/// Artwork on a page's edge: a band or a bar that runs off the sheet at
+/// the top, the bottom or a side (a brochure's swoosh under its web
+/// address, a thumb index down the side), wholly in the outer fifth of
+/// the page and at least a quarter of it long. Page furniture, kept in
+/// its place with the text over it; in the flow it was a figure, and
+/// went over to a Word page of its own behind a page that came out full.
+fn edge_art(content: &mut PageContent, decorations: &mut Vec<[f32; 4]>) {
+    let [w, h] = content.size;
+    // Each with its edge: a bar down the side and a band along the bottom
+    // that meet in a corner are two (one box round both took the page).
+    let mut regions: Vec<(usize, [f32; 4])> = Vec::new();
+    for g in &content.graphics {
+        let r = g.rect;
+        let (gw, gh) = (r[2] - r[0], r[3] - r[1]);
+        // At the edge, or a few points short of it (a sheet cropped
+        // inside its bleed).
+        let near = 6.0;
+        let edge = [
+            r[3] >= h - near && r[1] > 0.8 * h && gw >= 0.25 * w,
+            r[1] <= near && r[3] < 0.2 * h && gw >= 0.25 * w,
+            r[0] <= near && r[2] < 0.2 * w && gh >= 0.25 * h,
+            r[2] >= w - near && r[0] > 0.8 * w && gh >= 0.25 * h,
+        ]
+        .iter()
+        .position(|&e| e);
+        // On the page: what lies wholly off it is not drawn.
+        let r = [r[0].max(0.0), r[1].max(0.0), r[2].min(w), r[3].min(h)];
+        if let Some(edge) = edge
+            && r[2] - r[0] >= 1.0
+            && r[3] - r[1] >= 1.0
+        {
+            match regions.iter_mut().find(|(e, q)| *e == edge && touches(*q, r, 0.0)) {
+                Some((_, q)) => *q = layout::union(*q, r),
+                None => regions.push((edge, r)),
+            }
+        }
+    }
+    let earlier = decorations.len();
+    for (_, region) in regions {
+        if decorations[..earlier].iter().any(|d| touches(*d, region, 0.0)) {
+            continue;
+        }
+        content.glyphs.retain(|g| !inside(g, region, 0.0));
+        // What lies in it, the parts off the sheet aside.
+        content.graphics.retain(|g| {
+            let r = [g.rect[0].max(0.0), g.rect[1].max(0.0), g.rect[2].min(w), g.rect[3].min(h)];
+            !(r[0] >= region[0] - 0.5 && r[1] >= region[1] - 0.5 && r[2] <= region[2] + 0.5 && r[3] <= region[3] + 0.5)
+        });
+        decorations.push(region);
+    }
+}
+
 pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo], extra: Vec<Inline>) -> Prepared {
     let mut content = original.clone();
     let mut decorations = Vec::new();
@@ -155,6 +207,7 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
     if whole_page {
         return Prepared { content, inline: Vec::new(), decorations: Vec::new(), whole_page };
     }
+    edge_art(&mut content, &mut decorations);
     furniture_without_rules(&mut content, &mut decorations, size);
     // A vertical ellipsis is often three separate text objects. Three
     // ordinary Word paragraphs would multiply its height by the body pitch.
@@ -367,6 +420,33 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
                     changed = true;
                     break 'pairs;
                 }
+            }
+        }
+    }
+    // Labels just outside the drawing (a schematic's IN and OUT beside its
+    // terminals, a part's name over its symbol) are the figure's: short,
+    // smaller than the text, against its box. Left out, they were lines
+    // of the text, out of their places, read after the figure.
+    let label_lines = layout::lines(content.glyphs.clone());
+    for r in figures.iter_mut() {
+        loop {
+            let before = *r;
+            for l in &label_lines {
+                let text: String = l.glyphs.iter().map(|g| g.ch).collect();
+                let caption = ["Fig", "Рис", "Table", "Табл"].iter().any(|p| text.starts_with(p));
+                let near = 0.8 * l.size.max(2.5);
+                let gap_x = (r[0] - l.rect[2]).max(l.rect[0] - r[2]);
+                let gap_y = (r[1] - l.rect[3]).max(l.rect[1] - r[3]);
+                if l.size < 0.9 * size && l.glyphs.len() <= 12 && !caption && gap_x <= near && gap_y <= near && (gap_x > 0.0 || gap_y > 0.0) && !l.glyphs.iter().any(|g| g.invisible) {
+                    // Not when the grown box takes in text of the body size.
+                    let u = layout::union(*r, l.rect);
+                    if !content.glyphs.iter().any(|g| g.size >= 0.9 * size && inside(g, u, 0.0) && !inside(g, *r, 1.0)) {
+                        *r = u;
+                    }
+                }
+            }
+            if *r == before {
+                break;
             }
         }
     }
@@ -589,6 +669,62 @@ mod tests {
         assert_eq!(p.decorations.len(), 1);
         assert!(p.decorations[0][0] <= 20.0 && p.decorations[0][3] >= 754.0);
         assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
+    }
+
+    #[test]
+    fn a_schematic_s_labels_outside_its_lines_are_its_own() {
+        let small = |s: &str, x: f32, baseline: f32| -> Vec<Glyph> {
+            text(s, x, baseline).into_iter().enumerate().map(|(i, mut g)| {
+                let at = x + 3.5 * i as f32;
+                g.rect = [at, baseline - 5.0, at + 3.5, baseline + 1.5];
+                g.x = at;
+                g.size = 6.0;
+                g
+            }).collect()
+        };
+        let mut glyphs = Vec::new();
+        for k in 0..6 {
+            glyphs.extend(text("An ordinary editable body paragraph line above the figure", 50.0, 60.0 + 14.0 * k as f32));
+        }
+        glyphs.extend(small("IN", 190.0, 252.0));
+        glyphs.extend(small("OUT", 304.0, 252.0));
+        glyphs.extend(small("C1", 240.0, 196.0));
+        glyphs.extend(text("Figure 1: A filter", 200.0, 330.0));
+        let graphics = vec![graphic([198.0, 200.0, 260.0, 300.0]), graphic([250.0, 240.0, 302.0, 300.0])];
+        let p = prepare_page(&page(glyphs, graphics), &[]);
+        let left: String = p.content.glyphs.iter().filter(|g| g.size < 9.0).map(|g| g.ch).collect();
+        assert_eq!(left, "");
+        assert!(p.content.glyphs.iter().any(|g| g.ch == 'F'));
+    }
+
+    #[test]
+    fn artwork_off_the_sheet_s_edge_is_page_furniture() {
+        let mut glyphs = Vec::new();
+        for k in 0..20 {
+            glyphs.extend(text("An ordinary editable body paragraph line", 50.0, 100.0 + 14.0 * k as f32));
+        }
+        glyphs.extend(text("www.example.com", 150.0, 785.0));
+        glyphs.extend(text("295", 570.0, 760.0));
+        // A swoosh under the address, a bar down the side, a figure.
+        // And one wholly off the sheet, under it.
+        let graphics = vec![graphic([20.0, 760.0, 450.0, 810.0]), graphic([560.0, 10.0, 600.0, 790.0]), graphic([50.0, 420.0, 300.0, 600.0]), graphic([20.0, 805.0, 400.0, 830.0])];
+        let p = prepare_page(&page(glyphs, graphics), &[]);
+        assert_eq!(p.decorations.len(), 2);
+        assert!(p.decorations.iter().all(|d| d[2] > d[0] && d[3] > d[1]));
+        assert!(!p.content.glyphs.iter().any(|g| g.baseline >= 760.0));
+        assert_eq!(p.content.graphics.len(), 1);
+        // A bar down the side meeting a band along the bottom: two, the
+        // text between them left in the flow.
+        let mut glyphs = Vec::new();
+        for k in 0..20 {
+            glyphs.extend(text("An ordinary editable body paragraph line", 80.0, 100.0 + 14.0 * k as f32));
+        }
+        let p = prepare_page(&page(glyphs, vec![graphic([3.0, 4.0, 64.0, 797.0]), graphic([52.0, 754.0, 492.0, 803.0])]), &[]);
+        assert_eq!(p.decorations.len(), 2);
+        assert_eq!(p.content.glyphs.len(), 20 * 40);
+        // Small marks at an edge are not a band.
+        let p = prepare_page(&page(text("An ordinary editable body paragraph line", 50.0, 100.0), vec![graphic([20.0, 790.0, 60.0, 800.0])]), &[]);
+        assert!(p.decorations.is_empty());
     }
 
     #[test]
