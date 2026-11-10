@@ -246,7 +246,7 @@ impl Page {
                     let mut buf = vec![0u8; len.max(1) as usize];
                     let len = unsafe { (api.FPDFText_GetFontInfo)(text, index, buf.as_mut_ptr().cast(), buf.len() as c_ulong, &mut flags) };
                     let name = String::from_utf8_lossy(&buf[..(len as usize).saturating_sub(1).min(buf.len())]).into_owned();
-                    let weight = unsafe { (api.FPDFText_GetFontWeight)(text, index) };
+                    let weight = if crate::fonts::names_weight(&name) { -1 } else { unsafe { (api.FPDFText_GetFontWeight)(text, index) } };
                     let faux_bold = mode == sys::FPDF_TEXTRENDERMODE_FILL_STROKE;
                     let rouble = name.to_ascii_lowercase().contains("alsrubl");
                     ObjectInfo { font: fonts.id(name, flags, weight, faux_bold), invisible: mode == sys::FPDF_TEXTRENDERMODE_INVISIBLE || mode == sys::FPDF_TEXTRENDERMODE_CLIP, rouble }

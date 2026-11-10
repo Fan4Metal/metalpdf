@@ -57,6 +57,21 @@ pub fn style_of(base_font: &str, flags: i32) -> Style {
     }
 }
 
+/// Whether `base_font` says its own weight: a style after the family
+/// (`TimesNewRomanPSMT-Regular`, `Arial,Bold`), a weight's word in it,
+/// or a TeX font, whose letters say it (CMR, CMBX). The weight PDFium
+/// reports is not the descriptor's `FontWeight` but made up from its
+/// `StemV`, which some producers write at random (a regular Times at
+/// 728, an Arial Bold at 395: a book's whole text came out bold in
+/// Word); a name that says the weight is believed before it.
+pub fn names_weight(base_font: &str) -> bool {
+    let name = untagged(base_font);
+    let styled = name.split_once(['-', ',']).is_some_and(|(family, style)| !family.is_empty() && style.starts_with(|c: char| c.is_ascii_alphabetic()));
+    let lower = name.to_ascii_lowercase();
+    let words = ["regular", "bold", "light", "medium", "black", "heavy", "thin", "semibold", "demi", "book", "normal"];
+    styled || words.iter().any(|w| lower.contains(w)) || ["cmr", "cmmi", "cmsy", "cmex", "cmss", "cmtt", "cmti", "cmsl", "cmcsc"].iter().any(|p| lower.starts_with(p) && lower[p.len()..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// The file in `%WINDIR%\Fonts` of the generic family for `style`.
 pub fn file_of(style: Style) -> &'static str {
     let table: [&str; 4] = if style.mono {
@@ -424,6 +439,16 @@ mod tests {
         assert_eq!(style_of("Foo", FLAG_ITALIC | FLAG_FORCE_BOLD), Style { bold: true, italic: true, ..plain });
         // The serif flag alone does not make a serif.
         assert_eq!(style_of("Calibri", 2), plain);
+    }
+
+    #[test]
+    fn a_name_that_says_the_weight_is_believed() {
+        for name in ["JCGXAO+TimesNewRomanPSMT-Regular", "TimesNewRomanPSMT-Regular~4e", "ArialMT-Bold", "Arial,Italic", "SegoeUI-Light", "Segoe UI Semibold", "CMR10", "ABCDEF+CMMI7", "CMSY10"] {
+            assert!(names_weight(name), "{name}");
+        }
+        for name in ["F12", "ABCDEF+ArialMT", "NewtonC*1", "LCIRCLE10", "PetersburgC", "-Foo"] {
+            assert!(!names_weight(name), "{name}");
+        }
     }
 
     #[test]
