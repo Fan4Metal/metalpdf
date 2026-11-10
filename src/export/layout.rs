@@ -377,7 +377,12 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
             let (left, right) = if goes_after { (&*line, &piece) } else { (&piece, &*line) };
             let page_number = right.glyphs.len() <= 6 && right.glyphs.iter().all(|g| g.ch.is_ascii_digit() || matches!(g.ch, 'i' | 'v' | 'x' | 'l' | 'c'));
             let contents = ends_with_leader(left) && page_number || left.glyphs.len() <= 8 && left.glyphs.last().is_some_and(|g| g.ch == '.' || g.ch.is_ascii_digit()) && ends_with_leader_before_number(right);
-            if gap > (if artwork_marker { 2.5 } else if contents { 4.0 } else { 1.0 }) * s || apart_in_size(line.size, piece.size, gap) && (line.baseline - piece.baseline).abs() < 0.12 * s {
+            // A leader's dots, each a piece of its own when spaced wide,
+            // join the line whatever size their small boxes give them (a
+            // TeX contents page: a dot was 4 pt in a line of 10, and every
+            // one was a line of its own).
+            let dots = piece.glyphs.iter().all(|g| matches!(g.ch, '.' | '·' | '…'));
+            if gap > (if artwork_marker { 2.5 } else if contents { 4.0 } else { 1.0 }) * s || !dots && apart_in_size(line.size, piece.size, gap) && (line.baseline - piece.baseline).abs() < 0.12 * s {
                 continue;
             }
             let mut glyphs = piece.glyphs;
@@ -1592,6 +1597,21 @@ mod tests {
         assert_eq!(segs[0].columns.len(), 1);
         assert_eq!(segs[1].columns.len(), 2);
         assert_eq!(segs[1].items.iter().map(|m| m.0).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn a_leader_of_small_dots_spaced_wide_is_in_its_line() {
+        let mut g = text("12.4. The role of dead ends", 95.0, 140.0);
+        for k in 0..24 {
+            let x = 225.0 + 11.0 * k as f32;
+            let mut dot = text(".", x, 140.0);
+            dot[0].rect = [x, 135.4, x + 4.0, 140.0];
+            dot[0].size = 4.0;
+            g.extend(dot);
+        }
+        g.extend(text("222", 492.0, 140.0));
+        let found = lines(g);
+        assert_eq!(found.len(), 1, "{:?}", found.iter().map(|l| l.text()).collect::<Vec<_>>());
     }
 
     #[test]
