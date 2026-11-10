@@ -146,6 +146,9 @@ impl Page {
             corners.iter().fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY], |r, &[x, y]| [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)])
         };
         let mut content = PageContent { size, turns, ..Default::default() };
+        // A C1 control's ink, by its index, held until its font is known
+        // not to be a legacy code page's (`legacy_cyrillic`).
+        let mut held: Vec<(i32, Graphic)> = Vec::new();
         if let Some(text) = self.text_page() {
             let count = unsafe { (api.FPDFText_CountChars)(text) }.max(0);
             let mut objects: HashMap<sys::FPDF_PAGEOBJECT, ObjectInfo> = HashMap::new();
@@ -176,7 +179,7 @@ impl Page {
                 if ch == '\r' || ch == '\n' {
                     continue;
                 }
-                if ch.is_whitespace() {
+                if ch.is_whitespace() && !maybe_legacy(ch) {
                     // Symbol fonts sometimes map a visible bullet to U+0020.
                     // Keep its ink as artwork instead of discarding it as a
                     // word separator (or emitting a wrong Unicode symbol).
@@ -211,17 +214,24 @@ impl Page {
                     if unsafe {(api.FPDFText_IsGenerated)(text,index)}==0 && self.horizontal(text,index,&to_view) {
                         let (mut l,mut r,mut b,mut t)=(0.0,0.0,0.0,0.0);
                         if unsafe {(api.FPDFText_GetCharBox)(text,index,&mut l,&mut r,&mut b,&mut t)}!=0 && r-l>0.1 && t-b>0.1 {
-                            content.graphics.push(Graphic {rect:view_rect(l as f32,b as f32,r as f32,t as f32),kind:GraphicKind::Image,object:None});
+                            let art = Graphic {rect:view_rect(l as f32,b as f32,r as f32,t as f32),kind:GraphicKind::Image,object:None};
+                            if maybe_legacy(ch) {
+                                held.push((index, art));
+                            } else {
+                                content.graphics.push(art);
+                            }
                         }
                     }
-                    continue;
+                    if !maybe_legacy(ch) {
+                        continue;
+                    }
                 }
                 // PDFium reads a hyphen at a line's end as U+0002: a soft
                 // hyphen here, dropped where the lines are joined.
                 let ch = match ch {
                     '\u{2}' => '\u{ad}',
                     '\u{fffd}' | '\u{fffe}' | '\u{ffff}' => continue,
-                    c if c.is_control() => continue,
+                    c if c.is_control() && !maybe_legacy(c) => continue,
                     c => c,
                 };
                 if !self.horizontal(text, index, &to_view) {
@@ -292,6 +302,11 @@ impl Page {
                     invisible: info.invisible,
                 });
             }
+        }
+        legacy_cyrillic(&mut content.glyphs);
+        if !held.is_empty() {
+            let read: std::collections::HashSet<i32> = content.glyphs.iter().map(|g| g.source).collect();
+            content.graphics.extend(held.into_iter().filter(|(index, _)| !read.contains(index)).map(|(_, art)| art));
         }
         // The graphics, form XObjects looked into with their matrices.
         let count = unsafe { (api.FPDFPage_CountObjects)(self.handle.get()) }.max(0);
@@ -605,8 +620,123 @@ impl Page {
     }
 }
 
+/// The upper halves of the code pages Russian was set in before Unicode,
+/// bytes 0x80 to 0xFF.
+const CODE_PAGES: [&str; 3] = [
+    // Windows-1251
+    "ЂЃ‚ѓ„…†‡€‰Љ‹ЊЌЋЏђ‘’“”•–—\u{98}™љ›њќћџ\u{a0}ЎўЈ¤Ґ¦§Ё©Є«¬\u{ad}®Ї°±Ііґµ¶·ё№є»јЅѕїАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя",
+    // DOS 866 (TeX's Russian fonts of the 1990s, dvips' bitmap fonts)
+    "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмноп░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀рстуфхцчшщъыьэюяЁёЄєЇїЎў°∙·√№¤■\u{a0}",
+    // KOI8-R
+    "─│┌┐└┘├┤┬┴┼▀▄█▌▐░▒▓⌠■∙√≈≤≥\u{a0}⌡°²·÷═║╒ё╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡Ё╢╣╤╥╦╧╨╩╪╫╬©юабцдефгхийклмнопярстужвьызшэщчъЮАБЦДЕФГХИЙКЛМНОПЯРСТУЖВЬЫЗШЭЩЧЪ",
+];
+
+/// The byte a character was read from when a font with no map to Unicode
+/// was read as Latin-1 or Windows-1252.
+fn byte_of(c: char) -> Option<u8> {
+    const CP1252: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+    ];
+    let u = c as u32;
+    if (0x80..=0xff).contains(&u) {
+        return Some(u as u8);
+    }
+    CP1252.iter().position(|&x| x == c).map(|i| 0x80 + i as u8)
+}
+
+/// Whether PDFium's character may be a byte of a legacy code page that
+/// the extraction keeps until `legacy_cyrillic` has looked at its font:
+/// the C1 controls and the no-break space are letters in some.
+pub(super) fn maybe_legacy(c: char) -> bool {
+    ('\u{80}'..='\u{a0}').contains(&c)
+}
+
+/// Russian text in a font with no map to Unicode, its letters on the
+/// codes of a legacy code page: PDFium reads them as Latin-1, `Óâàæàåìûå`
+/// for `Уважаемые` (Windows-1251, fonts printer drivers made of TrueType
+/// ones), `­®ў ` for `нова` (DOS 866, TeX's bitmap fonts). A font whose
+/// letters are mostly bytes over 0x7F is such a one (in a language written
+/// in Latin letters, accented ones are a few in a hundred); its bytes are
+/// read in the code page they make the most Russian of (by the share of the
+/// commonest letters). What is left of `maybe_legacy` goes: a control, and
+/// a no-break space as the space before the next character.
+fn legacy_cyrillic(glyphs: &mut Vec<crate::export::Glyph>) {
+    const COMMON: &str = "оеаинтсрвлкмдпуОЕАИНТСРВЛКМДПУ";
+    // Each font's letters, and its bytes over 0x7F.
+    let mut fonts: std::collections::HashMap<u16, (usize, Vec<u8>)> = std::collections::HashMap::new();
+    for g in glyphs.iter() {
+        let f = fonts.entry(g.font).or_default();
+        match byte_of(g.ch) {
+            Some(b) => {
+                f.0 += 1;
+                f.1.push(b);
+            }
+            _ if g.ch.is_alphabetic() => f.0 += 1,
+            _ => {}
+        }
+    }
+    let mut pages: std::collections::HashMap<u16, Vec<char>> = std::collections::HashMap::new();
+    for (font, (letters, high)) in fonts {
+        // Text uses many letters: a font of accents and daggers (`ˆ`, `†`,
+        // Windows-1252's 0x88 and 0x86, `И` and `Ж` in DOS 866) is not one.
+        let distinct: std::collections::HashSet<u8> = high.iter().copied().collect();
+        if high.len() < 8 || 2 * high.len() <= letters || distinct.len() < 6 {
+            continue;
+        }
+        let best = CODE_PAGES
+            .iter()
+            .map(|page| {
+                let table: Vec<char> = page.chars().collect();
+                let common = high.iter().filter(|&&b| COMMON.contains(table[(b - 0x80) as usize])).count();
+                let cyrillic = high.iter().filter(|&&b| ('\u{400}'..='\u{4ff}').contains(&table[(b - 0x80) as usize])).count();
+                (common, cyrillic, table)
+            })
+            .max_by_key(|(common, _, _)| *common);
+        // Mostly Cyrillic once read so (Type 3 fonts with no names are one
+        // font here, symbols and all).
+        if let Some((common, cyrillic, table)) = best
+            && common * 20 >= high.len() * 7
+            && cyrillic * 5 >= high.len() * 3
+        {
+            pages.insert(font, table);
+        }
+    }
+    for g in glyphs.iter_mut() {
+        if let (Some(table), Some(b)) = (pages.get(&g.font), byte_of(g.ch)) {
+            g.ch = table[(b - 0x80) as usize];
+        }
+    }
+    let mut space = false;
+    glyphs.retain_mut(|g| {
+        if maybe_legacy(g.ch) {
+            space |= g.ch == '\u{a0}' || g.space_before;
+            return false;
+        }
+        g.space_before |= std::mem::take(&mut space);
+        true
+    });
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn russian_on_latin_codes_is_read_as_windows_1251() {
+        let glyph = |ch: char, font: u16| crate::export::Glyph { source: 0, ch, rect: [0.0; 4], x: 0.0, baseline: 0.0, size: 10.0, font, color: [0; 3], space_before: false, invisible: false };
+        // "Уважаемые читатели! №1543" (Windows-1251) and "Снова задача узлов"
+        // (DOS 866) as PDFium reads them, a C1 control and a no-break space
+        // among them; and French with a no-break space.
+        let mut glyphs: Vec<_> = "Óâàæàåìûå ÷èòàòåëè! ¹1543".chars().map(|c| glyph(c, 0)).collect();
+        glyphs.extend("\u{91}\u{ad}\u{ae}\u{a2}\u{a0} §\u{a0}¤\u{a0}ç\u{a0} ã§«®¢".chars().map(|c| glyph(c, 2)));
+        glyphs.extend("Le café est très bon à\u{a0}Noël".chars().map(|c| glyph(c, 1)));
+        // A TeX font of accents and daggers: `И` and `Ж` in DOS 866.
+        glyphs.extend("ˆ†ˆ†ˆ†ˆ†ˆ†".chars().map(|c| glyph(c, 3)));
+        super::legacy_cyrillic(&mut glyphs);
+        let text: String = glyphs.iter().map(|g| g.ch).collect();
+        assert_eq!(text, "Уважаемые читатели! №1543Снова задача узловLe café est très bon àNoëlˆ†ˆ†ˆ†ˆ†ˆ†");
+        let french: Vec<_> = glyphs.iter().filter(|g| g.font == 1).collect();
+        assert!(french.last().is_some_and(|g| !g.space_before) && french.iter().rev().nth(3).is_some_and(|g| g.space_before));
+    }
+
     #[test]
     #[ignore = "needs vendor/pdfium"]
     fn visible_legacy_control_glyphs_remain_artwork() {
