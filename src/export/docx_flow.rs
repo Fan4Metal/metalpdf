@@ -32,6 +32,7 @@ mod overlay;
 mod wrapping;
 mod captions;
 mod equations;
+mod marks;
 mod scan;
 
 struct InlinePicture {
@@ -339,6 +340,9 @@ impl Writer {
     }
 
     pub fn page(&mut self, _api: &'static Api, page: &Page, content: &PageContent, fonts: &[FontInfo], _faces: &mut crate::fonts::Fonts) -> Result<(), String> {
+        let mut unmarked = content.clone();
+        marks::remove(&mut unmarked);
+        let content = &unmarked;
         let [w, h] = content.size;
         let scale = super::PICTURE_DPI / 72.0;
         let mut form = forms::detect(content, fonts);
