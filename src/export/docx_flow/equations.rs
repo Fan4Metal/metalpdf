@@ -327,18 +327,37 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
     // into different paragraphs. Include all intersecting rows and artwork
     // before merging so no part can be painted twice or cropped away.
     let rows=layout::lines(content.glyphs.clone());
+    // Level with a block and in its column, or a little apart from it: in
+    // two columns, the other column's text level with an expression is
+    // not its. Taken in, it grew the block across both columns from the
+    // top of the expression to the bottom of the page, and the cut read
+    // the columns' lines in turn below it.
+    let mut sizes:Vec<f32>=content.glyphs.iter().filter(|g|!g.invisible).map(|g|g.size).collect();
+    sizes.sort_by(f32::total_cmp);
+    let em=sizes.get(sizes.len()/2).copied().unwrap_or(10.0);
+    // In one column, whatever is level with it (an "and" between two
+    // expressions, at the margin, is theirs).
+    let full:Vec<&layout::Line>=rows.iter().filter(|l|l.glyphs.len()>=20).collect();
+    let extent=full.iter().map(|l|l.rect).reduce(layout::union).map_or(0.0,|r|r[2]-r[0]);
+    let mut widths:Vec<f32>=full.iter().map(|l|l.rect[2]-l.rect[0]).collect();
+    widths.sort_by(f32::total_cmp);
+    let columns=widths.get(widths.len()/2).is_some_and(|&w|w<0.6*extent);
+    let near=|r:Rect,o:Rect| {
+        let gap=(o[0]-r[2]).max(r[0]-o[2]);
+        r[1]<=o[3] && r[3]>=o[1] && (!columns || gap<=0.0 || gap<4.0*em && o[2]-o[0]<10.0*em)
+    };
     loop {
         let previous=blocks.clone();
         for r in &mut blocks {
             for item in &items {
                 let row=item.rect();
-                if r[1]<=row[3] && r[3]>=row[1] {*r=layout::union(*r,row);}
+                if near(*r,row) {*r=layout::union(*r,row);}
             }
             for row in rows.iter().filter(|row| !in_prose(row)) {
                 let t=row.text();
                 let number=t.starts_with('(') && t.ends_with(')') && t.chars().any(|c|c.is_ascii_digit())
                     && t.chars().all(|c|c.is_ascii_digit()||matches!(c,'('|')'|'.'|' '));
-                if r[1]<=row.rect[3] && r[3]>=row.rect[1]
+                if near(*r,row.rect)
                     || number && row.rect[0]>0.55*content.size[0] && row.rect[1]<=r[3]+1.5*row.size && row.rect[3]>=r[1]-row.size {*r=layout::union(*r,row.rect);}
             }
             for g in &content.graphics {
@@ -373,6 +392,22 @@ mod tests {
         s.chars().enumerate().map(|(i,ch)|Glyph {source:-1,ch,rect:[x+5.0*i as f32,y-8.0,x+5.0*(i+1) as f32,y+2.0],x:x+5.0*i as f32,baseline:y,size:10.0,font,color:[0;3],space_before:false,invisible:false}).collect()
     }
     fn fonts()->Vec<FontInfo> {vec![FontInfo {name:"Times New Roman".into(),..Default::default()},FontInfo {name:"ABCDEF+CMMI10".into(),..Default::default()}]}
+    #[test]
+    fn an_expression_in_one_column_leaves_the_other_alone() {
+        let mut glyphs=Vec::new();
+        for k in 0..14 {
+            let y=200.0+12.0*k as f32;
+            glyphs.extend(text("Ordinary prose of the left column goes on",50.0,y,0));
+            if k!=5 {glyphs.extend(text("Ordinary prose of the right column goes",305.0,y,0));}
+        }
+        glyphs.extend(text("αβ=γδ+",380.0,260.0,1));
+        let mut p=PageContent {size:[600.0,800.0],glyphs,turns:0,..Default::default()};
+        let prepared=prepare(&mut p,&fonts());
+        assert!(!prepared.blocks.is_empty());
+        assert!(prepared.blocks.iter().all(|r|r[0]>=300.0),"{:?}",prepared.blocks);
+        assert_eq!(p.glyphs.iter().filter(|g|g.rect[0]<300.0).count(),14*41);
+    }
+
     #[test]
     fn a_fraction_and_its_lower_number_share_one_composition() {
         let mut glyphs=text("Ordinary prose above the expression.",50.0,80.0,0);

@@ -361,7 +361,13 @@ impl Writer {
         grid::remove(&mut flow_content, &grids);
         captions::prepare(&mut flow_content);
         let mut equations = equations::prepare(&mut flow_content, fonts);
+        if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
+            eprintln!("equations: blocks {:?}, inline {:?}", equations.blocks, equations.inline.iter().map(|i| i.rect).collect::<Vec<_>>());
+        }
         let mut prepared = artwork::prepare(&flow_content, fonts, std::mem::take(&mut equations.inline));
+        if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
+            eprintln!("artwork: decorations {:?}, images {:?}", prepared.decorations, prepared.content.graphics.iter().filter(|g| g.kind == super::GraphicKind::Image && g.object.is_none()).map(|g| g.rect).collect::<Vec<_>>());
+        }
         for &rect in &equations.blocks {
             prepared.content.graphics.push(super::Graphic {rect,kind:super::GraphicKind::Image,object:None});
         }
