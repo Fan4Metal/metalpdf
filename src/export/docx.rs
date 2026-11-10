@@ -631,7 +631,11 @@ impl TextBoxes {
             .iter()
             .map(|r| r.iter().map(|l| l.baseline).fold(f32::NEG_INFINITY, f32::max))
             .collect();
-        let (cx, cy) = (emu(rect[2] - rect[0]), emu(rect[3] - rect[1]));
+        // The story is wider than its region on the right: a row ending
+        // at the region's edge (a running head's page number after its
+        // tab) went down to a second line, cut off by the exact height,
+        // whatever `wrap="none"` says. The box has no fill.
+        let (cx, cy) = (emu(1.1 * (rect[2] - rect[0]) + 12.0), emu(rect[3] - rect[1]));
         let _ = write!(
             x,
             r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>"#
