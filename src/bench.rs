@@ -27,7 +27,7 @@ pub fn run(path: &Path) -> i32 {
     let api = match pdfium::init() {
         Ok(api) => api,
         Err(e) => {
-            eprintln!("cannot load PDFium: {e}");
+            esay!("cannot load PDFium: {e}");
             return 1;
         }
     };
@@ -37,7 +37,7 @@ pub fn run(path: &Path) -> i32 {
     let doc = match pdfium::Document::open(api, path, None) {
         Ok(doc) => doc,
         Err(e) => {
-            eprintln!("cannot open {}: {e}", path.display());
+            esay!("cannot open {}: {e}", path.display());
             return 1;
         }
     };
@@ -46,14 +46,14 @@ pub fn run(path: &Path) -> i32 {
 
     let t = Instant::now();
     let Some(first) = doc.page_size(0) else {
-        eprintln!("the first page has no size");
+        esay!("the first page has no size");
         return 1;
     };
     mark(&format!("size of page 1: {:.0} x {:.0} pt", first[0], first[1]), t);
 
     let t = Instant::now();
     let Some(page) = doc.load_page(0) else {
-        eprintln!("cannot load page 1");
+        esay!("cannot load page 1");
         return 1;
     };
     mark("page 1 loaded", t);
@@ -62,7 +62,7 @@ pub fn run(path: &Path) -> i32 {
     let height = (first[1] * scale).round() as u32;
     let t = Instant::now();
     let Some(mut bitmap) = Bitmap::new(api, SCREEN_WIDTH, height) else {
-        eprintln!("cannot make a {SCREEN_WIDTH} x {height} bitmap");
+        esay!("cannot make a {SCREEN_WIDTH} x {height} bitmap");
         return 1;
     };
     let at = Placement { start_x: 0, start_y: 0, size_x: SCREEN_WIDTH as i32, size_y: height as i32, rotate: 0 };

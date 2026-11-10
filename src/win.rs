@@ -28,6 +28,15 @@ pub fn error_box(title: &str, text: &str) {
     }
 }
 
+/// A command line mode runs (it attached to the console): a panic says so
+/// on stderr and the process ends, with no message box waiting for a click
+/// that a script or a batch would never give.
+static COMMAND_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn command_line() -> bool {
+    COMMAND_LINE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The release build is a GUI-subsystem program with no console of its own,
 /// so text printed by the command line modes (`--version`, `--help`,
 /// `--bench`) would be lost when started from cmd or PowerShell. Attach to
@@ -37,6 +46,7 @@ pub fn error_box(title: &str, text: &str) {
 pub fn attach_parent_console() {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    COMMAND_LINE.store(true, std::sync::atomic::Ordering::Relaxed);
     if std::io::stdout().as_raw_handle().is_null() {
         unsafe {
             AttachConsole(ATTACH_PARENT_PROCESS);

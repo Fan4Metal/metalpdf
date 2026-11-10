@@ -605,9 +605,9 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
         });
     }
     if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
-        eprintln!("ART font={font} size={size} figures={figures:?}");
+        esay!("ART font={font} size={size} figures={figures:?}");
         for (i, art) in inline.iter().enumerate() {
-            eprintln!("INLINE {i} {:?} baseline={}", art.rect, art.baseline);
+            esay!("INLINE {i} {:?} baseline={}", art.rect, art.baseline);
         }
     }
     Prepared { content, inline, decorations, whole_page: false }

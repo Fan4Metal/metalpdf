@@ -356,17 +356,17 @@ impl Writer {
         // of the figures, back in below as a stand-in each takes the place of.
         let grids = grid::detect(&flow_content);
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
-            eprintln!("grid: {} rules, tables {:?}", flow_content.rules.len(), grids.iter().map(|t| (t.rect, t.rows.len(), t.edges.len() - 1)).collect::<Vec<_>>());
+            esay!("grid: {} rules, tables {:?}", flow_content.rules.len(), grids.iter().map(|t| (t.rect, t.rows.len(), t.edges.len() - 1)).collect::<Vec<_>>());
         }
         grid::remove(&mut flow_content, &grids);
         captions::prepare(&mut flow_content);
         let mut equations = equations::prepare(&mut flow_content, fonts);
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
-            eprintln!("equations: blocks {:?}, inline {:?}", equations.blocks, equations.inline.iter().map(|i| i.rect).collect::<Vec<_>>());
+            esay!("equations: blocks {:?}, inline {:?}", equations.blocks, equations.inline.iter().map(|i| i.rect).collect::<Vec<_>>());
         }
         let mut prepared = artwork::prepare(&flow_content, fonts, std::mem::take(&mut equations.inline));
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
-            eprintln!("artwork: decorations {:?}, images {:?}", prepared.decorations, prepared.content.graphics.iter().filter(|g| g.kind == super::GraphicKind::Image && g.object.is_none()).map(|g| g.rect).collect::<Vec<_>>());
+            esay!("artwork: decorations {:?}, images {:?}", prepared.decorations, prepared.content.graphics.iter().filter(|g| g.kind == super::GraphicKind::Image && g.object.is_none()).map(|g| g.rect).collect::<Vec<_>>());
         }
         for &rect in &equations.blocks {
             prepared.content.graphics.push(super::Graphic {rect,kind:super::GraphicKind::Image,object:None});

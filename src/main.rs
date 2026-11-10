@@ -362,11 +362,17 @@ pub fn embedded_icon(size: u32) -> &'static [u8] {
 /// The release build aborts on a panic and has no console, so the window
 /// would vanish without a word: say what happened in a message box. The
 /// default hook still prints it (seen in a debug build). A stack overflow
-/// is not a panic and still ends the process silently.
+/// is not a panic and still ends the process silently. A command line mode
+/// (`--export` in a script) prints it alone: a message box waited for a
+/// click no one would give.
 fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default(info);
+        if win::command_line() {
+            esay!("{APP_NAME} stopped because of an internal error: {info}");
+            return;
+        }
         let text = tr!(
             format!("{APP_NAME} stopped because of an internal error.\n\n{info}"),
             format!("{APP_NAME} остановлен из-за внутренней ошибки.\n\n{info}")

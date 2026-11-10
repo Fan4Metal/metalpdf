@@ -224,7 +224,7 @@ impl Writer {
         .collect();
         let hidden = page.hide_selected_text(&selected);
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
-            eprintln!(
+            esay!(
                 "docx: {} glyphs, {} selected, {} hidden",
                 content.glyphs.len(),
                 selected.len(),

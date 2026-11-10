@@ -285,7 +285,7 @@ pub fn analyse(content: &PageContent, opts: Options) -> Vec<Item> {
     if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
         for (i, r) in rects.iter().enumerate() {
             let what = lines.get(i).map_or("[figure]".to_owned(), |l| l.text().chars().take(50).collect());
-            eprintln!("{i:3} [{:6.1} {:6.1} {:6.1} {:6.1}] {what}", r[0], r[1], r[2], r[3]);
+            esay!("{i:3} [{:6.1} {:6.1} {:6.1} {:6.1}] {what}", r[0], r[1], r[2], r[3]);
         }
     }
     let mut groups = Vec::new();
@@ -293,7 +293,7 @@ pub fn analyse(content: &PageContent, opts: Options) -> Vec<Item> {
     cut(&all, &rects, [bounds[0], bounds[2]], gutter, &mut groups);
     if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
         for g in &groups {
-            eprintln!("group {:?}: {:?}", g.column, g.members);
+            esay!("group {:?}: {:?}", g.column, g.members);
         }
     }
     let mut items = Vec::new();
