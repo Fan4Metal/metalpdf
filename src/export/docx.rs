@@ -482,7 +482,7 @@ fn line_xml(x: &mut String, l: &Line, heading: Option<usize>, out: &mut Out) {
 
 fn line_runs_xml(x: &mut String, l: &Line, fonts: &[FontInfo], lookup: &mut crate::fonts::Fonts, faces: &mut Faces, measurements: &mut Measurements, id: &mut usize) {
     for run in &l.runs {
-        let face = faces.get(run.font, fonts, lookup);
+        let face = faces.get(run.font, fonts, lookup).for_text(&run.text).into_owned();
         *id += 1;
         let run_id = *id;
         let f = esc(&face.family);

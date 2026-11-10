@@ -304,6 +304,7 @@ impl Page {
             }
         }
         legacy_cyrillic(&mut content.glyphs);
+        mac_roman_punctuation(&mut content.glyphs);
         if !held.is_empty() {
             let read: std::collections::HashSet<i32> = content.glyphs.iter().map(|g| g.source).collect();
             content.graphics.extend(held.into_iter().filter(|(index, _)| !read.contains(index)).map(|(_, art)| art));
@@ -717,8 +718,71 @@ fn legacy_cyrillic(glyphs: &mut Vec<crate::export::Glyph>) {
     });
 }
 
+/// Mac Roman's characters for the bytes that are punctuation in
+/// Windows-1252, and that punctuation.
+const MAC_PUNCTUATION: [(char, char); 17] = [
+    ('Ç', '‚'), ('Ñ', '„'), ('Ö', '…'), ('â', '‰'), ('ã', '‹'), ('ë', '‘'), ('í', '’'), ('ì', '“'), ('î', '”'),
+    ('ï', '•'), ('ñ', '–'), ('ó', '—'), ('ô', '™'), ('õ', '›'), ('´', '«'), ('ª', '»'), ('∞', '°'),
+];
+
+/// Punctuation PDFium read in Mac Roman. Word writes the characters of a
+/// font it has no codes for in a second subset (`TimesNewRoman+1`), a
+/// TrueType font with no encoding and no Unicode map whose codes are
+/// Windows-1252's; PDFium reads them through the font's Mac Roman table,
+/// and every dash of a Russian report came out `ñ`, a quote `ì`. A font
+/// whose accented Latin letters are all such stand-ins, none inside a
+/// word (`’` aside, an apostrophe), has them read as Windows-1252: Spanish
+/// has `ñ` and `ó` inside words and `é` beside them.
+fn mac_roman_punctuation(glyphs: &mut [crate::export::Glyph]) {
+    let stand_in = |c: char| MAC_PUNCTUATION.iter().find(|(m, _)| *m == c).map(|(_, p)| *p);
+    let latin = |c: char| ('\u{c0}'..'\u{250}').contains(&c) && c.is_alphabetic();
+    let joined = |a: &crate::export::Glyph, b: &crate::export::Glyph| !b.space_before && (a.baseline - b.baseline).abs() < 0.5 * a.size.max(b.size);
+    // Per font: whether it qualifies, and whether it has a stand-in that
+    // says so (an apostrophe's or a quote's alone do not).
+    let mut fonts: std::collections::HashMap<u16, (bool, bool)> = std::collections::HashMap::new();
+    for (i, g) in glyphs.iter().enumerate() {
+        let f = fonts.entry(g.font).or_insert((true, false));
+        if stand_in(g.ch).is_some() {
+            let before = i > 0 && joined(&glyphs[i - 1], g) && glyphs[i - 1].ch.is_alphabetic();
+            let after = glyphs.get(i + 1).is_some_and(|n| joined(g, n) && n.ch.is_alphabetic());
+            if before && after && g.ch != 'í' {
+                f.0 = false;
+            }
+            f.1 |= !matches!(g.ch, 'í' | 'ë');
+        } else if latin(g.ch) {
+            f.0 = false;
+        }
+    }
+    for g in glyphs.iter_mut() {
+        if fonts.get(&g.font).is_some_and(|&(ok, sure)| ok && sure)
+            && let Some(p) = stand_in(g.ch)
+        {
+            g.ch = p;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn punctuation_read_in_mac_roman_is_put_right() {
+        let glyph = |ch: char, font: u16, space_before: bool| crate::export::Glyph { source: 0, ch, rect: [0.0; 4], x: 0.0, baseline: 0.0, size: 10.0, font, color: [0; 3], space_before, invisible: false };
+        let line = |text: &str, font: u16| {
+            let mut space = false;
+            text.chars().filter_map(|c| if c == ' ' { space = true; None } else { Some(glyph(c, font, std::mem::take(&mut space))) }).collect::<Vec<_>>()
+        };
+        // A Word report's second subset: a dash and a quote between words.
+        let mut glyphs = line("Q ñ f ìx", 0);
+        // Spanish: `ñ` and `ó` inside words, `é` beside them.
+        glyphs.extend(line("señor canción ó café", 1));
+        // A font with `ó` alone and no other accented letter stays too
+        // when it is inside a word once.
+        glyphs.extend(line("Dónde ó", 2));
+        super::mac_roman_punctuation(&mut glyphs);
+        let text: String = glyphs.iter().map(|g| g.ch).collect();
+        assert_eq!(text, "Q–f“xseñorcanciónócaféDóndeó");
+    }
+
     #[test]
     fn russian_on_latin_codes_is_read_as_windows_1251() {
         let glyph = |ch: char, font: u16| crate::export::Glyph { source: 0, ch, rect: [0.0; 4], x: 0.0, baseline: 0.0, size: 10.0, font, color: [0; 3], space_before: false, invisible: false };

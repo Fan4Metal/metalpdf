@@ -167,6 +167,24 @@ pub struct Face {
     pub italic: bool,
 }
 
+impl Face {
+    /// The face to set `text` in. Word draws a symbol-encoded font
+    /// (Symbol, Wingdings) by its codes at U+F020–U+F0FF; text in it that
+    /// is Unicode, as PDFium reads a Symbol font's Greek and mathematics,
+    /// came out other glyphs (`β` as `®`, `Ψ` as `¬`). Such a run is set
+    /// in Times New Roman, which has Symbol's Greek and operators, or in
+    /// Segoe UI Symbol for the dingbat fonts.
+    pub fn for_text(&self, text: &str) -> std::borrow::Cow<'_, Face> {
+        let lower = self.family.to_ascii_lowercase();
+        let symbolic = ["symbol", "wingdings", "wingdings 2", "wingdings 3", "webdings", "mt extra", "marlett"].contains(&lower.as_str());
+        if !symbolic || text.chars().any(|c| ('\u{f000}'..='\u{f0ff}').contains(&c)) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let family = if lower == "symbol" { "Times New Roman" } else { "Segoe UI Symbol" };
+        std::borrow::Cow::Owned(Face { family: family.into(), ..self.clone() })
+    }
+}
+
 /// Pictures are kept at most this fine (PowerPoint's page picture, a
 /// figure, a picture of the PDF's scaled down to it).
 pub const PICTURE_DPI: f32 = 200.0;
@@ -405,6 +423,19 @@ fn run_as(input: &Path, output: &Path, password: Option<&str>, format: Format) -
 #[cfg(test)]
 mod tests {
     use super::zip::read_entry;
+
+    #[test]
+    fn unicode_in_a_symbol_font_is_set_in_a_unicode_font() {
+        let symbol = super::Face { family: "Symbol".into(), bold: false, italic: true };
+        assert_eq!(symbol.for_text("β = ∂").family, "Times New Roman");
+        assert!(symbol.for_text("β").italic);
+        // Word's own symbol codes stay in the font.
+        assert_eq!(symbol.for_text("\u{f0b7}").family, "Symbol");
+        let wingdings = super::Face { family: "Wingdings".into(), bold: false, italic: false };
+        assert_eq!(wingdings.for_text("✓").family, "Segoe UI Symbol");
+        let times = super::Face { family: "Times New Roman".into(), bold: false, italic: false };
+        assert_eq!(times.for_text("β").family, "Times New Roman");
+    }
 
     #[test]
     fn a_docx_filename_keeps_the_chosen_word_layout() {

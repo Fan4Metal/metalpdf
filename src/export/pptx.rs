@@ -216,8 +216,8 @@ impl Writer {
             }
             tree.push_str("</a:pPr>");
             for span in layout::spans(p, " ") {
-                let face = self.faces.get(span.font, fonts, lookup);
-                let sz = (pt(span.size) * 100.0).round().clamp(100.0, 400_000.0) as i64;
+                let face = self.faces.get(span.font, fonts, lookup).for_text(&span.text).into_owned();
+                let sz =(pt(span.size) * 100.0).round().clamp(100.0, 400_000.0) as i64;
                 let _ = write!(tree, r#"<a:r><a:rPr sz="{sz}""#);
                 if face.bold {
                     tree.push_str(r#" b="1""#);

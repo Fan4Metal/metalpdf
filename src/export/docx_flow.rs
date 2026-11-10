@@ -1360,6 +1360,7 @@ fn run_xml(x: &mut String, span: &Span, face: &super::Face, position: i64) {
 }
 
 fn scaled_run_xml(x: &mut String, span: &Span, face: &super::Face, position: i64, scale: i64) {
+    let face = face.for_text(&span.text);
     let mut rpr = String::from("<w:rPr>");
     let f = esc(&face.family);
     let _ = write!(rpr, r#"<w:rFonts w:ascii="{f}" w:hAnsi="{f}" w:eastAsia="{f}" w:cs="{f}"/>"#);
