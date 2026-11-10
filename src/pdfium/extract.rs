@@ -149,6 +149,9 @@ impl Page {
         // A C1 control's ink, by its index, held until its font is known
         // not to be a legacy code page's (`legacy_cyrillic`).
         let mut held: Vec<(i32, Graphic)> = Vec::new();
+        // The glyphs sized by their own boxes, with their font and the size
+        // the font and the matrix gave (`boxed_sizes`).
+        let mut boxed: Vec<(usize, u16, i32)> = Vec::new();
         if let Some(text) = self.text_page() {
             let count = unsafe { (api.FPDFText_CountChars)(text) }.max(0);
             let mut objects: HashMap<sys::FPDF_PAGEOBJECT, ObjectInfo> = HashMap::new();
@@ -302,6 +305,8 @@ impl Page {
                     rect[1] = rect[1].max(origin[1] - 0.95 * size);
                     rect[3] = rect[3].min(origin[1] + 0.3 * size);
                 } else if !size.is_finite() || size <= 0.1 || !(0.5..=2.0).contains(&(size / from_box)) {
+                    let given = if size.is_finite() { (size * 1000.0).round() as i32 } else { i32::MIN };
+                    boxed.push((content.glyphs.len(), info.font, given));
                     size = from_box;
                 }
                 let (mut r, mut g, mut b, mut a): (c_uint, c_uint, c_uint, c_uint) = (0, 0, 0, 255);
@@ -320,6 +325,7 @@ impl Page {
                 });
             }
         }
+        boxed_sizes(&mut content.glyphs, &boxed);
         legacy_cyrillic(&mut content.glyphs);
         mac_roman_punctuation(&mut content.glyphs);
         if !held.is_empty() {
@@ -738,6 +744,41 @@ fn legacy_cyrillic(glyphs: &mut Vec<crate::export::Glyph>) {
     });
 }
 
+/// One size for the glyphs that took theirs from their own boxes, a font
+/// and a given size at a time. A Type 3 font (TeX's bitmap fonts, dvips)
+/// gives a size that means nothing and boxes that are each glyph's own
+/// ink: a full stop was 4 pt, a capital 13.5 and a small letter 9 in one
+/// line of 11, the stops and commas came out specks in Word and the lines
+/// broke where the sizes changed. The size is the letters' reach: how far
+/// the tall ones go over the baseline and the long ones under it (the
+/// ninetieth percentiles of the letters' and digits' boxes), as nine
+/// tenths of an em; one letter's own box made the text six tenths of its
+/// size.
+fn boxed_sizes(glyphs: &mut [crate::export::Glyph], boxed: &[(usize, u16, i32)]) {
+    let mut groups: std::collections::HashMap<(u16, i32), Vec<usize>> = std::collections::HashMap::new();
+    for &(at, font, given) in boxed {
+        groups.entry((font, given)).or_default().push(at);
+    }
+    let p90 = |mut v: Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v[(v.len() * 9 / 10).min(v.len() - 1)]
+    };
+    for members in groups.values() {
+        let letters: Vec<&crate::export::Glyph> = members.iter().map(|&k| &glyphs[k]).filter(|g| g.ch.is_alphanumeric()).collect();
+        if letters.len() < 3 {
+            continue;
+        }
+        let over = p90(letters.iter().map(|g| (g.baseline - g.rect[1]).max(0.0)).collect());
+        let under = p90(letters.iter().map(|g| (g.rect[3] - g.baseline).max(0.0)).collect());
+        let size = (over + under) / 0.9;
+        if size > 1.0 {
+            for &k in members {
+                glyphs[k].size = size;
+            }
+        }
+    }
+}
+
 /// Mac Roman's characters for the bytes that are punctuation in
 /// Windows-1252, and that punctuation.
 const MAC_PUNCTUATION: [(char, char); 17] = [
@@ -784,6 +825,22 @@ fn mac_roman_punctuation(glyphs: &mut [crate::export::Glyph]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn glyphs_sized_by_their_ink_take_their_tall_letters_size() {
+        // A glyph's ink over and under the baseline at 100, its size from
+        // that box (`/ 1.15`).
+        let glyph = |ch: char, over: f32, under: f32| crate::export::Glyph { source: 0, ch, rect: [0.0, 100.0 - over, 1.0, 100.0 + under], x: 0.0, baseline: 100.0, size: (over + under) / 1.15, font: 0, color: [0; 3], space_before: false, invisible: false };
+        // "Роль, мёртвых." in a bitmap font of 10 pt: the stop and the
+        // comma specks, the capital and the ё tall, the р long.
+        let mut glyphs: Vec<_> = [('Р', 7.0, 0.0), ('о', 4.5, 0.0), ('л', 4.5, 0.0), ('ь', 4.5, 0.0), (',', 1.0, 2.0), ('м', 4.5, 0.0), ('ё', 7.0, 0.0), ('р', 4.5, 2.0), ('т', 4.5, 0.0), ('в', 4.5, 0.0), ('ы', 4.5, 0.0), ('у', 4.5, 2.0), ('.', 1.0, 0.0)].into_iter().map(|(c, o, u)| glyph(c, o, u)).collect();
+        glyphs.push(glyph('x', 4.5, 0.0));
+        let boxed: Vec<(usize, u16, i32)> = (0..13).map(|k| (k, 0, 1000)).collect();
+        super::boxed_sizes(&mut glyphs, &boxed);
+        assert!(glyphs[..13].iter().all(|g| (g.size - 10.0).abs() < 0.01), "{:?}", glyphs.iter().map(|g| g.size).collect::<Vec<_>>());
+        // A glyph sized by its font is left alone.
+        assert_eq!(glyphs[13].size, 4.5 / 1.15);
+    }
+
     #[test]
     fn punctuation_read_in_mac_roman_is_put_right() {
         let glyph = |ch: char, font: u16, space_before: bool| crate::export::Glyph { source: 0, ch, rect: [0.0; 4], x: 0.0, baseline: 0.0, size: 10.0, font, color: [0; 3], space_before, invisible: false };
