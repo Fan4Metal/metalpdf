@@ -640,7 +640,10 @@ impl Page {
 
 /// The upper halves of the code pages Russian was set in before Unicode,
 /// bytes 0x80 to 0xFF.
-const CODE_PAGES: [&str; 3] = [
+const CODE_PAGES: [&str; 4] = [
+    // MIK, as DOS 866 with the small letters together at 0xA0-0xBF (fonts
+    // of early Russian TeX: in DOS 866, "Роль мёртвых" was "Рол╝ ме░▓в╗╡")
+    "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя└┴┬├─┼╣║╚╔╩╦╠═╬┐░▒▓│┤№§╗╝┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■\u{a0}",
     // Windows-1251
     "ЂЃ‚ѓ„…†‡€‰Љ‹ЊЌЋЏђ‘’“”•–—\u{98}™љ›њќћџ\u{a0}ЎўЈ¤Ґ¦§Ё©Є«¬\u{ad}®Ї°±Ііґµ¶·ё№є»јЅѕїАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя",
     // DOS 866 (TeX's Russian fonts of the 1990s, dvips' bitmap fonts)
@@ -811,9 +814,11 @@ mod tests {
         glyphs.extend("Le café est très bon à\u{a0}Noël".chars().map(|c| glyph(c, 1)));
         // A TeX font of accents and daggers: `И` and `Ж` in DOS 866.
         glyphs.extend("ˆ†ˆ†ˆ†ˆ†ˆ†".chars().map(|c| glyph(c, 3)));
+        // "Роль мертвых концов" in MIK: DOS 866 would read box drawing.
+        glyphs.extend("\u{90}\u{ae}\u{ab}\u{bc} \u{ac}\u{a5}\u{b0}\u{b2}\u{a2}\u{bb}\u{b5} \u{aa}\u{ae}\u{ad}\u{b6}\u{ae}\u{a2}".chars().map(|c| glyph(c, 4)));
         super::legacy_cyrillic(&mut glyphs);
         let text: String = glyphs.iter().map(|g| g.ch).collect();
-        assert_eq!(text, "Уважаемые читатели! №1543Снова задача узловLe café est très bon àNoëlˆ†ˆ†ˆ†ˆ†ˆ†");
+        assert_eq!(text, "Уважаемые читатели! №1543Снова задача узловLe café est très bon àNoëlˆ†ˆ†ˆ†ˆ†ˆ†Роль мертвых концов");
         let french: Vec<_> = glyphs.iter().filter(|g| g.font == 1).collect();
         assert!(french.last().is_some_and(|g| !g.space_before) && french.iter().rev().nth(3).is_some_and(|g| g.space_before));
     }
