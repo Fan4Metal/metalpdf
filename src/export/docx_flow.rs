@@ -32,6 +32,7 @@ mod overlay;
 mod wrapping;
 mod captions;
 mod equations;
+mod scan;
 
 struct InlinePicture {
     marker: char,
@@ -342,6 +343,10 @@ impl Writer {
         let scale = super::PICTURE_DPI / 72.0;
         let mut form = forms::detect(content, fonts);
         let mut flow_content = content.clone();
+        // A scan's figures, out of the page-wide picture its text lies over.
+        for rect in scan::figures(page, content) {
+            flow_content.graphics.push(super::Graphic { rect, kind: super::GraphicKind::Image, object: None });
+        }
         if let Some(form) = &form {forms::remove(&mut flow_content,form);}
         // Ruled and shaded tables, as Word's tables: out of what flows and
         // of the figures, back in below as a stand-in each takes the place of.
