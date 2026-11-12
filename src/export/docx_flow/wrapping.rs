@@ -85,6 +85,13 @@ fn candidate(items: &[Item], f: &Figure) -> Option<Picture> {
             if q.lines.len() >= 3 && q.rect[2] > r[0]+size && q.rect[0] < r[2]-size
                 && q.rect[2]-q.rect[0] < 0.7*width
                 && q.rect[1] >= r[3]-size && (q.size-size).abs() < 0.15*size)) { continue; }
+        // Likewise prose above it in its lane alone: a figure at the foot
+        // of the right column (the left column's text beside it made the
+        // whole page one column, the figure floating in it).
+        if items.iter().any(|item| matches!(item, Item::Para(q)
+            if q.lines.len() >= 3 && q.rect[0] > r[0]-size && q.rect[2] < r[2]+size
+                && q.rect[2]-q.rect[0] < 0.7*width
+                && q.rect[3] <= r[1]+size && (q.size-size).abs() < 0.15*size)) { continue; }
         choices.push(Picture { figure: f.clone(), anchor, side, gap, column, baseline: p.lines[0].baseline });
     }
     // Two independent text lanes beside one object are ambiguous.
@@ -288,6 +295,12 @@ mod tests {
         let mut items = page(true);
         items.pop();
         items.insert(1,Item::Para(prose(50.0,170.0,164.0,1,[50.0,170.0])));
+        assert!(prepare(items).1.is_empty());
+        // A figure at the foot of the right column, its column's text over it.
+        let mut items = page(false);
+        items.pop();
+        assert_eq!(prepare(items.clone()).1.len(),1);
+        items.insert(0,Item::Para(prose(330.0,450.0,30.0,4,[330.0,450.0])));
         assert!(prepare(items).1.is_empty());
     }
 
