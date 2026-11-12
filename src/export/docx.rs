@@ -638,7 +638,10 @@ impl TextBoxes {
         // The story is wider than its region on the right: a row ending
         // at the region's edge (a running head's page number after its
         // tab) went down to a second line, cut off by the exact height,
-        // whatever `wrap="none"` says. The box has no fill.
+        // whatever `wrap="none"` said. With `none` Word broke a line well
+        // short of the box's width, wherever the box ended (Apex's feet
+        // lost their last word and the page number under it); with
+        // `square` it breaks at the box's edge alone. The box has no fill.
         let (cx, cy) = (emu(1.1 * (rect[2] - rect[0]) + 12.0), emu(rect[3] - rect[1]));
         let _ = write!(
             x,
@@ -692,7 +695,7 @@ impl TextBoxes {
             x.push_str("</w:p>");
             cursor += before as f32 / 20.0 + height as f32 / 20.0;
         }
-        x.push_str(r#"</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vertOverflow="overflow" horzOverflow="overflow" wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp>"#);
+        x.push_str(r#"</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vertOverflow="overflow" horzOverflow="overflow" wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp>"#);
         for line in separate {
             self.write(x, line, rect, fonts, lookup);
         }
