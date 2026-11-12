@@ -9,7 +9,49 @@ struct Entry {
     page_end: usize,
 }
 
+fn leader_dots(c: char) -> usize {
+    match c {
+        '.' | '\u{2024}' | '·' => 1,
+        '\u{2025}' => 2,
+        '…' => 3,
+        _ => 0,
+    }
+}
+
+/// A contents line, or a value after a leader that is no page number (a
+/// data sheet's ratings, `Supply Voltage ........ 12V`: joined into one
+/// justified paragraph, the lines wrapped and the block came out half as
+/// high again). The leader is a long one, ten dots: a short one before
+/// what is no page number may be anything.
 fn entry(line: &layout::Line) -> Option<Entry> {
+    page_entry(line).or_else(|| value_entry(line))
+}
+
+fn value_entry(line: &layout::Line) -> Option<Entry> {
+    let glyphs = &line.glyphs;
+    if glyphs.iter().all(|g| g.invisible) {
+        return None;
+    }
+    let end = glyphs.iter().rposition(|g| !g.ch.is_whitespace())? + 1;
+    let mut i = 0;
+    while i < end {
+        if leader_dots(glyphs[i].ch) == 0 {
+            i += 1;
+            continue;
+        }
+        let (start, mut count) = (i, 0);
+        while i < end && (leader_dots(glyphs[i].ch) > 0 || glyphs[i].ch.is_whitespace()) {
+            count += leader_dots(glyphs[i].ch);
+            i += 1;
+        }
+        if count >= 10 && i < end && end - i <= 40 && glyphs[..start].iter().any(|g| g.ch.is_alphabetic()) {
+            return Some(Entry { label_end: start, page_start: i, page_end: end });
+        }
+    }
+    None
+}
+
+fn page_entry(line: &layout::Line) -> Option<Entry> {
     let glyphs = &line.glyphs;
     // OCR over a scan supplies approximate fonts and leader positions.
     // Keep its existing paragraph interpretation rather than reflowing
@@ -163,6 +205,9 @@ mod tests {
     #[test]
     fn roman_pages_ranges_and_unicode_leaders_are_recognised() {
         for text in ["Preface...... xii", "Chapter…… 12–15", "Chapter . . . . . . 10", "Index······ 217"] {
+            assert!(entry(&line(text, 50.0, 100.0)).is_some(), "{text}");
+        }
+        for text in ["Supply Voltage (VCC to VEE)............12V", "Input Voltage............(VCC + 0.3V) to (VEE - 0.3V)", "Output Short-Circuit Duration (to GND) ..........Continuous"] {
             assert!(entry(&line(text, 50.0, 100.0)).is_some(), "{text}");
         }
         for text in ["He paused... 12", "Version 1.2.3", "3. A normal list item", "Filled........text", "......12", "Title......1i", "Title......12-"] {
