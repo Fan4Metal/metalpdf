@@ -160,7 +160,7 @@ fn edge_art(content: &mut PageContent, decorations: &mut Vec<[f32; 4]>) {
     }
 }
 
-pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo], extra: Vec<Inline>) -> Prepared {
+pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo], extra: Vec<Inline>, repeated: &[[f32; 4]]) -> Prepared {
     let mut content = original.clone();
     let mut decorations = Vec::new();
     let mut counts = std::collections::HashMap::new();
@@ -221,6 +221,31 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
         }
     }
     content.graphics.retain(|g| !decorations.iter().any(|r| touches(g.rect, *r, 0.0) && g.rect[3] - g.rect[1] <= RULE));
+    // The lines that recur on the pages around this one, at the same
+    // height: running heads and feet whatever they look like (two lines of
+    // an address with no number, a number a line's gap under the text).
+    // Those on one level or one under another are one piece.
+    let mut bands: Vec<[f32; 4]> = Vec::new();
+    for &r in repeated {
+        if decorations.iter().any(|d| touches(*d, r, 0.0)) || !content.glyphs.iter().any(|g| inside(g, r, 0.0)) {
+            continue;
+        }
+        match bands.iter_mut().find(|b| touches(**b, r, 0.6 * size)) {
+            Some(b) => *b = layout::union(*b, r),
+            None => bands.push(r),
+        }
+    }
+    // Not from a page with nothing else on it (a page left blank but for
+    // its head and foot): the decorations hang on the first paragraph, and
+    // with none the page came out empty.
+    if content.glyphs.iter().all(|g| bands.iter().any(|b| inside(g, *b, 1.0))) {
+        bands.clear();
+    }
+    for b in bands {
+        let region = [(b[0] - 1.0).max(0.0), (b[1] - 1.0).max(0.0), (b[2] + 1.0).min(w), (b[3] + 1.0).min(h)];
+        content.glyphs.retain(|g| !inside(g, region, 0.0));
+        decorations.push(region);
+    }
     // Pages consisting of a large illustration and only a few labels have
     // no body paragraph to reflow. This also preserves rotated captions.
     let art = content
@@ -494,8 +519,15 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
                 let near = 0.8 * l.size.max(2.5);
                 let gap_x = (r[0] - l.rect[2]).max(l.rect[0] - r[2]);
                 let gap_y = (r[1] - l.rect[3]).max(l.rect[1] - r[3]);
-                let outside = (gap_x > 0.0 || gap_y > 0.0) && !l.glyphs.iter().any(|g| g.invisible);
-                let label = l.size < 0.9 * size && l.glyphs.len() <= 12 && !caption && gap_x <= near && gap_y <= near;
+                // Outside, or across its edge (a label half over a block
+                // diagram's first box was cut in the middle of a letter).
+                let within = l.rect[0] >= r[0] - 1.0 && l.rect[2] <= r[2] + 1.0 && l.rect[1] >= r[1] - 1.0 && l.rect[3] <= r[3] + 1.0;
+                let outside = !within && !l.glyphs.iter().any(|g| g.invisible);
+                // Short, or a longer note over or under the drawing, no
+                // wider than it (a block diagram's "the output strobe may
+                // strobe many DACs" under its arrow).
+                let short = l.glyphs.len() <= 12 || l.glyphs.len() <= 40 && gap_y > 0.0 && l.rect[0] >= r[0] - near && l.rect[2] <= r[2] + near;
+                let label = l.size < 0.9 * size && short && !caption && gap_x <= near && gap_y <= near;
                 // An expression drawn in part (a sum's sign, a fraction's
                 // bar) is a figure: its closing punctuation against it, and
                 // its number at the right on its level, are its too.
@@ -713,7 +745,7 @@ mod tests {
     }
 
     fn prepare_page(p: &PageContent, fonts: &[crate::export::FontInfo]) -> Prepared {
-        prepare(p, fonts, Vec::new())
+        prepare(p, fonts, Vec::new(), &[])
     }
 
     #[test]

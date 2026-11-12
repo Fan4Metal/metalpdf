@@ -297,6 +297,45 @@ pub struct Writer {
     font_use: HashMap<u16, usize>,
     /// Unjustified word advances, for matching replacement font metrics.
     advances: HashMap<u16, Vec<(String, f32, f32)>>,
+    /// The lines of the page to come that recur on the pages around it.
+    repeated: Vec<[f32; 4]>,
+}
+
+/// The lines in the top and bottom eighths of a page, each with a key that
+/// is the same for a running head or foot from page to page: its text with
+/// no spaces, the case folded, every number a `#`.
+pub(super) fn edge_lines(content: &PageContent) -> Vec<(String, [f32; 4])> {
+    let [w, h] = content.size;
+    let at_edge = |g: &&super::Glyph| !g.invisible && g.rect[0] >= 0.0 && g.rect[2] <= w && g.rect[1] >= 0.0 && g.rect[3] <= h && (g.rect[3] < 0.125 * h || g.rect[1] > 0.875 * h);
+    layout::lines(content.glyphs.iter().filter(at_edge).cloned().collect())
+        .into_iter()
+        .filter(|l| l.glyphs.len() <= 120)
+        .filter_map(|l| {
+            let mut key = String::new();
+            for c in l.text().chars().filter(|c| !c.is_whitespace()) {
+                if c.is_ascii_digit() {
+                    if !key.ends_with('#') {
+                        key.push('#');
+                    }
+                } else {
+                    key.extend(c.to_lowercase());
+                }
+            }
+            (!key.is_empty()).then_some((key, l.rect))
+        })
+        .collect()
+}
+
+/// The lines of a page (`edges[at]`) that at least two of the other pages
+/// have too, at the same height: the running heads and feet.
+pub(super) fn repeated_lines(edges: &[&[(String, [f32; 4])]], at: usize) -> Vec<[f32; 4]> {
+    edges[at]
+        .iter()
+        .filter(|(key, r)| {
+            edges.iter().enumerate().filter(|(j, lines)| *j != at && lines.iter().any(|(k, q)| k == key && (q[1] - r[1]).abs() < 3.0 && (q[3] - r[3]).abs() < 3.0)).count() >= 2
+        })
+        .map(|(_, r)| *r)
+        .collect()
 }
 
 /// Word's units: twentieths of a point, and EMUs for drawings.
@@ -311,7 +350,12 @@ fn emu(pt: f32) -> i64 {
 impl Writer {
     pub fn new(mut zip: ZipWriter<BufWriter<File>>, meta: Meta) -> std::io::Result<Writer> {
         docx::start_package(&mut zip, &meta)?;
-        Ok(Writer { zip, pages: Vec::new(), pictures: 0, sizes: HashMap::new(), font_use: HashMap::new(), advances: HashMap::new() })
+        Ok(Writer { zip, pages: Vec::new(), pictures: 0, sizes: HashMap::new(), font_use: HashMap::new(), advances: HashMap::new(), repeated: Vec::new() })
+    }
+
+    /// The lines of the next page given that recur on the pages around it.
+    pub fn set_repeated(&mut self, lines: Vec<[f32; 4]>) {
+        self.repeated = lines;
     }
 
     /// A picture into the archive; its number.
@@ -364,7 +408,7 @@ impl Writer {
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
             esay!("equations: blocks {:?}, inline {:?}", equations.blocks, equations.inline.iter().map(|i| i.rect).collect::<Vec<_>>());
         }
-        let mut prepared = artwork::prepare(&flow_content, fonts, std::mem::take(&mut equations.inline));
+        let mut prepared = artwork::prepare(&flow_content, fonts, std::mem::take(&mut equations.inline), &std::mem::take(&mut self.repeated));
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
             esay!("artwork: decorations {:?}, images {:?}", prepared.decorations, prepared.content.graphics.iter().filter(|g| g.kind == super::GraphicKind::Image && g.object.is_none()).map(|g| g.rect).collect::<Vec<_>>());
         }
@@ -1533,6 +1577,38 @@ mod tests {
         assert!(text.starts_with("nce upon a time the computers changed the world, opening new possibilities"));
         assert!(text.ends_with("and the final line ends here."));
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn lines_that_recur_from_page_to_page_are_running_heads_and_feet() {
+        let text = |s: &str, x: f32, baseline: f32| -> Vec<super::super::Glyph> {
+            s.chars()
+                .enumerate()
+                .map(|(i, ch)| {
+                    let at = x + 5.0 * i as f32;
+                    super::super::Glyph { source: -1, ch, rect: [at, baseline - 8.0, at + 5.0, baseline + 2.0], x: at, baseline, size: 10.0, font: 0, color: [0; 3], space_before: ch.is_uppercase() && i > 0, invisible: false }
+                })
+                .collect()
+        };
+        let page = |number: usize, first: &str| {
+            let mut glyphs = text(first, 50.0, 120.0);
+            glyphs.extend(text("An ordinary editable body paragraph", 50.0, 400.0));
+            glyphs.extend(text("For More Information", 200.0, 760.0));
+            glyphs.extend(text("Go to the site", 215.0, 772.0));
+            glyphs.extend(text(&format!("{number}"), 540.0, 772.0));
+            PageContent { size: [600.0, 800.0], glyphs, ..Default::default() }
+        };
+        let pages: Vec<_> = [(9, "Chapter One"), (10, "It began"), (11, "And went on"), (12, "Until the end")].into_iter().map(|(n, first)| edge_lines(&page(n, first))).collect();
+        let edges: Vec<&[(String, [f32; 4])]> = pages.iter().map(|p| p.as_slice()).collect();
+        // The two lines of the foot and the number, 9 and 10 alike; not the
+        // body, in the middle, nor a line at the top that differs.
+        for at in 0..4 {
+            let found = repeated_lines(&edges, at);
+            assert_eq!(found.len(), 3, "{found:?}");
+            assert!(found.iter().all(|r| r[1] > 700.0));
+        }
+        // Two pages are not enough to tell.
+        assert!(repeated_lines(&edges[..2], 0).is_empty());
     }
 
     #[test]

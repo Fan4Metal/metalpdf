@@ -273,7 +273,16 @@ pub struct Job {
     fonts: FontTable,
     pub next: usize,
     pub count: usize,
+    /// The paragraph mode reads a few pages ahead, to know the lines that
+    /// recur from page to page: the pages read and not yet written, and
+    /// every page's lines at its top and bottom while they are in reach.
+    ahead: std::collections::HashMap<usize, PageContent>,
+    edges: std::collections::HashMap<usize, Vec<(String, [f32; 4])>>,
 }
+
+/// How many pages each side a running head or foot is looked for on (a
+/// book's alternate left and right: the pages two and four away).
+const REPEAT_SPAN: usize = 4;
 
 impl Job {
     /// An export of `doc` (a copy opened for it) to `path` in `format`.
@@ -303,7 +312,7 @@ impl Job {
                 return Err(e.to_string());
             }
         };
-        Ok(Job { doc, api, path: path.to_owned(), temp, writer: Some(writer), fonts: FontTable::default(), next: 0, count })
+        Ok(Job { doc, api, path: path.to_owned(), temp, writer: Some(writer), fonts: FontTable::default(), next: 0, count, ahead: Default::default(), edges: Default::default() })
     }
 
     pub fn path(&self) -> &Path {
@@ -317,7 +326,28 @@ impl Job {
         }
         let index = self.next;
         let page = self.doc.load_page(index).and_then(|p| p.flattened()).ok_or_else(|| format!("page {} could not be loaded", index + 1))?;
-        let content = page.export_content(&mut self.fonts, false);
+        let content = match self.ahead.remove(&index) {
+            Some(content) => content,
+            None => page.export_content(&mut self.fonts, false),
+        };
+        if let Some(Writer::DocxFlow(w)) = self.writer.as_mut() {
+            let (from, to) = (index.saturating_sub(REPEAT_SPAN), (index + REPEAT_SPAN).min(self.count - 1));
+            self.edges.retain(|j, _| *j >= from);
+            self.edges.entry(index).or_insert_with(|| docx_flow::edge_lines(&content));
+            for j in index + 1..=to {
+                if !self.edges.contains_key(&j)
+                    && let Some(other) = self.doc.load_page(j).and_then(|p| p.flattened())
+                {
+                    let read = other.export_content(&mut self.fonts, false);
+                    self.edges.insert(j, docx_flow::edge_lines(&read));
+                    self.ahead.insert(j, read);
+                }
+            }
+            let pages: Vec<usize> = (from..=to).filter(|j| self.edges.contains_key(j)).collect();
+            let edges: Vec<&[(String, [f32; 4])]> = pages.iter().map(|j| self.edges[j].as_slice()).collect();
+            let at = pages.iter().position(|j| *j == index).unwrap_or(0);
+            w.set_repeated(docx_flow::repeated_lines(&edges, at));
+        }
         let result = match self.writer.as_mut() {
             Some(Writer::Docx(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
             Some(Writer::DocxFlow(w)) => w.page(self.api, &page, &content, &self.fonts.fonts, faces),
