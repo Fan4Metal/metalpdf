@@ -17,6 +17,11 @@ pub(super) fn marker(index: usize) -> char {
     char::from_u32(0xf0000 + index as u32).expect("bounded artwork count")
 }
 
+/// The most a running head's or foot's rule is high: PDFium's bounds of a
+/// stroked line take its width on each side, so a 0.94 pt rule is 1.88
+/// high (Apex's feet, which were not taken at 1.5).
+const RULE: f32 = 3.0;
+
 fn inside(g: &Glyph, r: [f32; 4], pad: f32) -> bool {
     let (x, y) = ((g.rect[0] + g.rect[2]) / 2.0, (g.rect[1] + g.rect[3]) / 2.0);
     x >= r[0] - pad && x <= r[2] + pad && y >= r[1] - pad && y <= r[3] + pad
@@ -24,6 +29,19 @@ fn inside(g: &Glyph, r: [f32; 4], pad: f32) -> bool {
 
 fn touches(a: [f32; 4], b: [f32; 4], pad: f32) -> bool {
     a[0] <= b[2] + pad && b[0] <= a[2] + pad && a[1] <= b[3] + pad && b[1] <= a[3] + pad
+}
+
+/// A running foot's region with the artwork on its level: a logo at the
+/// end of the rule or of the page number's line (Maxim's feet: left a
+/// figure in the flow, it went over to a page of its own).
+fn foot_art(mut region: [f32; 4], graphics: &[Graphic], size: f32, [w, h]: [f32; 2]) -> [f32; 4] {
+    for o in graphics {
+        let q = o.rect;
+        if q[1] > 0.8 * h && q[3] - q[1] <= 4.0 * size.max(8.0) && q[2] - q[0] < 0.3 * w && q[3] > region[1] && q[1] < region[3] {
+            region = layout::union(region, q);
+        }
+    }
+    region
 }
 
 /// Whether a line is a page number, or holds one: at most 25 characters
@@ -77,7 +95,14 @@ fn furniture_without_rules(content: &mut PageContent, decorations: &mut Vec<[f32
         {
             continue;
         }
-        let region = [(region[0] - 1.0).max(0.0), (region[1] - 1.0).max(0.0), (region[2] + 1.0).min(w), (region[3] + 1.0).min(h)];
+        let mut region = [(region[0] - 1.0).max(0.0), (region[1] - 1.0).max(0.0), (region[2] + 1.0).min(w), (region[3] + 1.0).min(h)];
+        if bottom {
+            let with_art = foot_art(region, &content.graphics, size, [w, h]);
+            if with_art != region {
+                region = with_art;
+                content.graphics.retain(|g| !(g.rect[0] >= region[0] - 0.5 && g.rect[1] >= region[1] - 0.5 && g.rect[2] <= region[2] + 0.5 && g.rect[3] <= region[3] + 0.5));
+            }
+        }
         content.glyphs.retain(|g| !inside(g, region, 0.0));
         decorations.push(region);
     }
@@ -161,14 +186,20 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
     // over to a page of their own whenever the body came out longer.
     for g in &original.graphics {
         let r = g.rect;
-        if r[2] - r[0] > 0.6 * w && r[3] - r[1] <= 1.5 && r[1] > 0.8 * h {
+        if r[2] - r[0] > 0.6 * w && r[3] - r[1] <= RULE && r[1] > 0.8 * h {
             let below: Vec<_> = original.glyphs.iter().filter(|g| (g.rect[1] + g.rect[3]) / 2.0 > r[1] - 1.0).collect();
-            let body_below = original.glyphs.iter().any(|g| g.rect[1] > r[3] && g.size > 1.25 * size);
-            if !below.is_empty() && !body_below && below.iter().all(|g| !g.invisible) {
+            // A page number may be larger than a body set small (a bold
+            // 10 pt "2" under 7.5 pt columns); a line of such text is not.
+            let body_below = original.glyphs.iter().filter(|g| g.rect[1] > r[3] && g.size > 1.25 * size).count() > 6;
+            // A foot is a few lines: a rule low on a short sheet with a
+            // block of text under it (a receipt's last part) is not one.
+            let deep = below.iter().map(|g| g.rect[3]).fold(r[3], f32::max) - r[3] > 4.5 * size.max(8.0);
+            if !below.is_empty() && !body_below && !deep && below.iter().all(|g| !g.invisible) {
                 let region = below.iter().map(|g| g.rect).fold([r[0] - 1.0, r[1] - 1.0, r[2] + 1.0, r[3] + 1.0], layout::union);
-                let region = [region[0] - 1.0, region[1] - 1.0, region[2] + 1.0, region[3] + 1.0];
+                let region = foot_art([region[0] - 1.0, region[1] - 1.0, region[2] + 1.0, region[3] + 1.0], &original.graphics, size, [w, h]);
                 if region[1] > 0.75 * h {
                     content.glyphs.retain(|g| !inside(g, region, 0.0));
+                    content.graphics.retain(|g| !(g.rect[0] >= region[0] - 0.5 && g.rect[1] >= region[1] - 0.5 && g.rect[2] <= region[2] + 0.5 && g.rect[3] <= region[3] + 0.5));
                     decorations.push(region);
                 }
             }
@@ -176,7 +207,7 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
     }
     for g in &original.graphics {
         let r = g.rect;
-        if r[2] - r[0] > 0.6 * w && r[3] - r[1] <= 1.5 && r[1] < 0.2 * h {
+        if r[2] - r[0] > 0.6 * w && r[3] - r[1] <= RULE && r[1] < 0.2 * h {
             let above: Vec<_> = original.glyphs.iter().filter(|g| g.rect[3] < r[1] + 1.0).collect();
             if !above.is_empty() && above.iter().all(|g| g.size <= 1.25 * size && !g.invisible) {
                 let top = above.iter().map(|g| g.rect[1]).fold(r[1], f32::min);
@@ -189,7 +220,7 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
             }
         }
     }
-    content.graphics.retain(|g| !decorations.iter().any(|r| touches(g.rect, *r, 0.0) && g.rect[3] - g.rect[1] <= 1.5));
+    content.graphics.retain(|g| !decorations.iter().any(|r| touches(g.rect, *r, 0.0) && g.rect[3] - g.rect[1] <= RULE));
     // Pages consisting of a large illustration and only a few labels have
     // no body paragraph to reflow. This also preserves rotated captions.
     let art = content
@@ -202,10 +233,15 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
         .map(|g| g.rect)
         .reduce(layout::union);
     let whole_page = !content.glyphs.iter().any(|g| g.invisible)
-        && (content.glyphs.len() < 140 && art.is_some_and(|r| (r[2] - r[0]) * (r[3] - r[1]) > 0.25 * w * h)
-            || size < 9.0 && !content.glyphs.is_empty() && content.glyphs.iter().all(|g| g.rect[1] > 0.4 * h));
+        // Counted with the running head and foot: without them, a page of
+        // text short of 140 characters once its foot was taken became one
+        // picture, nothing in it to edit.
+        && (original.glyphs.len() < 140 && art.is_some_and(|r| (r[2] - r[0]) * (r[3] - r[1]) > 0.25 * w * h)
+            || size < 9.0 && !original.glyphs.is_empty() && original.glyphs.iter().all(|g| g.rect[1] > 0.4 * h));
     if whole_page {
-        return Prepared { content, inline: Vec::new(), decorations: Vec::new(), whole_page };
+        // With the running head and foot found so far: a page not written
+        // as one picture after all (a form) has their text nowhere else.
+        return Prepared { content, inline: Vec::new(), decorations, whole_page };
     }
     edge_art(&mut content, &mut decorations);
     furniture_without_rules(&mut content, &mut decorations, size);
@@ -401,7 +437,11 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
             figures.push(r)
         }
     }
-    // Adjacent panels and plots in the same row form one composition.
+    // Adjacent panels and plots in the same row form one composition; not
+    // when the box round both would run into a third figure that neither
+    // touches (a drawing in the left column and a caption drawn as outlines
+    // under the right column's taller drawing: the box round the two took
+    // in the text beside it, and both drawings were left out of the page).
     let mut changed = true;
     while changed {
         changed = false;
@@ -413,6 +453,7 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
                 let gap = (a[0] - b[2]).max(b[0] - a[2]).max(0.0);
                 if overlap > 0.6 * (a[3] - a[1]).min(b[3] - b[1])
                     && gap < 0.2 * w
+                    && !figures.iter().enumerate().any(|(k, c)| k != i && k != j && touches(*c, union, 0.0) && !touches(*c, a, 0.0) && !touches(*c, b, 0.0))
                     && !content.glyphs.iter().any(|g| g.font == font && (g.size - size).abs() < 1.0 && inside(g, union, 0.0) && !inside(g, a, 1.0) && !inside(g, b, 1.0))
                 {
                     figures[i] = union;
@@ -694,6 +735,44 @@ mod tests {
         assert_eq!(p.decorations.len(), 1);
         assert!(p.decorations[0][0] <= 20.0 && p.decorations[0][3] >= 754.0);
         assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
+    }
+
+    #[test]
+    fn a_thick_foot_rule_takes_its_larger_page_number_and_the_logo_at_its_end() {
+        let mut glyphs = Vec::new();
+        for k in 0..20 {
+            glyphs.extend(text("An ordinary editable body paragraph line", 50.0, 100.0 + 14.0 * k as f32));
+        }
+        glyphs.extend(text("A company and its address", 50.0, 756.0));
+        // The number larger than the body, under the foot's line.
+        glyphs.extend(text("2", 50.0, 772.0).into_iter().map(|mut g| {
+            g.size = 14.0;
+            g
+        }));
+        // A 0.94 pt rule as PDFium bounds it, a logo at its end, a figure.
+        let graphics = vec![graphic([50.0, 743.0, 470.0, 744.88]), graphic([472.0, 730.0, 550.0, 752.0]), graphic([50.0, 420.0, 300.0, 600.0])];
+        let p = prepare_page(&page(glyphs, graphics), &[]);
+        assert_eq!(p.decorations.len(), 1);
+        assert!(p.decorations[0][2] >= 550.0 && p.decorations[0][3] >= 772.0);
+        assert!(!p.content.glyphs.iter().any(|g| g.baseline > 700.0));
+        assert_eq!(p.content.graphics.len(), 1);
+        assert!(!p.whole_page);
+    }
+
+    #[test]
+    fn a_row_of_figures_does_not_run_into_a_third() {
+        let mut glyphs = Vec::new();
+        for k in 0..8 {
+            glyphs.extend(text("An ordinary editable body paragraph line here", 50.0, 60.0 + 14.0 * k as f32));
+        }
+        // A tall drawing in the right column, a drawing lower in the left
+        // one, and a strip of outlines (a caption) under the right one, on
+        // the left one's level.
+        let graphics = vec![graphic([340.0, 40.0, 520.0, 210.0]), graphic([50.0, 180.0, 260.0, 280.0]), graphic([312.0, 268.0, 522.0, 276.0])];
+        let p = prepare_page(&page(glyphs, graphics), &[]);
+        let figures: Vec<_> = p.content.graphics.iter().filter(|g| g.kind == GraphicKind::Image).map(|g| g.rect).collect();
+        assert!(figures.iter().any(|r| r[0] < 60.0 && r[2] < 300.0), "{figures:?}");
+        assert_eq!(p.content.glyphs.len(), 8 * 45);
     }
 
     #[test]
