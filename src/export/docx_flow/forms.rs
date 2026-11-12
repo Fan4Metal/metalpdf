@@ -375,15 +375,43 @@ pub(super) fn write(x: &mut String, table: &Table, margin_left: f32, out: &mut s
             } else {
                 items
             };
+            // Values side by side on one line (a data sheet's MIN, TYP and
+            // MAX in one cell with no rules between): one paragraph, each
+            // value at a tab where it stood. A paragraph each, they went one
+            // under another, the row twice as high and the table over to
+            // the next page.
+            let mut rows: Vec<Vec<layout::Para>> = Vec::new();
             for item in items {
-                let layout::Item::Para(mut para) = item else { continue };
+                let layout::Item::Para(para) = item else { continue };
+                let row = if mono || para.lines.len() != 1 {
+                    None
+                } else {
+                    rows.iter_mut().find(|r| {
+                        r.iter().all(|q| {
+                            q.lines.len() == 1
+                                && (q.lines[0].baseline - para.lines[0].baseline).abs() < 0.3 * q.size.max(para.size)
+                                && (q.rect[2] <= para.rect[0] || para.rect[2] <= q.rect[0])
+                        })
+                    })
+                };
+                match row {
+                    Some(row) => row.push(para),
+                    None => rows.push(vec![para]),
+                }
+            }
+            for mut row in rows {
+                row.sort_by(|a, b| a.rect[0].total_cmp(&b.rect[0]));
+                let rest = row.split_off(1);
+                let mut para = row.pop().expect("a row has a paragraph");
                 para.column = [cell.rect[0], cell.rect[2]];
-                para.align = if mono { layout::Align::Left } else { layout::alignment(&para.lines, para.column, para.size) };
+                para.align = if mono || !rest.is_empty() { layout::Align::Left } else { layout::alignment(&para.lines, para.column, para.size) };
                 let mut p = doc_para(&para, None);
-                if mono {
+                if mono || !rest.is_empty() {
                     p.align = layout::Align::Left;
                     p.left = (para.rect[0] - cell.rect[0]).max(0.0);
                     p.first = 0.0;
+                }
+                if mono {
                     p.pitch = p.pitch.max(1.1 * p.size);
                 }
                 // A short PDF line does not imply an extra right indent in
@@ -394,7 +422,8 @@ pub(super) fn write(x: &mut String, table: &Table, margin_left: f32, out: &mut s
                 let gap = (p.first_baseline - 0.8 * p.pitch - bottom).max(0.0);
                 let _ = write!(
                     x,
-                    r#"<w:p><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="{}" w:after="0" w:line="{}" w:lineRule="exact"/><w:ind w:left="{}" w:right="{}" w:firstLine="{}"/><w:jc w:val="{}"/></w:pPr>"#,
+                    r#"<w:p><w:pPr><w:widowControl w:val="0"/><w:tabs>{}</w:tabs><w:spacing w:before="{}" w:after="0" w:line="{}" w:lineRule="exact"/><w:ind w:left="{}" w:right="{}" w:firstLine="{}"/><w:jc w:val="{}"/></w:pPr>"#,
+                    rest.iter().map(|q| format!(r#"<w:tab w:val="left" w:pos="{}"/>"#, tw((q.rect[0] - cell.rect[0]).max(0.0)))).collect::<String>(),
                     tw(gap),
                     tw(p.pitch),
                     tw(p.left),
@@ -403,8 +432,15 @@ pub(super) fn write(x: &mut String, table: &Table, margin_left: f32, out: &mut s
                     super::jc(p.align)
                 );
                 paragraph_runs(x, &p, out);
-                x.push_str("</w:p>");
                 bottom = p.bottom;
+                for mut q in rest {
+                    q.column = [cell.rect[0], cell.rect[2]];
+                    x.push_str("<w:r><w:tab/></w:r>");
+                    let q = doc_para(&q, None);
+                    paragraph_runs(x, &q, out);
+                    bottom = bottom.max(q.bottom);
+                }
+                x.push_str("</w:p>");
             }
             for (f, old) in saved {
                 match old {
