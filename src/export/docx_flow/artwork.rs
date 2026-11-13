@@ -289,7 +289,9 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
         // text short of 140 characters once its foot was taken became one
         // picture, nothing in it to edit.
         && (original.glyphs.len() < 140 && art.is_some_and(|r| (r[2] - r[0]) * (r[3] - r[1]) > 0.25 * w * h)
-            || size < 9.0 && !original.glyphs.is_empty() && original.glyphs.iter().all(|g| g.rect[1] > 0.4 * h));
+            // An illustration over small labels; a page of small print in its
+            // lower part alone (a book's imprint) stays text.
+            || size < 9.0 && art.is_some() && !original.glyphs.is_empty() && original.glyphs.iter().all(|g| g.rect[1] > 0.4 * h));
     if whole_page {
         // With the running head and foot found so far: a page not written
         // as one picture after all (a form) has their text nowhere else.
@@ -805,6 +807,26 @@ mod tests {
         assert_eq!(p.decorations.len(), 1);
         assert!(!p.whole_page);
         assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
+    }
+
+    #[test]
+    fn small_print_low_on_a_page_is_one_picture_only_under_an_illustration() {
+        let small = |s: &str, baseline: f32| {
+            text(s, 100.0, baseline).into_iter().map(|mut g| {
+                g.size = 7.0;
+                g
+            })
+        };
+        let mut glyphs = Vec::new();
+        for k in 0..12 {
+            glyphs.extend(small("Printed and bound by a printing house", 400.0 + 10.0 * k as f32));
+        }
+        // A book's imprint: nothing but small print in the page's lower part.
+        let p = prepare_page(&page(glyphs.clone(), Vec::new()), &[]);
+        assert!(!p.whole_page);
+        // A drawing above its small labels.
+        let p = prepare_page(&page(glyphs, vec![graphic([60.0, 60.0, 540.0, 380.0])]), &[]);
+        assert!(p.whole_page);
     }
 
     #[test]
