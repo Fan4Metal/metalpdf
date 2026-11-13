@@ -408,7 +408,8 @@ impl Writer {
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
             esay!("equations: blocks {:?}, inline {:?}", equations.blocks, equations.inline.iter().map(|i| i.rect).collect::<Vec<_>>());
         }
-        let mut prepared = artwork::prepare(&flow_content, fonts, std::mem::take(&mut equations.inline), &std::mem::take(&mut self.repeated));
+        let carried = !grids.is_empty() || form.is_some() || !equations.blocks.is_empty();
+        let mut prepared = artwork::prepare(&flow_content, fonts, std::mem::take(&mut equations.inline), &std::mem::take(&mut self.repeated), carried);
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
             esay!("artwork: whole page {}, decorations {:?}, images {:?}", prepared.whole_page, prepared.decorations, prepared.content.graphics.iter().filter(|g| g.kind == super::GraphicKind::Image && g.object.is_none()).map(|g| g.rect).collect::<Vec<_>>());
         }

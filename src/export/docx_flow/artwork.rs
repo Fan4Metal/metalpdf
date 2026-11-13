@@ -160,7 +160,9 @@ fn edge_art(content: &mut PageContent, decorations: &mut Vec<[f32; 4]>) {
     }
 }
 
-pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo], extra: Vec<Inline>, repeated: &[[f32; 4]]) -> Prepared {
+/// `carried`: the page has blocks taken out before (a ruled table, a
+/// form, an equation), which carry its decorations when no text does.
+pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo], extra: Vec<Inline>, repeated: &[[f32; 4]], carried: bool) -> Prepared {
     let mut content = original.clone();
     let mut decorations = Vec::new();
     let mut counts = std::collections::HashMap::new();
@@ -259,8 +261,10 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
     });
     // Not from a page with nothing else on it (a page left blank but for
     // its head and foot): the decorations hang on the first paragraph, and
-    // with none the page came out empty.
-    if content.glyphs.iter().all(|g| bands.iter().any(|b| inside(g, *b, 1.0))) {
+    // with none the page came out empty. A page that is a ruled table but
+    // for them has the table to carry them (a data sheet's foot went over
+    // to a page of its own).
+    if !carried && content.glyphs.iter().all(|g| bands.iter().any(|b| inside(g, *b, 1.0))) {
         bands.clear();
     }
     for b in bands {
@@ -768,7 +772,7 @@ mod tests {
     }
 
     fn prepare_page(p: &PageContent, fonts: &[crate::export::FontInfo]) -> Prepared {
-        prepare(p, fonts, Vec::new(), &[])
+        prepare(p, fonts, Vec::new(), &[], false)
     }
 
     #[test]
@@ -782,14 +786,14 @@ mod tests {
         let mut glyphs = text("www.example.com", 200.0, 765.0);
         body(&mut glyphs);
         let foot = [200.0, 757.0, 275.0, 767.0];
-        let p = prepare(&page(glyphs, vec![graphic([40.0, 745.0, 560.0, 790.0])]), &[], Vec::new(), &[foot]);
+        let p = prepare(&page(glyphs, vec![graphic([40.0, 745.0, 560.0, 790.0])]), &[], Vec::new(), &[foot], false);
         assert!(p.decorations.iter().any(|d| d[0] <= 40.0 && d[2] >= 560.0 && d[1] <= 745.0 && d[3] >= 790.0), "{:?}", p.decorations);
         assert!(p.content.graphics.is_empty());
         // A schematic's supply pin, the same on every page, in its top part.
         let mut glyphs = text("GND", 200.0, 60.0);
         body(&mut glyphs);
         let label = [200.0, 52.0, 215.0, 62.0];
-        let p = prepare(&page(glyphs, vec![graphic([40.0, 40.0, 560.0, 250.0])]), &[], Vec::new(), &[label]);
+        let p = prepare(&page(glyphs, vec![graphic([40.0, 40.0, 560.0, 250.0])]), &[], Vec::new(), &[label], false);
         assert!(!p.decorations.iter().any(|d| d[1] <= 52.0 && d[3] >= 62.0 && d[3] - d[1] < 20.0), "{:?}", p.decorations);
     }
 
