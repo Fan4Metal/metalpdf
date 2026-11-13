@@ -1110,7 +1110,13 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             if p.tabs.iter().any(|t| t.leader) {
                 let _ = write!(x, r#" w:line="{}" w:lineRule="exact""#, tw(p.pitch));
             } else if p.lines >= 2 && p.pitch >= 0.9 * p.size {
-                let _ = write!(x, r#" w:line="{}" w:lineRule="atLeast""#, tw(p.pitch));
+                // Exactly the PDF's pitch for plain text: at least it, Word
+                // took its font's own line where that is taller (a Times
+                // line is 1.15 em, a book set 10 on 11 grew a point a line).
+                // Inline pictures and larger glyphs need the room, and a
+                // line tighter than the size would cut accented capitals.
+                let plain = p.pitch >= p.size && p.artwork.is_empty() && p.spans.iter().all(|s| s.size <= 1.25 * p.size);
+                let _ = write!(x, r#" w:line="{}" w:lineRule="{}""#, tw(p.pitch), if plain { "exact" } else { "atLeast" });
             }
             x.push_str("/>");
             let limit = 0.8 * col_w;
