@@ -346,6 +346,9 @@ impl Job {
             let pages: Vec<usize> = (from..=to).filter(|j| self.edges.contains_key(j)).collect();
             let edges: Vec<&[(String, [f32; 4])]> = pages.iter().map(|j| self.edges[j].as_slice()).collect();
             let at = pages.iter().position(|j| *j == index).unwrap_or(0);
+            if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
+                esay!("page {}: edge lines {:?}", index + 1, edges[at]);
+            }
             w.set_repeated(docx_flow::repeated_lines(&edges, at));
         }
         let result = match self.writer.as_mut() {

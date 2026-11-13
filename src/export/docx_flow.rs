@@ -410,7 +410,7 @@ impl Writer {
         }
         let mut prepared = artwork::prepare(&flow_content, fonts, std::mem::take(&mut equations.inline), &std::mem::take(&mut self.repeated));
         if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
-            esay!("artwork: decorations {:?}, images {:?}", prepared.decorations, prepared.content.graphics.iter().filter(|g| g.kind == super::GraphicKind::Image && g.object.is_none()).map(|g| g.rect).collect::<Vec<_>>());
+            esay!("artwork: whole page {}, decorations {:?}, images {:?}", prepared.whole_page, prepared.decorations, prepared.content.graphics.iter().filter(|g| g.kind == super::GraphicKind::Image && g.object.is_none()).map(|g| g.rect).collect::<Vec<_>>());
         }
         for &rect in &equations.blocks {
             prepared.content.graphics.push(super::Graphic {rect,kind:super::GraphicKind::Image,object:None});
