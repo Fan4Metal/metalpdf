@@ -615,14 +615,17 @@ impl Writer {
                     // a picture (a number set a digit an image) in the line.
                     let left = s.columns[0][0];
                     let right = s.columns[s.columns.len() - 1][1];
-                    let mut parts = s.items.iter().filter_map(|&(_, k)| blocks[k].take().map(|b| (b, items[k].rect())));
-                    let Some((Block::Para(mut line), _)) = parts.next() else {
+                    let mut parts = s.items.iter().filter_map(|&(_, k)| blocks[k].take().map(|b| (b, items[k].rect(), items[k].column()[0])));
+                    let Some((Block::Para(mut line), _, _)) = parts.next() else {
                         return SegmentOut { columns: s.columns, blocks: Vec::new(), table: None };
                     };
-                    let rest: Vec<(Block, [f32; 4])> = parts.collect();
+                    let rest: Vec<(Block, [f32; 4], f32)> = parts.collect();
                     let n = rest.len();
-                    for (i, (b, r)) in rest.into_iter().enumerate() {
-                        let flush_right = i + 1 == n && (right - r[2]).abs() < line.size;
+                    for (i, (b, r, origin)) in rest.into_iter().enumerate() {
+                        // Not a part with stops of its own: it starts at its
+                        // left, its own last stop takes it to the right.
+                        let own_stops = matches!(&b, Block::Para(p) if p.tabs.iter().any(|t| t.pos > r[0] - origin));
+                        let flush_right = i + 1 == n && (right - r[2]).abs() < line.size && !own_stops;
                         line.tabs.push(Tab { pos: if flush_right { r[2] - left } else { r[0] - left }, right: flush_right, leader: false });
                         if let Some(last) = line.spans.last() {
                             line.spans.push(Span { text: "\t".into(), ..last.clone() });
@@ -632,6 +635,10 @@ impl Writer {
                                 for side in 0..2 {
                                     line.rules[side] = line.rules[side].or(p.rules[side]);
                                 }
+                                // Its own stops go with its tabs (a contents
+                                // line's leader after a bullet: lost, the
+                                // page number went to a line of its own).
+                                line.tabs.extend(p.tabs.iter().map(|t| Tab { pos: t.pos + origin - left, ..*t }).filter(|t| t.pos > r[0] - left));
                                 line.spans.extend(p.spans);
                                 line.artwork.extend(p.artwork);
                                 line.floating.extend(p.floating);
