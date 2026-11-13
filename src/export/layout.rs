@@ -1341,6 +1341,22 @@ pub(super) fn flowing_spans(para: &Para, marker_sep: &str) -> Vec<Span> {
     joined_spans(para, marker_sep, true)
 }
 
+/// Whether a plain hyphen between `before` (the end of a line) and `after`
+/// (the start of the next) breaks one Russian word rather than joins a
+/// compound: both Cyrillic, the next part in lower case, and neither a
+/// particle nor a prefix that takes a hyphen.
+fn broken_word(before: &str, after: &str) -> bool {
+    const PARTICLES: [&str; 7] = ["то", "либо", "нибудь", "таки", "ка", "де", "с"];
+    const PREFIXES: [&str; 5] = ["из", "по", "кое", "во", "кой"];
+    let cyrillic = |s: &str| !s.is_empty() && s.chars().all(|c| ('\u{400}'..='\u{4ff}').contains(&c));
+    cyrillic(before)
+        && cyrillic(after)
+        && before.chars().count() >= 2
+        && after.chars().next().is_some_and(char::is_lowercase)
+        && !PARTICLES.contains(&after)
+        && !PREFIXES.contains(&before.to_lowercase().as_str())
+}
+
 fn joined_spans(para: &Para, marker_sep: &str, soft_hyphens: bool) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
     let mut pending: Option<&str> = None;
@@ -1351,7 +1367,22 @@ fn joined_spans(para: &Para, marker_sep: &str, soft_hyphens: bool) -> Vec<Span> 
                 Some(span) if span.text.ends_with('\u{ad}') => {
                     if !soft_hyphens { span.text.pop(); }
                 }
-                Some(span) if span.text.ends_with('-') => {}
+                Some(span) if span.text.ends_with('-') => {
+                    // A Russian word broken at the line's end with a plain
+                    // hyphen (a TeX book's legacy font): a soft one, or
+                    // `при-менении` stood in the middle of Word's line. Not
+                    // a compound's (`что-то`, `из-за`, `кое-где`).
+                    let before: String = span.text[..span.text.len() - 1].chars().rev().take_while(|c| c.is_alphabetic()).collect::<Vec<_>>().into_iter().rev().collect();
+                    let mut word = line.glyphs.iter().skip_while(|g| g.ch.is_whitespace());
+                    let first = word.next();
+                    let after: String = first.into_iter().chain(word.take_while(|g| !g.space_before)).map(|g| g.ch).take_while(|c| c.is_alphabetic()).collect();
+                    if broken_word(&before, &after) {
+                        span.text.pop();
+                        if soft_hyphens {
+                            span.text.push('\u{ad}');
+                        }
+                    }
+                }
                 Some(_) => pending = Some(" "),
                 None => {}
             }
@@ -1483,6 +1514,19 @@ mod tests {
         let Item::Para(p) = &items[0] else {panic!()};
         assert_eq!(spans(p,"\t").iter().map(|s|s.text.as_str()).collect::<String>(),"paragraph continues");
         assert_eq!(flowing_spans(p,"\t").iter().map(|s|s.text.as_str()).collect::<String>(),"para\u{ad}graph continues");
+    }
+
+    #[test]
+    fn a_plain_hyphen_breaking_a_russian_word_is_a_soft_one() {
+        let mut glyphs = text("при-", 50.0, 100.0);
+        glyphs.extend(text("менении что-", 50.0, 112.0));
+        glyphs.extend(text("то ещё", 50.0, 124.0));
+        let items = analyse(&page(glyphs), OPTS);
+        let Item::Para(p) = &items[0] else { panic!() };
+        assert_eq!(spans(p, "\t").iter().map(|s| s.text.as_str()).collect::<String>(), "применении что-то ещё");
+        assert_eq!(flowing_spans(p, "\t").iter().map(|s| s.text.as_str()).collect::<String>(), "при\u{ad}менении что-то ещё");
+        assert!(!broken_word("state", "art"));
+        assert!(!broken_word("из", "за"));
     }
 
     #[test]
