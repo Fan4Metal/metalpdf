@@ -199,12 +199,15 @@ fn stacked_fractions(content:&mut PageContent)->Vec<super::artwork::Inline> {
             None=>runs.push(Run {rect:g.rect,baseline:g.baseline,size:g.size,members:vec![at]}),
         }
     }
-    // The text going through a pile from `top` to `bottom` baselines,
-    // larger than it by a sixth or more: the line it is in, its nearest
+    // The text going through a pile from `top` to `bottom` baselines, as
+    // large as it (a sixth larger, a pile with no bar): the line it is in, its nearest
     // character to `r` that `near` accepts.
-    let line_through=|top:f32,bottom:f32,size:f32,r:Rect,near:&dyn Fn(&Glyph)->bool| {
+    // `ratio`: how much smaller than the line the pile is at most. With a
+    // bar, the bar tells: a fraction set at the text's size (`Q/f – the
+    // aperture`) was a composition the text went under, a line a definition.
+    let line_through=|top:f32,bottom:f32,size:f32,ratio:f32,r:Rect,near:&dyn Fn(&Glyph)->bool| {
         content.glyphs.iter()
-            .filter(|g|!g.invisible&&!g.ch.is_whitespace()&&0.85*g.size>=size&&g.baseline>top+0.1*g.size&&g.baseline<bottom-0.05*g.size&&near(g))
+            .filter(|g|!g.invisible&&!g.ch.is_whitespace()&&ratio*g.size>=size&&g.baseline>top+0.1*g.size&&g.baseline<bottom-0.05*g.size&&near(g))
             .min_by(|a,b|{let d=|g:&Glyph|(g.rect[0]-r[2]).max(r[0]-g.rect[2]).max(0.0);d(a).total_cmp(&d(b))})
     };
     let mut taken=vec![false;content.glyphs.len()];
@@ -221,7 +224,16 @@ fn stacked_fractions(content:&mut PageContent)->Vec<super::artwork::Inline> {
         let top=num.iter().map(|&k|runs[k].baseline).fold(f32::MAX,f32::min);
         let bottom=den.iter().map(|&k|runs[k].baseline).fold(f32::MIN,f32::max);
         let size=num.iter().chain(&den).map(|&k|runs[k].size).fold(0.0,f32::max);
-        let Some(line)=line_through(top,bottom,size,r,&|g|g.rect[2]>r[0]-3.0*g.size&&g.rect[0]<r[2]+3.0*g.size) else {continue};
+        let Some(line)=line_through(top,bottom,size,1.0,r,&|g|g.rect[2]>r[0]-3.0*g.size&&g.rect[0]<r[2]+3.0*g.size) else {continue};
+        // One as large as the line is in prose, not in an expression set
+        // apart (`x = a/b`, a composition with it).
+        // Only one that starts its line (a definition): in the middle of
+        // prose, a fraction that tall made Word's line taller than the
+        // PDF's, and a thesis's page ran over.
+        let on_line=|g:&&Glyph|!g.invisible&&!g.ch.is_whitespace()&&(g.baseline-line.baseline).abs()<0.1*line.size;
+        let prose_line=content.glyphs.iter().filter(on_line).filter(|g|g.ch.is_alphabetic()).count()>=12;
+        let starts=!content.glyphs.iter().filter(on_line).any(|g|g.rect[2]<r[0]-0.5);
+        if 0.85*line.size<size&&!(prose_line&&starts) {continue;}
         let members:Vec<usize>=num.iter().chain(&den).flat_map(|&k|runs[k].members.iter().copied()).collect();
         if members.iter().any(|&m|taken[m]) {continue;}
         members.iter().for_each(|&m|taken[m]=true);
@@ -241,7 +253,7 @@ fn stacked_fractions(content:&mut PageContent)->Vec<super::artwork::Inline> {
                 ||a.members.iter().chain(&b.members).any(|&m|taken[m]) {continue;}
             let left=a.rect[0].min(b.rect[0]);
             let r=layout::union(a.rect,b.rect);
-            let Some(line)=line_through(a.baseline,b.baseline,size,r,&|g|g.rect[2]>left-0.35*g.size&&g.rect[2]<left+0.2*g.size) else {continue};
+            let Some(line)=line_through(a.baseline,b.baseline,size,0.85,r,&|g|g.rect[2]>left-0.35*g.size&&g.rect[2]<left+0.2*g.size) else {continue};
             let members:Vec<usize>=a.members.iter().chain(&b.members).copied().collect();
             members.iter().for_each(|&m|taken[m]=true);
             piles.push((members,r,line));
@@ -373,6 +385,23 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
         if blocks==previous {break;}
     }
     for r in &mut blocks {r[0]=(r[0]-0.5).max(0.0);r[1]=(r[1]-1.0).max(0.0);r[2]=(r[2]+0.5).min(content.size[0]);r[3]=(r[3]+1.0).min(content.size[1]);}
+    // A short expression that a line of prose goes on from, level with it
+    // (`dR/dλ(λ,T) – the spectral density`, a definition): in the line, a
+    // picture on its baseline. A composition of its own, the line went
+    // under it as a paragraph of its own, a line more each definition.
+    blocks.retain(|r| {
+        let lead=rows.iter().find(|row| {
+            let size=row.size;
+            let after:Vec<&Glyph>=row.glyphs.iter().filter(|g|!g.invisible&&!centre_inside(g,*r)).collect();
+            let start=after.iter().map(|g|g.rect[0]).fold(f32::INFINITY,f32::min);
+            r[3]-r[1]<=3.5*size && r[2]-r[0]<=12.0*size && row.baseline>r[1] && row.baseline<r[3]+0.2*size
+                && after.iter().filter(|g|g.ch.is_alphabetic()).count()>=8 && start>=r[2]-0.5*size && start<=r[2]+2.0*size
+        });
+        match lead {
+            Some(row)=>{inline.push(super::artwork::Inline {rect:*r,baseline:row.baseline});false}
+            None=>true,
+        }
+    });
     // A fraction in a composition is painted with it.
     for f in fractions {
         match blocks.iter_mut().find(|r|touches(**r,f.rect,0.0)) {

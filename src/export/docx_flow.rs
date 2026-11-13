@@ -1147,7 +1147,11 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             // A rule below makes the paragraph that much taller.
             let below = p.rules[1].map_or(0.0, |r| r.space + r.width);
             // Word's paragraph ends a fifth of a line under its baseline.
-            *prev = Prev { baseline: Some(p.last_baseline + below), bottom: Some(p.last_baseline + (1.0 - BASELINE_IN_LINE) * word_line(p) + below) };
+            // What hangs under its line further than Word's fifth (an inline
+            // picture) moves the next baseline down as much.
+            let under = line_reach(p).1;
+            let hang = under - (1.0 - BASELINE_IN_LINE) * word_line(p);
+            *prev = Prev { baseline: Some(p.last_baseline + hang + below), bottom: Some(p.last_baseline + under + below) };
         }
         Block::Picture { rel, width, height, align, left, top, bottom, region } => {
             let k = (col_w / width).min(1.0);
@@ -1205,15 +1209,33 @@ const BOTTOM_MARGIN: f32 = 14.0;
 /// Where Word puts the baseline in a line box: at 4/5 of its height.
 const BASELINE_IN_LINE: f32 = 0.8;
 
+/// How far a paragraph's line reaches over and under its baseline in Word:
+/// 4/5 and 1/5 of its line, or, for one line, an inline picture's reach
+/// where it goes further (a fraction in a definition: its paragraph was
+/// counted a line high, and every such one pushed the page down).
+fn line_reach(p: &DocPara) -> (f32, f32) {
+    let h = word_line(p);
+    let (mut over, mut under) = (BASELINE_IN_LINE * h, (1.0 - BASELINE_IN_LINE) * h);
+    if p.lines == 1 {
+        for a in &p.artwork {
+            let depth = (-a.shift).max(0.0);
+            over = over.max(a.height - depth);
+            under = under.max(depth);
+        }
+    }
+    (over, under)
+}
+
 fn para_before(p: &DocPara, prev: &Prev) -> f32 {
     let contents = p.tabs.iter().any(|t| t.leader);
     let height = word_line(p);
+    let over = line_reach(p).0;
     let gap = match (prev.baseline, prev.bottom) {
-        (Some(b), _) => p.first_baseline - b - height,
+        (Some(b), _) => p.first_baseline - b - (1.0 - BASELINE_IN_LINE) * height - over,
         // After a picture: the first baseline where it is in the PDF, not
         // the top of the line's boxes (which a TeX font puts lower than
         // Word's line, 2.4 points a display formula).
-        (None, Some(bottom)) => p.first_baseline - bottom - BASELINE_IN_LINE * height,
+        (None, Some(bottom)) => p.first_baseline - bottom - over,
         (None, None) => 0.0,
     };
     // A rule above takes its room out of the gap.
