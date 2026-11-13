@@ -235,6 +235,28 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
             None => bands.push(r),
         }
     }
+    // The artwork of a head or foot (a bar under an address, a logo) goes
+    // with it, when it lies wholly in the page's outer eighth, as the lines
+    // do: left in the flow, it was a figure that went to a page of its own.
+    // A line on artwork that reaches further in is a figure's label that
+    // recurs from page to page (a schematic's supply pins), not a foot.
+    let at_edge = |r: [f32; 4]| r[3] < 0.125 * h || r[1] > 0.875 * h;
+    bands.retain_mut(|b| {
+        loop {
+            let mut grown = *b;
+            let background = |r: [f32; 4]| (r[2] - r[0]) * (r[3] - r[1]) >= 0.85 * w * h;
+            for g in content.graphics.iter().filter(|g| touches(g.rect, *b, 0.0) && !background(g.rect)) {
+                if !at_edge(g.rect) {
+                    return false;
+                }
+                grown = layout::union(grown, g.rect);
+            }
+            if grown == *b {
+                return true;
+            }
+            *b = grown;
+        }
+    });
     // Not from a page with nothing else on it (a page left blank but for
     // its head and foot): the decorations hang on the first paragraph, and
     // with none the page came out empty.
@@ -244,6 +266,7 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
     for b in bands {
         let region = [(b[0] - 1.0).max(0.0), (b[1] - 1.0).max(0.0), (b[2] + 1.0).min(w), (b[3] + 1.0).min(h)];
         content.glyphs.retain(|g| !inside(g, region, 0.0));
+        content.graphics.retain(|g| !(g.rect[0] >= region[0] - 0.5 && g.rect[1] >= region[1] - 0.5 && g.rect[2] <= region[2] + 0.5 && g.rect[3] <= region[3] + 0.5));
         decorations.push(region);
     }
     // Pages consisting of a large illustration and only a few labels have
@@ -746,6 +769,28 @@ mod tests {
 
     fn prepare_page(p: &PageContent, fonts: &[crate::export::FontInfo]) -> Prepared {
         prepare(p, fonts, Vec::new(), &[])
+    }
+
+    #[test]
+    fn a_recurring_foot_takes_its_bar_and_a_recurring_label_stays_with_its_figure() {
+        let body = |glyphs: &mut Vec<Glyph>| {
+            for k in 0..5 {
+                glyphs.extend(text("An ordinary body line that runs well across the page.", 50.0, 300.0 + 14.0 * k as f32));
+            }
+        };
+        // A foot: an address over a bar in the bottom eighth.
+        let mut glyphs = text("www.example.com", 200.0, 765.0);
+        body(&mut glyphs);
+        let foot = [200.0, 757.0, 275.0, 767.0];
+        let p = prepare(&page(glyphs, vec![graphic([40.0, 745.0, 560.0, 790.0])]), &[], Vec::new(), &[foot]);
+        assert!(p.decorations.iter().any(|d| d[0] <= 40.0 && d[2] >= 560.0 && d[1] <= 745.0 && d[3] >= 790.0), "{:?}", p.decorations);
+        assert!(p.content.graphics.is_empty());
+        // A schematic's supply pin, the same on every page, in its top part.
+        let mut glyphs = text("GND", 200.0, 60.0);
+        body(&mut glyphs);
+        let label = [200.0, 52.0, 215.0, 62.0];
+        let p = prepare(&page(glyphs, vec![graphic([40.0, 40.0, 560.0, 250.0])]), &[], Vec::new(), &[label]);
+        assert!(!p.decorations.iter().any(|d| d[1] <= 52.0 && d[3] >= 62.0 && d[3] - d[1] < 20.0), "{:?}", p.decorations);
     }
 
     #[test]
