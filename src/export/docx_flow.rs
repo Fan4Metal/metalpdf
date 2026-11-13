@@ -697,24 +697,19 @@ impl Writer {
                 continue;
             }
             let size = self.pages[start].size;
-            let mut ms: [Vec<f32>; 4] = Default::default();
+            let mut ms: [Vec<f32>; 3] = Default::default();
             for pg in &self.pages[start..i] {
                 if let Some(e) = pg.extent {
                     ms[0].push(e[0]);
                     ms[1].push(e[1]);
                     ms[2].push(size[0] - e[2]);
-                    ms[3].push(size[1] - e[3]);
                 }
             }
             let pick = |v: &mut Vec<f32>, limit: f32| {
                 v.sort_by(f32::total_cmp);
                 v.get(v.len() / 2).copied().unwrap_or(72.0).clamp(18.0, limit.max(18.0))
             };
-            // The bottom margin places nothing (the gaps are counted from
-            // the top): half of it is room for lines that come out taller
-            // in Word, so that a footer does not go over to a page alone.
-            let bottom = (pick(&mut ms[3], 0.3 * size[1]) / 4.0).max(14.0);
-            let margins = [pick(&mut ms[0], 0.3 * size[0]), pick(&mut ms[1], 0.3 * size[1]), pick(&mut ms[2], 0.3 * size[0]), bottom];
+            let margins = [pick(&mut ms[0], 0.3 * size[0]), pick(&mut ms[1], 0.3 * size[1]), pick(&mut ms[2], 0.3 * size[0]), BOTTOM_MARGIN];
             runs.push((start, i, margins));
             start = i;
         }
@@ -743,7 +738,7 @@ impl Writer {
             for pi in from..to {
                 let pg = &self.pages[pi];
                 let size = pg.size;
-                let mut margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), ((size[1]-e[3])/4.0).clamp(14.0, 0.15*size[1])]);
+                let mut margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), BOTTOM_MARGIN]);
                 let grid_carrier = !pg.decorations.is_empty() && pg.segments.first().is_some_and(|s| s.table.is_some() || s.blocks.first().is_some_and(|(_, b)| matches!(b, Block::Grid(_))));
                 if grid_carrier {margins[1]=(margins[1]-1.0).max(0.0);}
                 out.margin_left=margins[0];
@@ -1154,6 +1149,12 @@ fn drop_cap_xml(x: &mut String, cap: &DropCap, p: &DocPara, before: f32, out: &m
 fn word_line(p: &DocPara) -> f32 {
     if p.tabs.iter().any(|t| t.leader) || p.lines >= 2 { p.pitch } else { 1.17 * p.size }
 }
+
+/// The bottom margin of every page. It places nothing (the gaps are
+/// counted from the top), so all of it is room for lines that come out
+/// taller in Word: derived from the text's extent, it grew when a page
+/// number became a decoration, and a block that had fit went over.
+const BOTTOM_MARGIN: f32 = 14.0;
 
 /// Where Word puts the baseline in a line box: at 4/5 of its height.
 const BASELINE_IN_LINE: f32 = 0.8;
