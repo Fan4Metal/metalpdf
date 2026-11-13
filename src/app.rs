@@ -654,10 +654,16 @@ impl App {
     /// the defaults.
     fn view_for(&self, path: &Path) -> ViewState {
         let mut view = ViewState::new(self.settings.view_mode, self.settings.zoom);
+        view.spread = self.spread_setting();
         if let Some(position) = self.settings.position(path) {
             view.restore(position);
         }
         view
+    }
+
+    /// One page a row or two, as the settings have it.
+    fn spread_setting(&self) -> crate::layout::Spread {
+        crate::layout::Spread::of(self.settings.two_pages, self.settings.cover_alone)
     }
 
     /// The page numbering shift a document at `path` was left with.
@@ -1670,7 +1676,7 @@ impl App {
             }
         }
         // The presets and the modes by their place on the toolbar: 1 100 %,
-        // 2 fit width, 3 fit page, 4 continuous, 5 single.
+        // 2 fit width, 3 fit page, 4 continuous, 5 single, 6 two pages.
         for (key, zoom) in [(Key::Num1, ZoomSetting::Scale(1.0)), (Key::Num2, ZoomSetting::FitWidth), (Key::Num3, ZoomSetting::FitPage)] {
             if consume(Modifiers::NONE, key) {
                 view.set_zoom(zoom, None, &sizes, fallback);
@@ -1684,6 +1690,8 @@ impl App {
                 mode = Some(m);
             }
         }
+        // 6: two pages side by side, or one.
+        let two_pages = consume(Modifiers::NONE, Key::Num6).then_some(view.spread == crate::layout::Spread::None);
         if consume(Modifiers::COMMAND, Key::Plus)
             || consume(Modifiers::COMMAND, Key::Equals)
             || consume(Modifiers::COMMAND | Modifiers::SHIFT, Key::Plus)
@@ -1702,6 +1710,9 @@ impl App {
         if let Some(zoom) = chosen {
             self.remember_zoom(zoom);
         }
+        if let Some(on) = two_pages {
+            self.set_spread(on, self.settings.cover_alone);
+        }
         if let Some(mode) = mode
             && self.settings.view_mode != mode
         {
@@ -1717,6 +1728,22 @@ impl App {
         }
         if actions.iter().any(|a| matches!(a, ToolbarAction::CancelExport)) {
             self.engine.request(Request::CancelExport);
+        }
+        // Two pages a row and the cover alone: for the tab and, as the
+        // settings, the documents opened from now on.
+        let (mut two_pages, mut cover_alone) = (self.settings.two_pages, self.settings.cover_alone);
+        if let Some(tab) = self.windows[self.current].active_tab() {
+            two_pages = tab.view.spread != crate::layout::Spread::None;
+        }
+        for action in &actions {
+            match *action {
+                ToolbarAction::TwoPages(on) => two_pages = on,
+                ToolbarAction::CoverAlone(on) => cover_alone = on,
+                _ => {}
+            }
+        }
+        if actions.iter().any(|a| matches!(a, ToolbarAction::TwoPages(_) | ToolbarAction::CoverAlone(_))) {
+            self.set_spread(two_pages, cover_alone);
         }
         let engine = &self.engine;
         let mut mode_change = None;
@@ -1764,7 +1791,12 @@ impl App {
                         tab.image = None;
                         tab.selection = None;
                     }
-                    ToolbarAction::Print | ToolbarAction::CancelPrint | ToolbarAction::Export(_) | ToolbarAction::CancelExport => {}
+                    ToolbarAction::Print
+                    | ToolbarAction::CancelPrint
+                    | ToolbarAction::Export(_)
+                    | ToolbarAction::CancelExport
+                    | ToolbarAction::TwoPages(_)
+                    | ToolbarAction::CoverAlone(_) => {}
                 }
             }
         }
@@ -1783,6 +1815,20 @@ impl App {
         }
         if shift_change {
             // Kept with the document's position.
+            self.settings_dirty = true;
+        }
+    }
+
+    /// Two pages a row or one, and whether a spread's first page stands
+    /// alone: for the active tab and, as the settings, the documents
+    /// opened from now on (as the view mode).
+    fn set_spread(&mut self, two_pages: bool, cover_alone: bool) {
+        if let Some(tab) = self.windows[self.current].active_tab_mut() {
+            tab.view.set_spread(crate::layout::Spread::of(two_pages, cover_alone));
+        }
+        if (self.settings.two_pages, self.settings.cover_alone) != (two_pages, cover_alone) {
+            self.settings.two_pages = two_pages;
+            self.settings.cover_alone = cover_alone;
             self.settings_dirty = true;
         }
     }
@@ -2645,6 +2691,8 @@ impl App {
                     zoom_factor: crate::layout::zoom_of_scale(layout.scale),
                     zoom: tab.view.zoom,
                     mode: tab.view.mode,
+                    spread: tab.view.spread,
+                    cover_alone: self.settings.cover_alone,
                     editing: tab.editing,
                     note,
                     note_is_error: false,
@@ -2662,6 +2710,8 @@ impl App {
                     zoom_factor: 1.0,
                     zoom: self.settings.zoom,
                     mode: self.settings.view_mode,
+                    spread: self.spread_setting(),
+                    cover_alone: self.settings.cover_alone,
                     editing: false,
                     note: String::new(),
                     note_is_error: false,

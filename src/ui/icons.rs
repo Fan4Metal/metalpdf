@@ -126,6 +126,9 @@ pub enum Icon {
     /// One page with a folded corner, filled lines: one page at a time
     /// (MetalPDF).
     SinglePage,
+    /// Two pages side by side, meeting at the spine, a line of text on
+    /// each: an open book's spread, two pages at a time (MetalPDF).
+    TwoPages,
     /// A panel at the left of a window: the sidebar toggle (MetalPDF).
     Sidebar,
     /// A window with a page filling its width, cut top and bottom: zoom
@@ -210,6 +213,7 @@ impl Icon {
         Icon::Library,
         Icon::Continuous,
         Icon::SinglePage,
+        Icon::TwoPages,
         Icon::Sidebar,
         Icon::FitWidth,
         Icon::FitPage,
@@ -411,6 +415,15 @@ pub fn paint(painter: &Painter, icon: Icon, c: Pos2, size: f32, color: Color32, 
             painter.add(polyline(&[(1.0, -6.0), (1.0, -2.5), (4.5, -2.5)]));
             painter.line_segment([p(-2.5, 0.5), p(2.5, 0.5)], pen(1.0));
             painter.line_segment([p(-2.5, 3.0), p(2.5, 3.0)], pen(1.0));
+        }
+        Icon::TwoPages => {
+            // Two pages meeting at the spine, two lines of text on each.
+            painter.add(closed(&[(0.0, -5.0), (-6.5, -5.0), (-6.5, 5.0), (0.0, 5.0), (6.5, 5.0), (6.5, -5.0)]));
+            painter.line_segment([p(0.0, -5.0), p(0.0, 5.0)], line);
+            for y in [-2.0, 0.5] {
+                painter.line_segment([p(-4.5, y), p(-2.0, y)], pen(1.0));
+                painter.line_segment([p(2.0, y), p(4.5, y)], pen(1.0));
+            }
         }
         Icon::FitWidth => {
             // A window, and a page as wide as its inside, running off the

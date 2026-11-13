@@ -744,6 +744,9 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     if settled && !visible.is_empty() && tab.doc.ready() {
         let count = tab.doc.page_count;
         let (ahead, behind) = if tab.view.forward { (AHEAD, BEHIND) } else { (BEHIND, AHEAD) };
+        // Two pages a row: as many rows ahead and behind.
+        let per_row = if tab.view.spread == layout::Spread::None { 1 } else { 2 };
+        let (ahead, behind) = (ahead * per_row, behind * per_row);
         let mut near: Vec<usize> = Vec::new();
         for k in 1..=ahead {
             if visible.end - 1 + k < count {

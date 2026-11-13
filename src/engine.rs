@@ -89,6 +89,8 @@ pub struct FirstRender {
     pub pixels_per_point: f32,
     pub zoom: ZoomSetting,
     pub turns: u8,
+    /// The pages two a row, as an open book's spread.
+    pub two_pages: bool,
     pub page: usize,
 }
 
@@ -1366,7 +1368,7 @@ pub fn numbering_shift(samples: &[(usize, String)]) -> Option<i32> {
 /// The pixel width of a page of `size` for the first render: the same sum
 /// the UI does once it knows the view (`layout::render_width`).
 pub fn first_width(size: [f32; 2], first: FirstRender) -> u32 {
-    crate::layout::render_width(size, first.zoom, first.turns, first.viewport, first.pixels_per_point)
+    crate::layout::render_width(size, first.zoom, first.turns, first.two_pages, first.viewport, first.pixels_per_point)
 }
 
 #[cfg(test)]
@@ -1471,6 +1473,7 @@ mod tests {
             pixels_per_point: 2.0,
             zoom: ZoomSetting::FitWidth,
             turns: 0,
+            two_pages: false,
             page: 0,
         };
         // Fit to the width less the gaps, at two pixels a point.

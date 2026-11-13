@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::layout::{self, Anchor, Layout};
+use crate::layout::{self, Anchor, Layout, Spread};
 use crate::settings::{FilePosition, ViewMode, ZoomSetting};
 
 /// New full renders wait this long after the last zoom step or resize:
@@ -17,6 +17,8 @@ pub const GESTURE_SETTLE: Duration = Duration::from_millis(120);
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
     pub mode: ViewMode,
+    /// One page a row or two (`Layout::new`).
+    pub spread: Spread,
     pub zoom: ZoomSetting,
     /// Quarter turns clockwise.
     pub turns: u8,
@@ -87,6 +89,7 @@ impl ViewState {
     pub fn new(mode: ViewMode, zoom: ZoomSetting) -> ViewState {
         ViewState {
             mode,
+            spread: Spread::None,
             zoom,
             turns: 0,
             anchor: Anchor::default(),
@@ -125,7 +128,7 @@ impl ViewState {
 
     /// The layout for `sizes` in the view as last seen.
     pub fn layout(&self, sizes: &[Option<[f32; 2]>], fallback: [f32; 2]) -> Layout {
-        Layout::new(self.mode, self.zoom, self.turns, sizes, fallback, self.viewport, self.anchor.page)
+        Layout::new(self.mode, self.spread, self.zoom, self.turns, sizes, fallback, self.viewport, self.anchor.page)
     }
 
     /// Whether renders at the current scale may be asked for.
@@ -307,16 +310,23 @@ impl ViewState {
         if down { scroll + 1.0 >= bottom } else { scroll <= top + 1.0 }
     }
 
-    /// Single-page mode: the next page from its top, or the previous one
-    /// from its bottom.
+    /// The first page of the row after page `page`'s (`forward`) or before
+    /// it: the next or previous page, or spread; `None` past either end.
+    fn row_from(&self, page: usize, forward: bool, count: usize) -> Option<usize> {
+        let row = self.spread.row_of(page);
+        let row = if forward { row + 1 } else { row.checked_sub(1)? };
+        let pages = self.spread.row_pages(row, count);
+        (!pages.is_empty()).then_some(pages.start)
+    }
+
+    /// Single-page mode: the next page (spread) from its top, or the
+    /// previous one from its bottom.
     fn flip(&mut self, down: bool, count: usize) {
-        if down {
-            if self.anchor.page + 1 < count {
-                self.go_to_page(self.anchor.page + 1, count);
+        if let Some(page) = self.row_from(self.anchor.page, down, count) {
+            self.go_to_page(page, count);
+            if !down {
+                self.anchor.offset = 1.0;
             }
-        } else if self.anchor.page > 0 {
-            self.go_to_page(self.anchor.page - 1, count);
-            self.anchor.offset = 1.0;
         }
     }
 
@@ -368,8 +378,9 @@ impl ViewState {
 
     /// Next or previous page (`Right`/`Left` in single-page mode, the
     /// sidebar, `Ctrl+PgDn`).
+    /// A spread at a time with two pages a row.
     pub fn turn_page(&mut self, forward: bool, count: usize) {
-        let page = if forward { self.current + 1 } else { self.current.saturating_sub(1) };
+        let page = self.row_from(self.current, forward, count).unwrap_or(if forward { count } else { 0 });
         if page < count {
             self.go_to_page(page, count);
         }
@@ -443,6 +454,16 @@ impl ViewState {
         if mode != self.mode {
             self.mode = mode;
             // The page the reader was on, from its top.
+            self.anchor = Layout::anchor_to_page(self.current);
+            self.unsettle();
+        }
+    }
+
+    /// One page a row or two: the reader stays on the page they were on,
+    /// from its row's top.
+    pub fn set_spread(&mut self, spread: Spread) {
+        if spread != self.spread {
+            self.spread = spread;
             self.anchor = Layout::anchor_to_page(self.current);
             self.unsettle();
         }
@@ -698,6 +719,41 @@ mod tests {
         let (top, bottom) = layout.page_scroll_range(0, 400.0);
         let expected = ((bottom - top) / WHEEL_STEP).ceil() as usize + 1;
         assert_eq!(notches, expected);
+    }
+
+    #[test]
+    fn spreads_turn_two_pages_at_a_time() {
+        let s = sizes(6);
+        let mut view = ViewState::new(ViewMode::Single, ZoomSetting::FitPage);
+        view.viewport = [1000.0, 800.0];
+        view.set_spread(Spread::Cover);
+        // The cover, then the spreads 2–3 and 4–5, then page 6 alone.
+        let layout = view.layout(&s, A4);
+        let mut shown = vec![layout.visible(layout.scroll_of(view.anchor), 800.0)];
+        for _ in 0..4 {
+            view.wheel_single(&view.layout(&s, A4), -1.0, 6);
+            let layout = view.layout(&s, A4);
+            shown.push(layout.visible(layout.scroll_of(view.anchor), 800.0));
+        }
+        assert_eq!(shown, [0..1, 1..3, 3..5, 5..6, 5..6]);
+        // Back a spread at a time, from the bottom of each.
+        view.page_step(&view.layout(&s, A4), false, 6);
+        assert_eq!(view.anchor.page, 3);
+        // The keys turn a spread from the page the reader is on.
+        view.current = 3;
+        view.turn_page(false, 6);
+        assert_eq!(view.anchor.page, 1);
+        view.current = 2;
+        view.turn_page(true, 6);
+        assert_eq!(view.anchor.page, 3);
+        // Without the cover, the first two pages together.
+        view.current = 3;
+        view.set_spread(Spread::Pairs);
+        let layout = view.layout(&s, A4);
+        assert_eq!(layout.visible(layout.scroll_of(view.anchor), 800.0), 2..4);
+        view.current = 2;
+        view.turn_page(false, 6);
+        assert_eq!(view.anchor.page, 0);
     }
 
     #[test]

@@ -263,6 +263,7 @@ fn main() -> eframe::Result {
             pixels_per_point: settings.window.map_or_else(system_scale, |w| w.scale_factor),
             zoom: position.map_or(settings.zoom, |p| p.zoom),
             turns: position.map_or(0, |p| p.rotation % 4),
+            two_pages: settings.two_pages,
             page: position.map_or(0, |p| p.page),
         };
         (first_id, path.clone(), first)

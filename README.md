@@ -26,7 +26,7 @@ MetalPDF is a PDF viewer built around one idea: a document should be on screen t
 - **Instant**: the first page is rendered while the window is still being created; a 450 MB textbook of 1,300 pages opens in under 10 ms, and its first page is on screen about 160 ms after the program starts (see [Performance](#performance)).
 - **Never blank**: pages scrolled to are drawn from the nearest render at hand or a small preview until the exact one arrives; renders nobody waits for any more are dropped mid-way.
 - **Tabs and windows**: several documents in one window, a tab dragged out becomes a window; a second launch hands its files to the running copy; the last session is opened again (see [Tabs and windows](#tabs-and-windows)).
-- **Continuous or single page**, fit width, fit page or any zoom, quarter turns, the keyboard of a viewer (see [Keyboard shortcuts](#keyboard-shortcuts)).
+- **Continuous or single page, one page or two side by side**, fit width, fit page or any zoom, quarter turns, the keyboard of a viewer (see [Keyboard shortcuts](#keyboard-shortcuts)).
 - **Sidebar** with page thumbnails and the document's outline, both following the page being read.
 - **Find** across the document, with the hits highlighted on the pages and listed in the sidebar; **text selection** by dragging, copied with Ctrl+C.
 - **Links** inside the document and to the web, with a history for going back.
@@ -69,6 +69,7 @@ The toolbar under the tabs (not shown on the start page) holds:
 - the zoom with its menu, and the three zoom presets: actual size, fit width, fit page (keys `1`, `2`, `3`); the one in force is lit, and a preset chosen is the zoom new documents open at;
 - the two turn buttons;
 - the view mode: continuous pages, or one page at a time, where the scroll bar still spans the document and dragging it turns the pages;
+- two pages side by side (key `6`), as an open book's spread, so that a picture across two pages is seen whole; in single-page mode the pages are turned a spread at a time. By default the first page stands alone on the right, as a book's cover, and the even pages are on the left; the button's context menu turns this off, so that the first two pages form the first spread;
 - the text tool and the hand, the pencil of the editing mode, the printer, which opens the print dialog, and the page with an arrow, whose menu saves the document as Word or PowerPoint;
 - on the right, a note that says when an edit was refused or a file saved, and the progress of a print job or a save as Word or PowerPoint with a cross to cancel it.
 
@@ -233,6 +234,7 @@ In the layout-preserving Word mode, a table's text is edited as separate lines, 
 | `Ctrl+G` | The page field |
 | `1`, `2`, `3` | 100 %, fit width, fit page |
 | `4`, `5` | Continuous pages, one page at a time |
+| `6` | Two pages side by side, or one |
 | `Ctrl++`, `Ctrl+−`, `Ctrl+wheel` | Zoom in, zoom out (round the pointer with the wheel) |
 | `R`, `Shift+R` | Turn the pages right, left |
 | `Alt+←`, `Alt+→` | Back, forward through the jumps |

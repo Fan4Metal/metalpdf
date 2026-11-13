@@ -243,6 +243,10 @@ pub struct Settings {
     pub session_active: usize,
     pub window: Option<WindowGeometry>,
     pub view_mode: ViewMode,
+    /// The pages two a row, as an open book's spread.
+    pub two_pages: bool,
+    /// In a spread, the first page alone, as a book's cover.
+    pub cover_alone: bool,
     /// What the mouse does over the pages: select text or drag them.
     pub tool: Tool,
     /// The zoom a document opens with when it has no saved position.
@@ -275,6 +279,8 @@ impl Default for Settings {
             session_active: 0,
             window: None,
             view_mode: ViewMode::Continuous,
+            two_pages: false,
+            cover_alone: true,
             tool: Tool::Select,
             zoom: ZoomSetting::FitWidth,
             sidebar_visible: false,
