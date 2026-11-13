@@ -682,13 +682,16 @@ pub fn cut(idx: &[usize], rects: &[Rect], column: [f32; 2], gutter: f32, out: &m
     }
     let mut sorted = idx.to_vec();
     sorted.sort_by(|&a, &b| rects[a][1].total_cmp(&rects[b][1]).then(rects[a][0].total_cmp(&rects[b][0])));
-    // Rows: what overlaps vertically by more than a point.
+    // Rows: what overlaps vertically by more than a point and a quarter of
+    // its height. Small print set tight (8 on 9.6, boxes 10.6 high) overlaps
+    // the line above by a point: with a point alone, an imprint's staff list
+    // was one row, its labels and names never seen as pairs.
     let mut rows: Vec<Vec<usize>> = Vec::new();
     let mut bottom = f32::NEG_INFINITY;
     for i in sorted {
         let r = rects[i];
         match rows.last_mut() {
-            Some(row) if r[1] < bottom - 1.0 => {
+            Some(row) if r[1] < bottom - (0.25 * (r[3] - r[1])).max(1.0) => {
                 row.push(i);
                 bottom = bottom.max(r[3]);
             }
@@ -1588,6 +1591,22 @@ mod tests {
         assert_eq!(segs.len(), 5, "{segs:?}");
         assert!(segs.iter().all(|s| s.line && s.columns.len() == 2), "{segs:?}");
         assert_eq!(texts(&items).iter().filter(|t| t.as_str() == "Transfer" || t.as_str() == "To a card").count(), 2);
+    }
+
+    #[test]
+    fn labels_and_values_set_tight_are_still_rows() {
+        // An imprint's staff list: boxes 11.5 high on a pitch of 10.3, each
+        // row over the one above by more than a point.
+        let mut g = Vec::new();
+        for (k, (label, value)) in [("Editor", "A. Smith"), ("Proofreader", "B. Jonesworth, E. Li"), ("Artist", "C. Li"), ("Layout", "D. Whitehouse")].into_iter().enumerate() {
+            let y = 100.0 + 10.3 * k as f32;
+            g.extend(text(label, 20.0, y));
+            g.extend(flush_right(value, 250.0, y));
+        }
+        let items = analyse(&page(g), OPTS);
+        let segs = segments(&items, &[]);
+        assert_eq!(segs.len(), 4, "{segs:?}");
+        assert!(segs.iter().all(|s| s.line && s.columns.len() == 2), "{segs:?}");
     }
 
     #[test]
