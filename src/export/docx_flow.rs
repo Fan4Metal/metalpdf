@@ -873,9 +873,20 @@ impl Writer {
 /// flows, the words staying text.
 fn drop_underlines(content: &mut PageContent) {
     let lines = layout::lines(content.glyphs.iter().filter(|g| !g.invisible).cloned().collect());
+    // A fraction's bar has a denominator right under it and a line going
+    // through it, its baseline a little under the bar (`Q/f – the
+    // aperture`): not an underline.
+    let bar = |r: [f32; 4]| {
+        let visible = || content.glyphs.iter().filter(|g| !g.invisible && !g.ch.is_whitespace());
+        let under = visible().any(|g| {
+            let c = (g.rect[0] + g.rect[2]) / 2.0;
+            c > r[0] && c < r[2] && g.rect[1] >= r[1] - 1.0 && g.rect[1] < r[3] + 0.4 * g.size && g.baseline > r[3] + 0.5 * g.size
+        });
+        under && visible().any(|g| g.baseline > r[1] && g.baseline < r[1] + 0.5 * g.size && (g.rect[0] > r[2] || g.rect[2] < r[0]) && g.rect[2] > r[0] - 3.0 * g.size && g.rect[0] < r[2] + 3.0 * g.size)
+    };
     let underline = |r: [f32; 4]| {
         let (w, h) = (r[2] - r[0], r[3] - r[1]);
-        h <= 1.5 && w >= 4.0 && w >= 3.0 * h
+        h <= 1.5 && w >= 4.0 && w >= 3.0 * h && !bar(r)
             && lines.iter().any(|l| {
                 r[1] >= l.baseline - 0.05 * l.size && r[1] <= l.baseline + 0.35 * l.size && r[0] >= l.rect[0] - 1.0 && r[2] <= l.rect[2] + 1.0
             })
@@ -1714,9 +1725,16 @@ mod tests {
         // Under three words of a line; across the page far under the text.
         content.graphics.push(path([x + 10.0, b + 1.5, x + 60.0, b + 2.1]));
         content.graphics.push(path([20.0, 700.0, 580.0, 700.6]));
+        // A fraction's bar under its numerator, a line going through it.
+        let q = Glyph { source: -1, ch: 'Q', rect: [20.0, 590.0, 28.0, 601.0], x: 20.0, baseline: 600.0, size: 12.0, font: 0, color: [0; 3], space_before: false, invisible: false };
+        let dash = Glyph { ch: '–', rect: [32.0, 597.0, 38.0, 608.0], x: 32.0, baseline: 607.0, ..q.clone() };
+        let f = Glyph { ch: 'f', rect: [21.0, 605.0, 27.0, 616.0], x: 21.0, baseline: 614.0, ..q.clone() };
+        content.glyphs.extend([q, dash, f]);
+        content.graphics.push(path([19.0, 604.0, 29.0, 604.5]));
         drop_underlines(&mut content);
-        assert_eq!(content.graphics.len(), 1);
+        assert_eq!(content.graphics.len(), 2);
         assert_eq!(content.graphics[0].rect[1], 700.0);
+        assert_eq!(content.graphics[1].rect[1], 604.0);
     }
 
     #[test]
