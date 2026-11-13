@@ -391,6 +391,7 @@ impl Writer {
         let scale = super::PICTURE_DPI / 72.0;
         let mut form = forms::detect(content, fonts);
         let mut flow_content = content.clone();
+        drop_underlines(&mut flow_content);
         // A scan's figures, out of the page-wide picture its text lies over.
         for rect in scan::figures(page, content) {
             flow_content.graphics.push(super::Graphic { rect, kind: super::GraphicKind::Image, object: None });
@@ -858,6 +859,24 @@ impl Writer {
         self.zip.finish().map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// The underlines of words: thin straight marks just under a line's
+/// baseline, within its text's reach. Left among the graphics, an
+/// underlined term with its words became an inline picture that broke its
+/// line ("Line Width" in a manual's prose); they are dropped from what
+/// flows, the words staying text.
+fn drop_underlines(content: &mut PageContent) {
+    let lines = layout::lines(content.glyphs.iter().filter(|g| !g.invisible).cloned().collect());
+    let underline = |r: [f32; 4]| {
+        let (w, h) = (r[2] - r[0], r[3] - r[1]);
+        h <= 1.5 && w >= 4.0 && w >= 3.0 * h
+            && lines.iter().any(|l| {
+                r[1] >= l.baseline - 0.05 * l.size && r[1] <= l.baseline + 0.35 * l.size && r[0] >= l.rect[0] - 1.0 && r[2] <= l.rect[2] + 1.0
+            })
+    };
+    content.graphics.retain(|g| !(matches!(g.kind, super::GraphicKind::Path { curved: false }) && underline(g.rect)));
+    content.rules.retain(|r| !underline(r.rect));
 }
 
 fn same_rect(a: [f32; 4], b: [f32; 4]) -> bool {
@@ -1672,6 +1691,20 @@ mod tests {
         // The pBdr goes before the spacing, as WordprocessingML orders it.
         assert!(xml.find("<w:pBdr>").unwrap() < xml.find("<w:spacing").unwrap());
         assert_eq!((prev.baseline, prev.bottom), (Some(baseline + 9.0), Some(bottom + 9.0)));
+    }
+
+    #[test]
+    fn underlines_go_and_rules_stay() {
+        let mut content = initial_page();
+        let line = layout::lines(content.glyphs.clone()).into_iter().find(|l| l.glyphs.len() > 20).unwrap();
+        let (b, x) = (line.baseline, line.rect[0]);
+        let path = |rect| super::super::Graphic { rect, kind: super::super::GraphicKind::Path { curved: false }, object: None };
+        // Under three words of a line; across the page far under the text.
+        content.graphics.push(path([x + 10.0, b + 1.5, x + 60.0, b + 2.1]));
+        content.graphics.push(path([20.0, 700.0, 580.0, 700.6]));
+        drop_underlines(&mut content);
+        assert_eq!(content.graphics.len(), 1);
+        assert_eq!(content.graphics[0].rect[1], 700.0);
     }
 
     #[test]
