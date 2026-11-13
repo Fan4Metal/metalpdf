@@ -166,10 +166,13 @@ fn part(xml: &str) -> Vec<u8> {
 }
 
 /// The parts shared by both Word layout modes.
-pub(super) fn start_package(zip: &mut ZipWriter<BufWriter<File>>, meta: &Meta) -> std::io::Result<()> {
+/// `hyphenate`: Word hyphenates as it reflows (the paragraph mode: a
+/// book set with hyphens came out longer, its lines broken at spaces alone).
+pub(super) fn start_package(zip: &mut ZipWriter<BufWriter<File>>, meta: &Meta, hyphenate: bool) -> std::io::Result<()> {
     zip.add("[Content_Types].xml", &part(CONTENT_TYPES), true)?;
     zip.add("_rels/.rels", &part(ROOT_RELS), true)?;
-    zip.add("word/settings.xml", &part(SETTINGS), true)?;
+    let settings = if hyphenate { SETTINGS.replace(r#"<w:autoHyphenation w:val="0"/>"#, "<w:autoHyphenation/>") } else { SETTINGS.to_owned() };
+    zip.add("word/settings.xml", &part(&settings), true)?;
     zip.add("docProps/app.xml", &part(APP), true)?;
     zip.add("docProps/core.xml", core_xml(meta).as_bytes(), true)
 }
@@ -185,7 +188,7 @@ pub(super) fn document_rels(pictures: usize) -> String {
 
 impl Writer {
     pub fn new(mut zip: ZipWriter<BufWriter<File>>, meta: Meta) -> std::io::Result<Writer> {
-        start_package(&mut zip, &meta)?;
+        start_package(&mut zip, &meta, false)?;
         Ok(Writer {
             zip,
             pages: Vec::new(),

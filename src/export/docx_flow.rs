@@ -295,6 +295,8 @@ pub struct Writer {
     sizes: HashMap<i32, usize>,
     /// Characters by font, for the default font.
     font_use: HashMap<u16, usize>,
+    /// The flowing text's letters: other scripts, Cyrillic.
+    letters: [usize; 2],
     /// Unjustified word advances, for matching replacement font metrics.
     advances: HashMap<u16, Vec<(String, f32, f32)>>,
     /// The lines of the page to come that recur on the pages around it.
@@ -349,8 +351,8 @@ fn emu(pt: f32) -> i64 {
 
 impl Writer {
     pub fn new(mut zip: ZipWriter<BufWriter<File>>, meta: Meta) -> std::io::Result<Writer> {
-        docx::start_package(&mut zip, &meta)?;
-        Ok(Writer { zip, pages: Vec::new(), pictures: 0, sizes: HashMap::new(), font_use: HashMap::new(), advances: HashMap::new(), repeated: Vec::new() })
+        docx::start_package(&mut zip, &meta, true)?;
+        Ok(Writer { zip, pages: Vec::new(), pictures: 0, sizes: HashMap::new(), font_use: HashMap::new(), advances: HashMap::new(), repeated: Vec::new(), letters: [0; 2] })
     }
 
     /// The lines of the next page given that recur on the pages around it.
@@ -458,6 +460,9 @@ impl Writer {
                     for g in p.lines.iter().flat_map(|l| &l.glyphs) {
                         *self.sizes.entry((g.size * 2.0).round() as i32).or_default() += 1;
                         *self.font_use.entry(g.font).or_default() += 1;
+                        if g.ch.is_alphabetic() {
+                            self.letters[usize::from(('\u{400}'..='\u{4ff}').contains(&g.ch))] += 1;
+                        }
                     }
                     let normalized = wrapping::paragraph(p, &floating);
                     let mut para = doc_para(&normalized, drop_caps.iter().find(|cap| cap.starts(p)));
@@ -854,7 +859,7 @@ impl Writer {
         }
         let document = format!("{HEAD}<w:document {NS}><w:body>{body}{last_sect}</w:body></w:document>");
         self.zip.add("word/document.xml", document.as_bytes(), true).map_err(|e| e.to_string())?;
-        self.zip.add("word/styles.xml", styles_xml(body_face.as_ref(), body_size).as_bytes(), true).map_err(|e| e.to_string())?;
+        self.zip.add("word/styles.xml", styles_xml(body_face.as_ref(), body_size, if self.letters[1] > self.letters[0] { "ru-RU" } else { "en-US" }).as_bytes(), true).map_err(|e| e.to_string())?;
         self.zip.add("word/_rels/document.xml.rels", docx::document_rels(self.pictures).as_bytes(), true).map_err(|e| e.to_string())?;
         self.zip.finish().map_err(|e| e.to_string())?;
         Ok(())
@@ -1492,11 +1497,12 @@ fn scaled_run_xml(x: &mut String, span: &Span, face: &super::Face, position: i64
 
 /// The styles: the body's font and size as the default, and Word's own
 /// Heading 1–3 (the runs carry their look; the styles give the outline).
-fn styles_xml(face: Option<&super::Face>, size: f32) -> String {
+/// `lang`: the text's language, for Word's hyphenation and proofing.
+fn styles_xml(face: Option<&super::Face>, size: f32, lang: &str) -> String {
     let family = esc(&face.map_or("Arial".to_owned(), |f| f.family.clone()));
     let hp = ((size * 2.0).round() as i64).clamp(2, 3276);
     let mut s = format!(
-        r#"{HEAD}<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}" w:eastAsia="{family}" w:cs="{family}"/><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/><w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style><w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"><w:name w:val="Default Paragraph Font"/><w:uiPriority w:val="1"/><w:semiHidden/><w:unhideWhenUsed/></w:style>"#
+        r#"{HEAD}<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}" w:eastAsia="{family}" w:cs="{family}"/><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/><w:lang w:val="{lang}" w:eastAsia="en-US" w:bidi="ar-SA"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style><w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"><w:name w:val="Default Paragraph Font"/><w:uiPriority w:val="1"/><w:semiHidden/><w:unhideWhenUsed/></w:style>"#
     );
     for n in 1..=3 {
         let _ = write!(
