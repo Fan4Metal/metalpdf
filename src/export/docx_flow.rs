@@ -1029,12 +1029,15 @@ struct Prev {
 /// A block as a paragraph: `col_w` the width of its column, a column
 /// break before it when asked.
 fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_break: bool, level: &dyn Fn(&DocPara) -> Option<usize>, out: &mut Out) {
+    if column_break {
+        // A paragraph a point high carries the break, and the block starts
+        // the next column. In the block's own paragraph, Word added its
+        // space before at the bottom of the column it left as well: the
+        // columns' section ran that much longer (73 points under a data
+        // sheet's left column) and pushed what follows to the next page.
+        x.push_str(r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:br w:type="column"/></w:r></w:p>"#);
+    }
     if let Block::Grid(table)=block {
-        if column_break {
-            // A table has no run to carry the break: a paragraph a point
-            // high carries it, and the table starts the next column.
-            x.push_str(r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:br w:type="column"/></w:r></w:p>"#);
-        }
         let before=(table.rect[1]-prev.bottom.unwrap_or(table.rect[1])).max(0.0);
         if before>1.0 {let _=write!(x,r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/></w:pPr></w:p>"#,tw(before));}
         forms::write(x,table,out.margin_left,out);
@@ -1090,9 +1093,6 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             }
             let _ = write!(x, r#"<w:jc w:val="{}"/>"#, jc(p.align));
             x.push_str("</w:pPr>");
-            if column_break {
-                x.push_str(r#"<w:r><w:br w:type="column"/></w:r>"#);
-            }
             for picture in &p.floating { wrapping::write(x, picture, p.top, before, out); }
             paragraph_runs(x, p, out);
             // A rule below makes the paragraph that much taller.
@@ -1111,9 +1111,6 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
                 let _ = write!(x, r#"<w:ind w:left="{}"/>"#, tw(left.min(col_w - width * k).max(0.0)));
             }
             let _ = write!(x, r#"<w:jc w:val="{}"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr>"#, jc(*align));
-            if column_break {
-                x.push_str(r#"<w:r><w:br w:type="column"/></w:r>"#);
-            }
             let _ = write!(
                 x,
                 r#"<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{n}" name="Picture {n}"/>"#
@@ -1667,6 +1664,23 @@ mod tests {
         // The pBdr goes before the spacing, as WordprocessingML orders it.
         assert!(xml.find("<w:pBdr>").unwrap() < xml.find("<w:spacing").unwrap());
         assert_eq!((prev.baseline, prev.bottom), (Some(baseline + 9.0), Some(bottom + 9.0)));
+    }
+
+    #[test]
+    fn a_column_break_is_a_paragraph_of_its_own() {
+        let (items, _) = flowing_items(&initial_page());
+        let Item::Para(p) = &items[1] else { panic!() };
+        let fonts = [FontInfo { name: "Arial".into(), ..Default::default() }];
+        let mut lookup = crate::fonts::Fonts::default();
+        let mut faces = Faces::default();
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left: 0.0, textboxes: docx::TextBoxes::new() };
+        let mut xml = String::new();
+        block_xml(&mut xml, &Block::Para(doc_para(p, None)), &mut Prev { baseline: Some(60.0), bottom: Some(62.0) }, 340.0, true, &|_| None, &mut out);
+        // The break first, alone; the paragraph with its space before in
+        // the next column, whole.
+        let (first, rest) = xml.split_once("</w:p>").unwrap();
+        assert!(first.contains(r#"<w:br w:type="column"/>"#) && !first.contains("<w:t"), "{first}");
+        assert!(!rest.contains(r#"w:type="column""#) && rest.contains("<w:t"));
     }
 
     #[test]
