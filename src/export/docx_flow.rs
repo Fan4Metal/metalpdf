@@ -713,7 +713,7 @@ impl Writer {
             // The bottom margin places nothing (the gaps are counted from
             // the top): half of it is room for lines that come out taller
             // in Word, so that a footer does not go over to a page alone.
-            let bottom = (pick(&mut ms[3], 0.3 * size[1]) / 2.0).max(14.0);
+            let bottom = (pick(&mut ms[3], 0.3 * size[1]) / 4.0).max(14.0);
             let margins = [pick(&mut ms[0], 0.3 * size[0]), pick(&mut ms[1], 0.3 * size[1]), pick(&mut ms[2], 0.3 * size[0]), bottom];
             runs.push((start, i, margins));
             start = i;
@@ -743,7 +743,7 @@ impl Writer {
             for pi in from..to {
                 let pg = &self.pages[pi];
                 let size = pg.size;
-                let mut margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), ((size[1]-e[3])/2.0).clamp(14.0, 0.15*size[1])]);
+                let mut margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), ((size[1]-e[3])/4.0).clamp(14.0, 0.15*size[1])]);
                 let grid_carrier = !pg.decorations.is_empty() && pg.segments.first().is_some_and(|s| s.table.is_some() || s.blocks.first().is_some_and(|(_, b)| matches!(b, Block::Grid(_))));
                 if grid_carrier {margins[1]=(margins[1]-1.0).max(0.0);}
                 out.margin_left=margins[0];
@@ -1102,7 +1102,8 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             paragraph_runs(x, p, out);
             // A rule below makes the paragraph that much taller.
             let below = p.rules[1].map_or(0.0, |r| r.space + r.width);
-            *prev = Prev { baseline: Some(p.last_baseline + below), bottom: Some(p.bottom + below) };
+            // Word's paragraph ends a fifth of a line under its baseline.
+            *prev = Prev { baseline: Some(p.last_baseline + below), bottom: Some(p.last_baseline + (1.0 - BASELINE_IN_LINE) * word_line(p) + below) };
         }
         Block::Picture { rel, width, height, align, left, top, bottom, region } => {
             let k = (col_w / width).min(1.0);
@@ -1148,12 +1149,24 @@ fn drop_cap_xml(x: &mut String, cap: &DropCap, p: &DocPara, before: f32, out: &m
     x.push_str("</w:p>");
 }
 
+/// The height of a paragraph's lines in Word: its pitch when it is set
+/// (several lines, a contents line), else single spacing.
+fn word_line(p: &DocPara) -> f32 {
+    if p.tabs.iter().any(|t| t.leader) || p.lines >= 2 { p.pitch } else { 1.17 * p.size }
+}
+
+/// Where Word puts the baseline in a line box: at 4/5 of its height.
+const BASELINE_IN_LINE: f32 = 0.8;
+
 fn para_before(p: &DocPara, prev: &Prev) -> f32 {
     let contents = p.tabs.iter().any(|t| t.leader);
-    let height = if contents || p.lines >= 2 { p.pitch } else { 1.17 * p.size };
+    let height = word_line(p);
     let gap = match (prev.baseline, prev.bottom) {
         (Some(b), _) => p.first_baseline - b - height,
-        (None, Some(bottom)) => p.top - bottom,
+        // After a picture: the first baseline where it is in the PDF, not
+        // the top of the line's boxes (which a TeX font puts lower than
+        // Word's line, 2.4 points a display formula).
+        (None, Some(bottom)) => p.first_baseline - bottom - BASELINE_IN_LINE * height,
         (None, None) => 0.0,
     };
     // A rule above takes its room out of the gap.
@@ -1644,7 +1657,8 @@ mod tests {
         let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left: 0.0, textboxes: docx::TextBoxes::new() };
         let mut para = doc_para(p, None);
         para.rules[1] = Some(ParaRule { color: [0xFF, 0xDD, 0x2D], width: 1.0, space: 8.0 });
-        let (baseline, bottom) = (para.last_baseline, para.bottom);
+        // Word's paragraph ends a fifth of its line under the baseline.
+        let (baseline, bottom) = (para.last_baseline, para.last_baseline + (1.0 - BASELINE_IN_LINE) * word_line(&para));
         let mut xml = String::new();
         let mut prev = Prev::default();
         block_xml(&mut xml, &Block::Para(para), &mut prev, 340.0, false, &|_| None, &mut out);
