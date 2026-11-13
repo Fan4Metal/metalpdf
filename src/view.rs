@@ -17,8 +17,14 @@ pub const GESTURE_SETTLE: Duration = Duration::from_millis(120);
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
     pub mode: ViewMode,
-    /// One page a row or two (`Layout::new`).
+    /// One page a row or two (`Layout::new`): made by `sync_spread` from
+    /// `two_pages` and the cover.
     pub spread: Spread,
+    /// Two pages a row.
+    pub two_pages: bool,
+    /// The spreads' pairing chosen for this document: the first page
+    /// alone or not; `None` follows the page numbering (`sync_spread`).
+    pub cover: Option<bool>,
     pub zoom: ZoomSetting,
     /// Quarter turns clockwise.
     pub turns: u8,
@@ -90,6 +96,8 @@ impl ViewState {
         ViewState {
             mode,
             spread: Spread::None,
+            two_pages: false,
+            cover: None,
             zoom,
             turns: 0,
             anchor: Anchor::default(),
@@ -113,6 +121,7 @@ impl ViewState {
         self.turns = position.rotation % 4;
         self.anchor = Anchor { page: position.page, offset: position.offset };
         self.current = position.page;
+        self.cover = position.cover_alone;
     }
 
     pub fn position(&self, path: &std::path::Path) -> FilePosition {
@@ -123,6 +132,7 @@ impl ViewState {
             zoom: self.zoom,
             rotation: self.turns,
             page_shift: 0,
+            cover_alone: self.cover,
         }
     }
 
@@ -459,6 +469,21 @@ impl ViewState {
         }
     }
 
+    /// Whether the first page stands alone in this document's spreads: as
+    /// chosen for it, else so that the even printed pages are on the left
+    /// (`page_shift`, the numbering's, `DocState::page_shift`: the file's
+    /// first page is printed page `1 - page_shift`, odd, a right-hand page,
+    /// when the shift is even, the file's own numbering among them).
+    pub fn cover_alone(&self, page_shift: i32) -> bool {
+        self.cover.unwrap_or(page_shift.rem_euclid(2) == 0)
+    }
+
+    /// The spread made again from `two_pages`, the cover and the page
+    /// numbering, every frame (the numbering arrives late).
+    pub fn sync_spread(&mut self, page_shift: i32) {
+        self.set_spread(Spread::of(self.two_pages, self.cover_alone(page_shift)));
+    }
+
     /// One page a row or two: the reader stays on the page they were on,
     /// from its row's top.
     pub fn set_spread(&mut self, spread: Spread) {
@@ -757,9 +782,33 @@ mod tests {
     }
 
     #[test]
+    fn the_spreads_follow_the_numbering_unless_shifted() {
+        let mut view = ViewState::new(ViewMode::Continuous, ZoomSetting::FitPage);
+        // Printed page 1 on the right: the file's first page alone when it
+        // is page 1 (no shift) or an odd page of the front matter.
+        assert!(view.cover_alone(0));
+        assert!(!view.cover_alone(1));
+        assert!(view.cover_alone(16));
+        assert!(!view.cover_alone(-1));
+        view.sync_spread(0);
+        assert_eq!(view.spread, Spread::None);
+        view.two_pages = true;
+        view.sync_spread(16);
+        assert_eq!(view.spread, Spread::Cover);
+        // Shifted by hand: kept whatever the numbering.
+        view.cover = Some(false);
+        view.sync_spread(16);
+        assert_eq!(view.spread, Spread::Pairs);
+        view.sync_spread(3);
+        assert_eq!(view.spread, Spread::Pairs);
+    }
+
+    #[test]
     fn positions_round_trip() {
         let mut view = ViewState::new(ViewMode::Continuous, ZoomSetting::FitWidth);
-        view.restore(&FilePosition { path: "a.pdf".into(), page: 4, offset: 0.25, zoom: ZoomSetting::FitPage, rotation: 1, page_shift: 0 });
+        view.restore(&FilePosition { path: "a.pdf".into(), page: 4, offset: 0.25, zoom: ZoomSetting::FitPage, rotation: 1, page_shift: 0, cover_alone: Some(false) });
+        assert_eq!(view.cover, Some(false));
+        assert_eq!(view.position(std::path::Path::new("a.pdf")).cover_alone, Some(false));
         assert_eq!(view.anchor, Anchor { page: 4, offset: 0.25 });
         assert_eq!(view.turns, 1);
         let p = view.position(std::path::Path::new("a.pdf"));

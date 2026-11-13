@@ -136,6 +136,8 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, textures: &mut Textures, frame: u64, pal
     let area = ui.available_rect_before_wrap();
     ui.painter().rect_filled(area, 0.0, palette.backdrop);
     tab.view.resized([area.width(), area.height()]);
+    // The spreads follow the page numbering, which may have just arrived.
+    tab.view.sync_spread(tab.doc.page_shift);
     let ppp = ui.ctx().pixels_per_point();
     // The wheel from its raw events: egui smooths a notch over several
     // frames, which would make a zoom step a frame.

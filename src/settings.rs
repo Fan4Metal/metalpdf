@@ -220,6 +220,10 @@ pub struct FilePosition {
     /// file's page `shift + 1` is page 1. 0: the file's own numbering.
     #[serde(default)]
     pub page_shift: i32,
+    /// Two pages a row: whether the first page stands alone, if chosen
+    /// for this document (else it follows `page_shift`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_alone: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -243,10 +247,9 @@ pub struct Settings {
     pub session_active: usize,
     pub window: Option<WindowGeometry>,
     pub view_mode: ViewMode,
-    /// The pages two a row, as an open book's spread.
+    /// The pages two a row, as an open book's spread (the pairing is the
+    /// document's, `FilePosition::cover_alone`).
     pub two_pages: bool,
-    /// In a spread, the first page alone, as a book's cover.
-    pub cover_alone: bool,
     /// What the mouse does over the pages: select text or drag them.
     pub tool: Tool,
     /// The zoom a document opens with when it has no saved position.
@@ -280,7 +283,6 @@ impl Default for Settings {
             window: None,
             view_mode: ViewMode::Continuous,
             two_pages: false,
-            cover_alone: true,
             tool: Tool::Select,
             zoom: ZoomSetting::FitWidth,
             sidebar_visible: false,
@@ -472,6 +474,7 @@ mod tests {
             zoom: ZoomSetting::Scale(1.5),
             rotation: 0,
             page_shift: 0,
+            cover_alone: None,
         };
         for i in 0..MAX_POSITIONS + 5 {
             settings.set_position(at(i));

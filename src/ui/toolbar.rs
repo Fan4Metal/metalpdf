@@ -9,7 +9,6 @@ use egui::{Align, Key, Layout, RichText, Ui};
 
 use super::icons::Icon;
 use crate::export::Format;
-use crate::layout::Spread;
 use crate::settings::{Tool, ViewMode, ZoomSetting};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -21,9 +20,10 @@ pub enum ToolbarAction {
     Zoom(ZoomSetting),
     Rotate { clockwise: bool },
     Mode(ViewMode),
-    /// Two pages a row, on or off; the first page alone in a spread.
+    /// Two pages a row, on or off; the spreads shifted by a page (the
+    /// first page alone or with the second).
     TwoPages(bool),
-    CoverAlone(bool),
+    ShiftSpreads,
     Tool(Tool),
     ToggleEdit,
     /// The page numbering: read off the pages, set by the number of the
@@ -51,10 +51,8 @@ pub struct ToolbarInfo {
     pub zoom_factor: f32,
     pub zoom: ZoomSetting,
     pub mode: ViewMode,
-    /// One page a row or two, and whether a spread's first page stands
-    /// alone (the setting, shown in the button's menu).
-    pub spread: Spread,
-    pub cover_alone: bool,
+    /// Two pages a row.
+    pub two_pages: bool,
     pub tool: Tool,
     /// The page numbering's shift (`DocState::page_shift`).
     pub page_shift: i32,
@@ -237,10 +235,10 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         if super::icon_button(ui, Icon::SinglePage, !continuous, tr!("One page at a time (5)", "По одной странице (5)")).clicked() {
             actions.push(ToolbarAction::Mode(ViewMode::Single));
         }
-        // Two pages side by side, an open book's spread; its menu chooses
-        // whether the first page stands alone, as a cover.
-        let two_pages = info.spread != Spread::None;
-        let spread_tip = tr!("Two pages side by side (6); right-click for the cover page", "Две страницы рядом (6); правый щелчок — обложка отдельно");
+        // Two pages side by side, an open book's spread; its menu shifts
+        // the spreads by a page.
+        let two_pages = info.two_pages;
+        let spread_tip = tr!("Two pages side by side (6); Shift+6 shifts the spreads by a page", "Две страницы рядом (6); Shift+6 сдвигает развороты на страницу");
         let spread = super::icon_button(ui, Icon::TwoPages, two_pages, spread_tip);
         if spread.clicked() {
             actions.push(ToolbarAction::TwoPages(!two_pages));
@@ -250,9 +248,9 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
                 actions.push(ToolbarAction::TwoPages(!two_pages));
                 ui.close();
             }
-            let cover = tr!("The first page alone, as a cover", "Первая страница отдельно, как обложка");
-            if ui.add(egui::Button::selectable(info.cover_alone, cover)).clicked() {
-                actions.push(ToolbarAction::CoverAlone(!info.cover_alone));
+            let shift = tr!("Shift the spreads by a page", "Сдвинуть развороты на страницу");
+            if ui.add_enabled(two_pages && info.page.is_some(), egui::Button::new(shift).shortcut_text("Shift+6")).clicked() {
+                actions.push(ToolbarAction::ShiftSpreads);
                 ui.close();
             }
         });
