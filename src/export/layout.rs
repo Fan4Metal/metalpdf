@@ -369,7 +369,9 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
                 line.settle();
                 continue 'piece;
             }
-            let goes_after = after > -0.3 * s;
+            let last_x = line.glyphs.iter().map(|g| g.x).fold(f32::MIN, f32::max);
+            let first_x = piece.glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+            let goes_after = overlap_ok(after, last_x, first_x, s);
             let gap = if goes_after { after } else if before > -0.3 * s { before } else { continue };
             let artwork_marker = line.glyphs.iter().chain(&piece.glyphs).any(|g| g.source < -1);
             // A contents line: the page number after a dot leader, the
@@ -438,7 +440,18 @@ fn follows(line: &Line, g: &Glyph, ems: f32) -> Option<f32> {
         return None;
     }
     let gap = g.rect[0] - last.rect[2];
-    (gap > -0.3 * s && g.x >= last.x - 0.1 * s && gap < ems * s && (!apart_in_size(line.size, g.size, gap) || (line.baseline - g.baseline).abs() >= 0.12 * s)).then_some(gap)
+    (overlap_ok(gap, last.x, g.x, s) && g.x >= last.x - 0.1 * s && gap < ems * s && (!apart_in_size(line.size, g.size, gap) || (line.baseline - g.baseline).abs() >= 0.12 * s)).then_some(gap)
+}
+
+/// Whether text at `x` with its box `gap` after the box of the text whose
+/// last character starts at `last_x` can go on from it: boxes a little
+/// apart or over one another by under 0.3 em, or by up to 0.6 em when its
+/// origin is well past the last character's. An italic `f`'s box hangs
+/// over its neighbours on both sides (PDFium's: 2.3 points past its
+/// advance at 12 pt): "Backoff" broke between its two f's, the rest of the
+/// line a line of its own, and Word gave it a line more.
+fn overlap_ok(gap: f32, last_x: f32, x: f32, s: f32) -> bool {
+    gap > -0.3 * s || gap > -0.6 * s && x > last_x + 0.2 * s
 }
 
 /// Text of unlike sizes (a caption beside the body) a space apart or more
@@ -1478,6 +1491,30 @@ mod tests {
         let got = lines(marker);
         assert_eq!(got.len(),1);
         assert_eq!(got[0].text(),"1 Footnote text");
+    }
+
+    #[test]
+    fn an_italic_f_overhanging_its_neighbour_keeps_the_line_whole() {
+        // "Backoff (gaps)": each f's box 2 points past its advance on
+        // either side, the second starting 4.4 points before the first ends.
+        let mut glyphs = text("In the group Backo", 50.0, 100.0);
+        let at = glyphs.last().unwrap().rect[2];
+        for (i, x) in [at, at + 3.3].into_iter().enumerate() {
+            glyphs.push(Glyph { source: -1, ch: 'f', rect: [x - 1.1 * i as f32, 91.0, x + 5.6, 102.5], x, baseline: 100.0, size: 10.0, font: 0, color: [0; 3], space_before: false, invisible: false });
+        }
+        glyphs.extend(text(" (gaps) sets the room between the fill", at + 7.0, 100.0));
+        // In the content's order, and as two pieces joined along the line.
+        for order in [false, true] {
+            let mut g = glyphs.clone();
+            if order {
+                // The second f and what follows it first.
+                let tail = g.split_off(g.len() - 32);
+                g.splice(0..0, tail);
+            }
+            let got = lines(g);
+            assert_eq!(got.len(), 1, "{:?}", got.iter().map(Line::text).collect::<Vec<_>>());
+            assert!(got[0].text().contains("Backoff (gaps)"));
+        }
     }
 
     #[test]
