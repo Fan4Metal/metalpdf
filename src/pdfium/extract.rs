@@ -39,6 +39,9 @@ impl FontTable {
 #[derive(Clone, Copy)]
 struct ObjectInfo {
     font: u16,
+    /// The PDF's font object: Type 3 fonts have no names, and every one
+    /// of a page is the same `font` in the table.
+    pdf_font: usize,
     invisible: bool,
     rouble: bool,
 }
@@ -151,7 +154,7 @@ impl Page {
         let mut held: Vec<(i32, Graphic)> = Vec::new();
         // The glyphs sized by their own boxes, with their font and the size
         // the font and the matrix gave (`boxed_sizes`).
-        let mut boxed: Vec<(usize, u16, i32)> = Vec::new();
+        let mut boxed: Vec<(usize, usize, i32)> = Vec::new();
         if let Some(text) = self.text_page() {
             let count = unsafe { (api.FPDFText_CountChars)(text) }.max(0);
             let mut objects: HashMap<sys::FPDF_PAGEOBJECT, ObjectInfo> = HashMap::new();
@@ -252,7 +255,8 @@ impl Page {
                     let weight = if crate::fonts::names_weight(&name) { -1 } else { unsafe { (api.FPDFText_GetFontWeight)(text, index) } };
                     let faux_bold = mode == sys::FPDF_TEXTRENDERMODE_FILL_STROKE;
                     let rouble = name.to_ascii_lowercase().contains("alsrubl");
-                    ObjectInfo { font: fonts.id(name, flags, weight, faux_bold), invisible: mode == sys::FPDF_TEXTRENDERMODE_INVISIBLE || mode == sys::FPDF_TEXTRENDERMODE_CLIP, rouble }
+                    let pdf_font = if object.is_null() { 0 } else { (unsafe { (api.FPDFTextObj_GetFont)(object) }) as usize };
+                    ObjectInfo { font: fonts.id(name, flags, weight, faux_bold), pdf_font, invisible: mode == sys::FPDF_TEXTRENDERMODE_INVISIBLE || mode == sys::FPDF_TEXTRENDERMODE_CLIP, rouble }
                 });
                 // ALS Rubl, the rouble sign before Unicode had one, draws it
                 // on letters' codes (its text reads `i`, `p`, `P`).
@@ -306,7 +310,7 @@ impl Page {
                     rect[3] = rect[3].min(origin[1] + 0.3 * size);
                 } else if !size.is_finite() || size <= 0.1 || !(0.5..=2.0).contains(&(size / from_box)) {
                     let given = if size.is_finite() { (size * 1000.0).round() as i32 } else { i32::MIN };
-                    boxed.push((content.glyphs.len(), info.font, given));
+                    boxed.push((content.glyphs.len(), info.pdf_font, given));
                     size = from_box;
                 }
                 let (mut r, mut g, mut b, mut a): (c_uint, c_uint, c_uint, c_uint) = (0, 0, 0, 255);
@@ -751,25 +755,35 @@ fn legacy_cyrillic(glyphs: &mut Vec<crate::export::Glyph>) {
 /// line of 11, the stops and commas came out specks in Word and the lines
 /// broke where the sizes changed. The size is the letters' reach: how far
 /// the tall ones go over the baseline and the long ones under it (the
-/// ninetieth percentiles of the letters' and digits' boxes), as nine
-/// tenths of an em; one letter's own box made the text six tenths of its
-/// size.
-fn boxed_sizes(glyphs: &mut [crate::export::Glyph], boxed: &[(usize, u16, i32)]) {
-    let mut groups: std::collections::HashMap<(u16, i32), Vec<usize>> = std::collections::HashMap::new();
+/// 98th percentiles of the letters' and digits' boxes), as nine tenths
+/// of an em; one letter's own box made the text six tenths of its size.
+/// Russian has few tall small letters (б, й, ё) and capitals: the 90th
+/// percentile was the small letters' height, the text four fifths of its
+/// size and as many words to a line wider than Word's at that size. A
+/// font is the PDF's font object, not the table's: dvips's fonts
+/// have no names, and a heading's reach made a page's text a fifth
+/// larger than on the pages with none (its paragraphs Word's headings).
+fn boxed_sizes(glyphs: &mut [crate::export::Glyph], boxed: &[(usize, usize, i32)]) {
+    let mut groups: std::collections::HashMap<(usize, i32), Vec<usize>> = std::collections::HashMap::new();
     for &(at, font, given) in boxed {
         groups.entry((font, given)).or_default().push(at);
     }
-    let p90 = |mut v: Vec<f32>| {
+    let p98 = |mut v: Vec<f32>| {
         v.sort_by(f32::total_cmp);
-        v[(v.len() * 9 / 10).min(v.len() - 1)]
+        v[(v.len() * 49 / 50).min(v.len() - 1)]
     };
     for members in groups.values() {
-        let letters: Vec<&crate::export::Glyph> = members.iter().map(|&k| &glyphs[k]).filter(|g| g.ch.is_alphanumeric()).collect();
+        // Letters and digits, and the bytes a legacy code page's letters
+        // are read as here, before `legacy_cyrillic` (MIK's `а` is U+00A0,
+        // `е` `¥`): of a Russian TeX book's letters, only those that fell on
+        // Latin-1's letters counted, a different few on every page, and
+        // the text's size went from 12 to 18 points from page to page.
+        let letters: Vec<&crate::export::Glyph> = members.iter().map(|&k| &glyphs[k]).filter(|g| g.ch.is_alphanumeric() || maybe_legacy(g.ch) || ('\u{a1}'..='\u{ff}').contains(&g.ch)).collect();
         if letters.len() < 3 {
             continue;
         }
-        let over = p90(letters.iter().map(|g| (g.baseline - g.rect[1]).max(0.0)).collect());
-        let under = p90(letters.iter().map(|g| (g.rect[3] - g.baseline).max(0.0)).collect());
+        let over = p98(letters.iter().map(|g| (g.baseline - g.rect[1]).max(0.0)).collect());
+        let under = p98(letters.iter().map(|g| (g.rect[3] - g.baseline).max(0.0)).collect());
         let size = (over + under) / 0.9;
         if size > 1.0 {
             for &k in members {
@@ -834,9 +848,16 @@ mod tests {
         // comma specks, the capital and the ё tall, the р long.
         let mut glyphs: Vec<_> = [('Р', 7.0, 0.0), ('о', 4.5, 0.0), ('л', 4.5, 0.0), ('ь', 4.5, 0.0), (',', 1.0, 2.0), ('м', 4.5, 0.0), ('ё', 7.0, 0.0), ('р', 4.5, 2.0), ('т', 4.5, 0.0), ('в', 4.5, 0.0), ('ы', 4.5, 0.0), ('у', 4.5, 2.0), ('.', 1.0, 0.0)].into_iter().map(|(c, o, u)| glyph(c, o, u)).collect();
         glyphs.push(glyph('x', 4.5, 0.0));
-        let boxed: Vec<(usize, u16, i32)> = (0..13).map(|k| (k, 0, 1000)).collect();
+        // A heading in another unnamed font of the same table entry and
+        // given size, its letters half as large again.
+        for (c, o, u) in [('Г', 10.5, 0.0), ('л', 6.75, 0.0), ('а', 6.75, 0.0), ('в', 6.75, 0.0), ('а', 6.75, 0.0), ('у', 6.75, 3.0)] {
+            glyphs.push(glyph(c, o, u));
+        }
+        let mut boxed: Vec<(usize, usize, i32)> = (0..13).map(|k| (k, 1, 1000)).collect();
+        boxed.extend((14..20).map(|k| (k, 2, 1000)));
         super::boxed_sizes(&mut glyphs, &boxed);
         assert!(glyphs[..13].iter().all(|g| (g.size - 10.0).abs() < 0.01), "{:?}", glyphs.iter().map(|g| g.size).collect::<Vec<_>>());
+        assert!(glyphs[14..].iter().all(|g| (g.size - 15.0).abs() < 0.01), "{:?}", glyphs.iter().map(|g| g.size).collect::<Vec<_>>());
         // A glyph sized by its font is left alone.
         assert_eq!(glyphs[13].size, 4.5 / 1.15);
     }
