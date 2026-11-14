@@ -680,6 +680,31 @@ impl Writer {
 
     pub fn finish(mut self, fonts: &[FontInfo], lookup: &mut crate::fonts::Fonts) -> Result<(), String> {
         let mut faces = Faces::default();
+        // The median of a font's words' widths in the PDF over their widths
+        // in `face`.
+        let ratio = |measurements: &mut docx::Measurements, font: u16, face: &super::Face, samples: &[(String, f32, f32)]| {
+            let mut ratios: Vec<_> = samples.iter().filter_map(|(text, size, advance)| {
+                measurements.width(font, face, text, *size).map(|width| advance / width)
+            }).filter(|r| r.is_finite() && *r > 0.5 && *r < 1.6).collect();
+            ratios.sort_by(f32::total_cmp);
+            ratios.get(ratios.len() / 2).copied()
+        };
+        // A font whose name says nothing (a TeX book's Type 3 fonts) gets
+        // Times New Roman or Arial, whichever is nearer its width: Arial
+        // stood in for all of them, a tenth wider than Computer Modern,
+        // and every paragraph of a book ran a line or two longer.
+        for (&font, samples) in &self.advances {
+            let face = faces.get(font, fonts, lookup);
+            if face.family != "Arial" || !fonts.get(font as usize).is_some_and(|f| super::anonymous_font(&f.name)) {
+                continue;
+            }
+            let times = super::Face { family: "Times New Roman".into(), ..face.clone() };
+            if let (Some(a), Some(t)) = (ratio(&mut docx::Measurements::new(), font, &face, samples), ratio(&mut docx::Measurements::new(), font, &times, samples))
+                && t.ln().abs() < a.ln().abs()
+            {
+                faces.set(font, times);
+            }
+        }
         // The body: the size and the font most characters have.
         let body_size = self.sizes.iter().max_by_key(|(s, n)| (**n, -**s)).map_or(11.0, |(s, _)| *s as f32 / 2.0);
         let body_font = self.font_use.iter().max_by_key(|(f, n)| (**n, std::cmp::Reverse(**f))).map(|(f, _)| *f);
@@ -737,14 +762,13 @@ impl Writer {
         let mut scales = HashMap::new();
         for (font, samples) in &self.advances {
             let face = faces.get(*font, fonts, lookup);
-            let mut ratios: Vec<_> = samples.iter().filter_map(|(text, size, advance)| {
-                measurements.width(*font, &face, text, *size).map(|width| advance / width)
-            }).filter(|r| r.is_finite() && *r > 0.5 && *r < 1.6).collect();
-            ratios.sort_by(f32::total_cmp);
+            let median = ratio(&mut measurements, *font, &face, samples);
             if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
-                esay!("font {font} {:?} as {:?}: {} samples, {} ratios, median {:?}", fonts.get(*font as usize).map(|f| &f.name), face.family, samples.len(), ratios.len(), ratios.get(ratios.len() / 2));
+                let mut sizes: Vec<f32> = samples.iter().map(|s| s.1).collect();
+                sizes.sort_by(f32::total_cmp);
+                esay!("font {font} {:?} as {:?}: {} samples at {:?} pt, median ratio {median:?}", fonts.get(*font as usize).map(|f| &f.name), face.family, samples.len(), sizes.get(sizes.len() / 2));
             }
-            if let Some(ratio) = ratios.get(ratios.len()/2) {
+            if let Some(ratio) = median {
                 scales.insert(*font, (100.0 * ratio).round().min(100.0) as i64);
             }
         }

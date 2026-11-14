@@ -425,6 +425,26 @@ impl Faces {
         self.faces[i] = Some(face.clone());
         face
     }
+
+    /// `face` for font `id`, in place of the one its name gave.
+    pub fn set(&mut self, id: u16, face: Face) {
+        let i = id as usize;
+        if self.faces.len() <= i {
+            self.faces.resize(i + 1, None);
+        }
+        self.faces[i] = Some(face);
+    }
+}
+
+/// A font's name that says nothing of its family: none (a Type 3 font
+/// of dvips), or a letter or two and a number (`T21`, `F3`). Codes of a
+/// foundry's (`AdvC0200`, a sans with its letters spaced out, which came
+/// out Times by its width) and GDI's (`MSTT31c580`) are left alone.
+pub fn anonymous_font(name: &str) -> bool {
+    let name = name.rsplit('+').next().unwrap_or(name);
+    let letters = name.chars().take_while(char::is_ascii_alphabetic).count();
+    let rest = &name[letters..];
+    name.is_empty() || letters <= 2 && !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Export `input` to `output` (the format by its extension) on this
@@ -468,6 +488,16 @@ mod tests {
         assert_eq!(wingdings.for_text("✓").family, "Segoe UI Symbol");
         let times = super::Face { family: "Times New Roman".into(), bold: false, italic: false };
         assert_eq!(times.for_text("β").family, "Times New Roman");
+    }
+
+    #[test]
+    fn fonts_named_by_number_are_anonymous() {
+        for name in ["", "T21", "F3", "ABCDEF+T5"] {
+            assert!(super::anonymous_font(name), "{name}");
+        }
+        for name in ["Arial", "CMR10", "AdvC0200", "MSTT31c580", "TimesNewRomanPSMT", "Roboto-Bold", "ABCDEF+PTSans", "LMRoman10-Regular"] {
+            assert!(!super::anonymous_font(name), "{name}");
+        }
     }
 
     #[test]
