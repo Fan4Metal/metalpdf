@@ -319,7 +319,25 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
         }
         pieces.push(Line::new(g));
     }
-    // Joined along their baselines.
+    // Joined along their baselines, again while that joins more: a piece
+    // that bridges two others comes later in the order when its baseline
+    // is lower (`δT_N = 0,2`: the subscript N joined the text before it
+    // after the text after it had found the gap too wide, and the line
+    // was two, the second read before the first).
+    let mut lines = join(pieces);
+    loop {
+        let n = lines.len();
+        lines = join(lines);
+        if lines.len() == n {
+            break;
+        }
+    }
+    lines.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]).then(a.rect[0].total_cmp(&b.rect[0])));
+    lines
+}
+
+/// Pieces of lines joined along their baselines (step 1 above).
+fn join(mut pieces: Vec<Line>) -> Vec<Line> {
     pieces.sort_by(|a, b| a.baseline.total_cmp(&b.baseline).then(a.rect[0].total_cmp(&b.rect[0])));
     let mut lines: Vec<Line> = Vec::new();
     'piece: for mut piece in pieces {
@@ -349,10 +367,32 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
         }
         for line in lines.iter_mut().rev() {
             let s = line.size.max(piece.size);
-            if piece.baseline - line.baseline > 0.6 * s {
+            if piece.baseline - line.baseline > 0.8 * s {
                 break;
             }
-            if !level(line, piece.baseline, piece.size) {
+            // A smaller piece in a gap of a larger one, within 0.8 em of its
+            // baseline: a subscript or superscript the text goes on round
+            // (Mathcad's `δT_N = 0,2`, `[K⁻¹·c^-1/2]`, raised three quarters
+            // of an em). Over the text and not after it, it was a line of
+            // its own, and every one a line more in Word. Either can be the
+            // line so far: a superscript comes first in the baselines' order.
+            // It may stand over or under another small one of the line on a
+            // baseline of its own (TeX's `a_Б^*`, the star over the Б).
+            let in_gap = {
+                let (small, big) = if piece.size < line.size { (&piece, &*line) } else { (&*line, &piece) };
+                let stacked = |g: &Glyph| g.size < 0.85 * big.size && (g.baseline - small.baseline).abs() > 0.3 * small.size;
+                small.size < 0.85 * big.size
+                    && (small.baseline - big.baseline).abs() < 0.8 * big.size
+                    && small.rect[0] >= big.rect[0]
+                    && small.rect[2] <= big.rect[2]
+                    && big.glyphs.iter().all(|g| g.rect[2] <= small.rect[0] + 0.2 * s || g.rect[0] >= small.rect[2] - 0.2 * s || stacked(g))
+            };
+            if in_gap {
+                line.glyphs.extend(piece.glyphs);
+                line.settle();
+                continue 'piece;
+            }
+            if piece.baseline - line.baseline > 0.6 * s || !level(line, piece.baseline, piece.size) {
                 continue;
             }
             // Next to it, either side, within an em; not over it.
@@ -402,7 +442,6 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
         }
         lines.push(piece);
     }
-    lines.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]).then(a.rect[0].total_cmp(&b.rect[0])));
     lines
 }
 
@@ -1491,6 +1530,64 @@ mod tests {
         let got = lines(marker);
         assert_eq!(got.len(),1);
         assert_eq!(got[0].text(),"1 Footnote text");
+    }
+
+    #[test]
+    fn a_subscript_bridging_a_gap_joins_the_line_on_both_sides() {
+        // "parameters (δT_N = 0,2 K": the text after the subscript starts
+        // more than an em after the δT, the subscript between them lower.
+        // In the content's order: the text after, the text before, another
+        // line, the subscript.
+        let before = text("parameters (dT", 50.0, 100.0);
+        let end = before.last().unwrap().rect[2];
+        let mut sub = text("N", end - 0.5, 103.0);
+        sub[0].size = 7.0;
+        sub[0].rect = [end - 0.5, 97.0, end + 8.5, 104.5];
+        let mut glyphs = text("= 0,2 K, and S = 0,015", end + 13.0, 100.0);
+        glyphs.extend(before);
+        glyphs.extend(text("another line far below", 50.0, 300.0));
+        glyphs.extend(sub);
+        let got = lines(glyphs);
+        assert_eq!(got.len(), 2, "{:?}", got.iter().map(Line::text).collect::<Vec<_>>());
+        assert!(got[0].text().starts_with("parameters (dTN = 0,2"), "{}", got[0].text());
+    }
+
+    #[test]
+    fn small_pieces_in_a_line_s_gaps_go_into_it() {
+        // "no more than 1000 [K ⁻¹ · c] here": the superscript raised 7.5
+        // points (0.75 em) in the gap after the K; and "dT N = 0,2", the
+        // subscript in the gap after the dT, the line already whole.
+        let small = |s: &str, x: f32, baseline: f32| {
+            let mut g = text(s, x, baseline);
+            for g in &mut g {
+                g.size = 7.0;
+                g.rect = [g.rect[0], baseline - 6.0, g.rect[0] + 4.0, baseline + 1.5];
+            }
+            g
+        };
+        let mut glyphs = text("no more than 1000 [K", 50.0, 100.0);
+        let end = glyphs.last().unwrap().rect[2];
+        let mut rest = text("· c] here and the line goes on", end + 10.0, 100.0);
+        rest[0].space_before = true;
+        glyphs.extend(rest);
+        glyphs.extend(text("dT", 50.0, 140.0));
+        let mut rest = text("= 0,2 and so on", 70.0, 140.0);
+        rest[0].space_before = true;
+        glyphs.extend(rest);
+        glyphs.extend(small("-1", end + 1.0, 92.5));
+        glyphs.extend(small("N", 61.0, 143.0));
+        // "length a_Б^* here": the star over the subscript.
+        glyphs.extend(text("length a", 50.0, 180.0));
+        let mut rest = text("and the line goes on", 100.0, 180.0);
+        rest[0].space_before = true;
+        glyphs.extend(rest);
+        glyphs.extend(small("B", 91.0, 183.0));
+        glyphs.extend(small("*", 91.0, 175.0));
+        let got = lines(glyphs);
+        assert_eq!(got.len(), 3, "{:?}", got.iter().map(Line::text).collect::<Vec<_>>());
+        assert!(got[0].text().contains("[K-1"), "{}", got[0].text());
+        assert!(got[1].text().starts_with("dTN"), "{}", got[1].text());
+        assert!(got[2].text().contains("aB*") || got[2].text().contains("a*B"), "{}", got[2].text());
     }
 
     #[test]
