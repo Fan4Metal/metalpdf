@@ -336,6 +336,14 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
     lines
 }
 
+/// Whether `g` is a subscript or superscript of `line`: smaller, off its
+/// baseline. A picture standing in for a mark may go over or under one
+/// (TeX's `a_Б^*`, the star a picture over the Б): it made a paragraph
+/// of its own under the text, a line more each.
+fn script(g: &Glyph, line: &Line) -> bool {
+    g.size < 0.85 * line.size && (g.baseline - line.baseline).abs() > 0.15 * line.size
+}
+
 /// Pieces of lines joined along their baselines (step 1 above).
 fn join(mut pieces: Vec<Line>) -> Vec<Line> {
     pieces.sort_by(|a, b| a.baseline.total_cmp(&b.baseline).then(a.rect[0].total_cmp(&b.rect[0])));
@@ -357,7 +365,7 @@ fn join(mut pieces: Vec<Line>) -> Vec<Line> {
                     && level(&piece, line.baseline, line.size)
                     && line.rect[0] >= piece.rect[0]
                     && line.rect[2] <= piece.rect[2]
-                    && piece.glyphs.iter().all(|g| g.rect[2] <= line.rect[0] + 0.2 * s || g.rect[0] >= line.rect[2] - 0.2 * s)
+                    && piece.glyphs.iter().all(|g| g.rect[2] <= line.rect[0] + 0.2 * s || g.rect[0] >= line.rect[2] - 0.2 * s || script(g, &piece))
                 {
                     let art = lines.remove(k);
                     piece.glyphs.extend(art.glyphs);
@@ -403,7 +411,7 @@ fn join(mut pieces: Vec<Line>) -> Vec<Line> {
             // rather than giving it a separate paragraph below the text.
             if (piece.glyphs.iter().all(|g| g.source < -1) || line.glyphs.iter().any(|g| g.source < -1))
                 && piece.rect[0] >= line.rect[0] && piece.rect[2] <= line.rect[2]
-                && line.glyphs.iter().all(|g| g.rect[2] <= piece.rect[0]+0.2*s || g.rect[0] >= piece.rect[2]-0.2*s)
+                && line.glyphs.iter().all(|g| g.rect[2] <= piece.rect[0]+0.2*s || g.rect[0] >= piece.rect[2]-0.2*s || script(g, line))
             {
                 line.glyphs.extend(piece.glyphs);
                 line.settle();
@@ -1588,6 +1596,23 @@ mod tests {
         assert!(got[0].text().contains("[K-1"), "{}", got[0].text());
         assert!(got[1].text().starts_with("dTN"), "{}", got[1].text());
         assert!(got[2].text().contains("aB*") || got[2].text().contains("a*B"), "{}", got[2].text());
+    }
+
+    #[test]
+    fn a_picture_over_a_subscript_goes_into_the_line() {
+        // "length a_Б^* and so on", the star a picture's stand-in on the
+        // line's baseline, over the subscript.
+        let mut glyphs = text("length a", 50.0, 100.0);
+        let mut sub = text("B", 91.0, 103.0);
+        sub[0].size = 7.0;
+        sub[0].rect = [91.0, 97.0, 96.0, 104.5];
+        glyphs.extend(sub);
+        let mut rest = text("and the line goes on", 100.0, 100.0);
+        rest[0].space_before = true;
+        glyphs.extend(rest);
+        glyphs.push(Glyph { source: -2, ch: '\u{e000}', rect: [91.0, 91.0, 96.0, 97.0], x: 91.0, baseline: 100.0, size: 10.0, font: 0, color: [0; 3], space_before: false, invisible: false });
+        let got = lines(glyphs);
+        assert_eq!(got.len(), 1, "{:?}", got.iter().map(Line::text).collect::<Vec<_>>());
     }
 
     #[test]
