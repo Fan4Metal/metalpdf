@@ -476,8 +476,11 @@ impl Writer {
                     for g in p.lines.iter().flat_map(|l| &l.glyphs).filter(|g| g.source < -1) {
                         let index = (-g.source - 2) as usize;
                         if let Some(art) = prepared.inline.get(index) {
-                            let png = render_crop(page, content, art.rect, &mut render)?;
-                            para.artwork.push(InlinePicture { marker: g.ch, rel: self.picture(&png)?, width: art.rect[2] - art.rect[0], height: art.rect[3] - art.rect[1], shift: art.baseline - art.rect[3] });
+                            // A mark over the baseline goes down to it, raised by nothing.
+                            let raised = art.baseline > art.rect[3] + 0.5;
+                            let png = if raised { render_crop_down(page, content, art.rect, art.baseline, &mut render)? } else { render_crop(page, content, art.rect, &mut render)? };
+                            let bottom = if raised { art.baseline } else { art.rect[3] };
+                            para.artwork.push(InlinePicture { marker: g.ch, rel: self.picture(&png)?, width: art.rect[2] - art.rect[0], height: bottom - art.rect[1], shift: art.baseline - bottom });
                         }
                     }
                     blocks.push(Some(Block::Para(para)));
@@ -955,6 +958,24 @@ fn decoration_xml(x: &mut String, d: &Decoration, out: &mut Out) {
         r#"<w:r><w:rPr><w:sz w:val="2"/></w:rPr><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="1" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>{left}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>{top}</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:wrapNone/><wp:docPr id="{n}" name="Page image {n}"/>"#);
     overlay::graphic(x, rel, n, [cx,cy], &d.region, out);
     x.push_str("</wp:anchor></w:drawing></w:r>");
+}
+
+/// `render_crop` with white under it down to `bottom` (a baseline under
+/// a raised mark): Word made a line with a raised picture (`w:position`)
+/// taller by more than the raise, a star over a subscript a line apart
+/// from its text; on the baseline, the picture raises nothing.
+fn render_crop_down(page: &Page, content: &PageContent, r: [f32; 4], bottom: f32, render: &mut Option<Option<crate::pdfium::Bitmap>>) -> Result<Vec<u8>, String> {
+    let scale = super::PICTURE_DPI / 72.0;
+    let (w, h) = (((content.size[0] * scale).round() as u32).max(1), ((content.size[1] * scale).round() as u32).max(1));
+    let bitmap = render.get_or_insert_with(|| page.render_whole(w, h, content.turns)).as_ref().ok_or("could not render page artwork")?;
+    let x = ((r[0] * scale).floor().max(0.0) as u32).min(w-1);
+    let y = ((r[1] * scale).floor().max(0.0) as u32).min(h-1);
+    let right = ((r[2]*scale).ceil() as u32).clamp(x+1,w);
+    let end = ((r[3]*scale).ceil() as u32).clamp(y+1,h);
+    let rows = ((bottom * scale).ceil() as u32).max(end) - y;
+    let mut rgb = crop_bgrx(bitmap.pixels(), w, [x,y,right,end]);
+    rgb.resize(((right - x) * rows * 3) as usize, 255);
+    encode_png(right-x, rows, &rgb, false)
 }
 
 fn render_crop(page: &Page, content: &PageContent, r: [f32; 4], render: &mut Option<Option<crate::pdfium::Bitmap>>) -> Result<Vec<u8>, String> {
