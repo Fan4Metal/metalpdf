@@ -133,8 +133,14 @@ fn flush(original: &layout::Para, lines: &mut Vec<layout::Line>, contents: bool,
 /// A separated row has lost the paragraph's line pitch. Recover it from
 /// nearby rows of its own column instead of imposing a 1.2-em line box
 /// on tightly set contents or doubling it across a row without leaders.
+/// A row's line is never taller than 1.2 em: the rest of the way to the
+/// next row is its space before. The nearest row of its size can be two
+/// rows away, past a smaller entry (a 10-point section with an 8-point
+/// subsection under it): written as an exact line of that pitch, the row
+/// sat low in it and the rows after it ran on with no space left to take,
+/// 4 to 7 points each, and a contents page went over to a second page.
 pub(super) fn pitch(p: &layout::Para, items: &[Item]) -> f32 {
-    items.iter().filter_map(|item| match item { Item::Para(other) => Some(other), _ => None }).filter(|other| {
+    let near = items.iter().filter_map(|item| match item { Item::Para(other) => Some(other), _ => None }).filter(|other| {
         (other.column[0] - p.column[0]).abs() <= p.size && (other.column[1] - p.column[1]).abs() <= p.size
     }).flat_map(|other| &other.lines).filter_map(|line| {
         if !(0.85..=1.18).contains(&(line.size / p.size))
@@ -143,7 +149,8 @@ pub(super) fn pitch(p: &layout::Para, items: &[Item]) -> f32 {
         }
         let delta = (line.baseline - p.lines[0].baseline).abs();
         (delta > 0.5 * p.size && delta < 2.5 * p.size).then_some(delta)
-    }).min_by(f32::total_cmp).unwrap_or_else(|| p.pitch())
+    }).min_by(f32::total_cmp).unwrap_or_else(|| p.pitch());
+    if p.lines.len() == 1 { near.min(1.2 * p.size) } else { near }
 }
 
 /// Preserve the title and page label's runs, inserting one native tab.
@@ -251,6 +258,21 @@ mod tests {
             assert!((pitch(p, &rows) - 9.4).abs() < 0.01);
             assert!((p.pitch() - 10.8).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn a_row_past_a_smaller_entry_keeps_a_line_high() {
+        // 10-point sections 24 points apart, an 8-point entry between.
+        let row = |text: &str, x: f32, y: f32, size: f32| {
+            let mut l = line(text, x, y);
+            l.glyphs.iter_mut().for_each(|g| g.size = size);
+            l.size = size;
+            let rect = l.rect;
+            Item::Para(layout::Para { lines: vec![l], column: [x, 400.0], align: layout::Align::Left, marker: None, size, rect })
+        };
+        let rows = vec![row("Section one..........21", 50.0, 100.0, 10.0), row("Small entry..........24", 80.0, 109.2, 8.0), row("Section two..........25", 50.0, 124.0, 10.0)];
+        let Item::Para(p) = &rows[0] else { panic!() };
+        assert!((pitch(p, &rows) - 12.0).abs() < 0.01);
     }
 
     #[test]
