@@ -230,14 +230,27 @@ fn stacked_fractions(content:&mut PageContent)->Vec<super::artwork::Inline> {
         // Only one that starts its line (a definition): in the middle of
         // prose, a fraction that tall made Word's line taller than the
         // PDF's, and a thesis's page ran over.
-        let on_line=|g:&&Glyph|!g.invisible&&!g.ch.is_whitespace()&&(g.baseline-line.baseline).abs()<0.1*line.size;
+        // An expression object's baseline can be a point off its line's
+        // (OpenOffice's formulas: 82.7 in a line at 83.9).
+        let on_line=|g:&&Glyph|!g.invisible&&!g.ch.is_whitespace()&&(g.baseline-line.baseline).abs()<0.15*line.size;
         let prose_line=content.glyphs.iter().filter(on_line).filter(|g|g.ch.is_alphabetic()).count()>=12;
         let starts=!content.glyphs.iter().filter(on_line).any(|g|g.rect[2]<r[0]-0.5);
-        if 0.85*line.size<size&&!(prose_line&&starts) {continue;}
         let members:Vec<usize>=num.iter().chain(&den).flat_map(|&k|runs[k].members.iter().copied()).collect();
+        let rect=members.iter().map(|&m|content.glyphs[m].rect).fold(r,layout::union);
+        // In the middle of prose, one the PDF made room for: the lines
+        // over and under it keep clear of its height, so Word's taller
+        // line takes no more than the PDF's did (`c = s/Δt₀` in a line set
+        // 18 points apart in a body of 11.5). Left as text, its numerator
+        // and denominator went to lines of their own, the text after it
+        // with them, two lines more a fraction.
+        let span=content.glyphs.iter().filter(on_line).fold([f32::MAX,f32::MIN],|s,g|[s[0].min(g.rect[0]),s[1].max(g.rect[2])]);
+        let room=prose_line&&!content.glyphs.iter().any(|g| {
+            !g.invisible&&!g.ch.is_whitespace()&&(g.baseline<top-0.3*size||g.baseline>bottom+0.3*size)
+                &&g.rect[2]>span[0]&&g.rect[0]<span[1]&&g.rect[3]>rect[1]+0.15*size&&g.rect[1]<rect[3]-0.15*size
+        });
+        if 0.85*line.size<size&&!(prose_line&&starts)&&!room {continue;}
         if members.iter().any(|&m|taken[m]) {continue;}
         members.iter().for_each(|&m|taken[m]=true);
-        let rect=members.iter().map(|&m|content.glyphs[m].rect).fold(r,layout::union);
         piles.push((members,rect,line));
         bars.push(b);
     }
@@ -497,6 +510,28 @@ mod tests {
         let rows=layout::lines(p.glyphs);
         assert_eq!(rows.len(),2,"{:?}",rows.iter().map(|r|(r.text(),r.rect)).collect::<Vec<_>>());
         assert!(rows[0].text().contains(") and d (charge -"));
+    }
+
+    #[test]
+    fn a_fraction_in_mid_line_is_a_picture_where_the_lines_make_room() {
+        // "the speed of the signal is c = s/t and when ...", the fraction
+        // at the text's size; the lines around 18 points away, or 12.
+        let page=|pitch:f32|{
+            let mut glyphs=text("The lines above set apart for the formula here",50.0,100.0-pitch,0);
+            glyphs.extend(text("the speed of the signal is c=",50.0,100.0,0));
+            glyphs.extend(text("s",197.0,93.0,0));glyphs.extend(text("t",197.0,108.0,0));
+            glyphs.extend(text(". When the solutions change at random",205.0,100.0,0));
+            glyphs.extend(text("and the paragraph goes on under the formula",50.0,100.0+pitch,0));
+            let bar=crate::export::Graphic {rect:[196.0,97.0,203.0,97.5],kind:crate::export::GraphicKind::Path {curved:false},object:None};
+            PageContent {size:[600.0,800.0],glyphs,graphics:vec![bar],..Default::default()}
+        };
+        let mut roomy=page(18.0);
+        let prepared=prepare(&mut roomy,&fonts());
+        assert_eq!(prepared.inline.len(),1,"{:?}",prepared.inline.iter().map(|a|(a.rect,a.baseline)).collect::<Vec<_>>());
+        assert_eq!(prepared.inline[0].baseline,100.0);
+        assert_eq!(layout::lines(roomy.glyphs).len(),3);
+        // Set tight, the line has no room for it: it is left to the rest.
+        assert!(stacked_fractions(&mut page(12.0)).is_empty());
     }
 
     #[test]
