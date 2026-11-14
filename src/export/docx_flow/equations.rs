@@ -45,13 +45,18 @@ fn inline_pieces(p: &layout::Para, raw: &[Glyph], fonts: &[FontInfo]) -> Vec<sup
         let c = [(g.rect[0] + g.rect[2]) / 2.0, (g.rect[1] + g.rect[3]) / 2.0];
         // The line it is in, else the nearest within a third of an em: a
         // superscript's centre is within that of the line above too.
+        // Of two lines it is in, the one whose baseline it is nearer: a
+        // line made tall by a sign of a symbol font (`S × K`) reaches into
+        // the next, whose letters were taken for its own and every one
+        // standing under a letter of it made a pile, a picture.
         let off = |l: &layout::Line| (l.rect[1] - c[1]).max(c[1] - l.rect[3]).max(0.0);
+        let mid = |l: &layout::Line| (l.baseline - 0.3 * l.size - c[1]).abs();
         (0..p.lines.len())
             .filter(|&k| {
                 let l = &p.lines[k];
                 c[0] >= l.rect[0] - 0.5 && c[0] <= l.rect[2] + 0.5 && off(l) <= 0.3 * l.size
             })
-            .min_by(|&a, &b| off(&p.lines[a]).total_cmp(&off(&p.lines[b])))
+            .min_by(|&a, &b| off(&p.lines[a]).total_cmp(&off(&p.lines[b])).then(mid(&p.lines[a]).total_cmp(&mid(&p.lines[b]))))
     };
     let gs: Vec<(&Glyph, usize)> = raw.iter().filter(|g| !g.invisible && !g.ch.is_whitespace()).filter_map(|g| line_of(g).map(|k| (g, k))).collect();
     let width = |g: &Glyph| g.rect[2] - g.rect[0];
@@ -510,6 +515,22 @@ mod tests {
         let rows=layout::lines(p.glyphs);
         assert_eq!(rows.len(),2,"{:?}",rows.iter().map(|r|(r.text(),r.rect)).collect::<Vec<_>>());
         assert!(rows[0].text().contains(") and d (charge -"));
+    }
+
+    #[test]
+    fn a_tall_sign_does_not_take_the_next_line_for_its_own() {
+        // "exactly S × K tokens", the × with a box reaching into the next
+        // line, whose letters stand right under this one's.
+        let mut glyphs=text("rank receives exactly S",50.0,100.0,0);
+        let mut times=text("×",167.0,100.0,1);times[0].rect=[167.0,90.0,172.0,112.0];
+        glyphs.extend(times);
+        glyphs.extend(text("K tokens and the computation shapes",174.0,100.0,0));
+        glyphs.extend(text("per-layer MoE host synchronization and alleviates the host",50.0,111.0,0));
+        let mut p=PageContent {size:[600.0,800.0],glyphs,..Default::default()};
+        let original=p.clone();
+        let prepared=prepare(&mut p,&fonts());
+        assert!(prepared.blocks.is_empty()&&prepared.inline.is_empty(),"{:?}",prepared.inline.iter().map(|a|a.rect).collect::<Vec<_>>());
+        assert_eq!(p,original);
     }
 
     #[test]
