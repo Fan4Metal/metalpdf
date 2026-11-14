@@ -741,6 +741,9 @@ impl Writer {
                 measurements.width(*font, &face, text, *size).map(|width| advance / width)
             }).filter(|r| r.is_finite() && *r > 0.5 && *r < 1.6).collect();
             ratios.sort_by(f32::total_cmp);
+            if std::env::var_os("METALPDF_EXPORT_DUMP").is_some() {
+                esay!("font {font} {:?} as {:?}: {} samples, {} ratios, median {:?}", fonts.get(*font as usize).map(|f| &f.name), face.family, samples.len(), ratios.len(), ratios.get(ratios.len() / 2));
+            }
             if let Some(ratio) = ratios.get(ratios.len()/2) {
                 scales.insert(*font, (100.0 * ratio).round().min(100.0) as i64);
             }
