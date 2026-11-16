@@ -66,8 +66,14 @@ impl Line {
                 self.glyphs[i].space_before = self.glyphs[i].rect[0]-self.glyphs[i-1].rect[2] > 0.22*self.glyphs[i].size;
             }
         }
+        // The baseline most of its large glyphs share: a subscript as
+        // large as the text (Mathcad's) is not where the line is.
         let main = self.glyphs.iter().max_by(|a, b| a.size.total_cmp(&b.size)).expect("a line has glyphs");
-        (self.size, self.baseline) = (main.size, main.baseline);
+        let large: Vec<&Glyph> = self.glyphs.iter().filter(|g| g.size >= 0.85 * main.size).collect();
+        let on = |b: f32| large.iter().filter(|g| (g.baseline - b).abs() < 0.1 * main.size).count();
+        let baseline = large.iter().map(|g| g.baseline).max_by_key(|&b| on(b)).unwrap_or(main.baseline);
+        self.size = main.size;
+        self.baseline = if on(baseline) > on(main.baseline) { baseline } else { main.baseline };
         self.rect = self.glyphs.iter().fold(self.glyphs[0].rect, |r, g| union(r, g.rect));
     }
 
@@ -386,18 +392,40 @@ fn join(mut pieces: Vec<Line>) -> Vec<Line> {
             // line so far: a superscript comes first in the baselines' order.
             // It may stand over or under another small one of the line on a
             // baseline of its own (TeX's `a_Б^*`, the star over the Б).
+            // Mathcad also sets a subscript at the text's size, half an em
+            // lower (`δT_N`, `Δ_h = Δ_v`, `τ_кадра`): a short piece of
+            // the line's size half an em off it, in its gap or right after
+            // the text it is of (and before the text after it, which the
+            // next round joins); lines of text are an em apart or more.
+            let same = piece.size >= 0.85 * line.size && line.size >= 0.85 * piece.size;
+            let off = (piece.baseline - line.baseline).abs();
+            let same_script = |l: &Line| same && l.glyphs.len() <= 6 && off > 0.3 * s && off < 0.7 * s;
             let in_gap = {
-                let (small, big) = if piece.size < line.size { (&piece, &*line) } else { (&*line, &piece) };
+                let width = |l: &Line| l.rect[2] - l.rect[0];
+                let (small, big) = if same && width(&piece) < width(line) || !same && piece.size < line.size { (&piece, &*line) } else { (&*line, &piece) };
                 let stacked = |g: &Glyph| g.size < 0.85 * big.size && (g.baseline - small.baseline).abs() > 0.3 * small.size;
-                small.size < 0.85 * big.size
-                    && (small.baseline - big.baseline).abs() < 0.8 * big.size
+                let script = if same { same_script(small) } else { small.size < 0.85 * big.size && off < 0.8 * big.size };
+                // A symbol font's loose box reaches over the subscript after it.
+                let slack = if same { 0.25 } else { 0.2 } * s;
+                (script
                     && small.rect[0] >= big.rect[0]
                     && small.rect[2] <= big.rect[2]
-                    && big.glyphs.iter().all(|g| g.rect[2] <= small.rect[0] + 0.2 * s || g.rect[0] >= small.rect[2] - 0.2 * s || stacked(g))
+                    && big.glyphs.iter().all(|g| g.rect[2] <= small.rect[0] + slack || g.rect[0] >= small.rect[2] - slack || stacked(g)))
+                .then_some(big.baseline)
             };
-            if in_gap {
+            let after_text = if same_script(&piece) && (piece.rect[0] - line.rect[2]).abs() < 0.3 * s {
+                Some(line.baseline)
+            } else if same_script(line) && (line.rect[0] - piece.rect[2]).abs() < 0.3 * s {
+                Some(piece.baseline)
+            } else {
+                None
+            };
+            if let Some(baseline) = in_gap.or(after_text) {
                 line.glyphs.extend(piece.glyphs);
                 line.settle();
+                if same {
+                    line.baseline = baseline;
+                }
                 continue 'piece;
             }
             if piece.baseline - line.baseline > 0.6 * s || !level(line, piece.baseline, piece.size) {
@@ -420,7 +448,32 @@ fn join(mut pieces: Vec<Line>) -> Vec<Line> {
             let last_x = line.glyphs.iter().map(|g| g.x).fold(f32::MIN, f32::max);
             let first_x = piece.glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
             let goes_after = overlap_ok(after, last_x, first_x, s);
-            let gap = if goes_after { after } else if before > -0.3 * s { before } else { continue };
+            // Woven together on one baseline, no glyph over another: one
+            // line written in two passes (Mathcad's signs apart from its
+            // numbers, `= 30·10`, the `·` between the 30 and the 10), at
+            // one size on the very baseline: a tall brace's line is level
+            // with the line of text under it, and they were woven into one.
+            let clear = |a: &Glyph, b: &Glyph| a.rect[2] <= b.rect[0] + 0.2 * s || a.rect[0] >= b.rect[2] - 0.2 * s;
+            if !goes_after && before <= -0.3 * s {
+                if same && off < 0.1 * line.size.min(piece.size)
+                    && piece.rect[0] < line.rect[2] && line.rect[0] < piece.rect[2]
+                    && piece.glyphs.iter().all(|a| line.glyphs.iter().all(|b| clear(a, b)))
+                {
+                    let mut glyphs: Vec<(bool, Glyph)> = line.glyphs.drain(..).map(|g| (false, g)).chain(piece.glyphs.into_iter().map(|g| (true, g))).collect();
+                    glyphs.sort_by(|a, b| a.1.rect[0].total_cmp(&b.1.rect[0]));
+                    for k in 1..glyphs.len() {
+                        if glyphs[k].0 != glyphs[k - 1].0 {
+                            let gap = glyphs[k].1.rect[0] - glyphs[k - 1].1.rect[2];
+                            glyphs[k].1.space_before = gap > 0.22 * glyphs[k].1.size.min(glyphs[k - 1].1.size);
+                        }
+                    }
+                    line.glyphs = glyphs.into_iter().map(|(_, g)| g).collect();
+                    line.settle();
+                    continue 'piece;
+                }
+                continue;
+            }
+            let gap = if goes_after { after } else { before };
             let artwork_marker = line.glyphs.iter().chain(&piece.glyphs).any(|g| g.source < -1);
             // A contents line: the page number after a dot leader, the
             // entry after its number, a tab's width apart.
@@ -1596,6 +1649,50 @@ mod tests {
         assert!(got[0].text().contains("[K-1"), "{}", got[0].text());
         assert!(got[1].text().starts_with("dTN"), "{}", got[1].text());
         assert!(got[2].text().contains("aB*") || got[2].text().contains("a*B"), "{}", got[2].text());
+    }
+
+    #[test]
+    fn subscripts_as_large_as_the_text_go_into_its_line() {
+        // Mathcad's "(dT_N = 0,2 K, D_h = D_v" and "t_kadra = 30": the
+        // subscripts at the text's size, 0.57 em lower, in the line's gaps.
+        let lower = |s: &str, x: f32, baseline: f32| text(s, x, baseline + 5.7);
+        let mut glyphs = text("parameters (dT", 50.0, 100.0);
+        let end = glyphs.last().unwrap().rect[2];
+        let mut rest = text("= 0,2 K, D", end + 7.0, 100.0);
+        rest[0].space_before = true;
+        let d = rest.last().unwrap().rect[2];
+        glyphs.extend(rest);
+        let mut rest = text("= D", d + 9.0, 100.0);
+        rest[0].space_before = true;
+        let d2 = rest.last().unwrap().rect[2];
+        glyphs.extend(rest);
+        let mut rest = text("and so on", d2 + 7.0, 100.0);
+        rest[0].space_before = true;
+        glyphs.extend(rest);
+        glyphs.extend(text("t", 50.0, 120.0));
+        let mut rest = text("= 30 ms and the line goes on", 82.0, 120.0);
+        rest[0].space_before = true;
+        glyphs.extend(rest);
+        glyphs.extend(lower("N", end, 100.0));
+        glyphs.extend(lower("h", d, 100.0));
+        glyphs.extend(lower("v", d2, 100.0));
+        glyphs.extend(lower("kadra", 54.0, 120.0));
+        let got = lines(glyphs);
+        assert_eq!(got.len(), 2, "{:?}", got.iter().map(Line::text).collect::<Vec<_>>());
+        assert!(got[0].text().starts_with("parameters (dTN = 0,2 K, Dh = Dv"), "{}", got[0].text());
+        assert_eq!(got[0].baseline, 100.0);
+        assert!(got[1].text().starts_with("tkadra = 30"), "{}", got[1].text());
+        assert_eq!(got[1].baseline, 120.0);
+        // "= 30·10 and so on", the signs written apart from the numbers.
+        let mut dot = text("·", 68.0, 200.0);
+        dot[0].rect[2] = 71.0;
+        let glyphs = [text("=", 50.0, 200.0), dot, text("30", 57.0, 200.0), text("10 and so on", 72.0, 200.0)].concat();
+        let got = lines(glyphs);
+        assert_eq!(got.len(), 1, "{:?}", got.iter().map(Line::text).collect::<Vec<_>>());
+        assert_eq!(got[0].text().replace(' ', ""), "=30·10andsoon");
+        // Two lines of text an em apart stay two.
+        let got = lines([text("one line of ordinary text", 50.0, 100.0), text("next", 90.0, 110.0)].concat());
+        assert_eq!(got.len(), 2);
     }
 
     #[test]
