@@ -377,7 +377,7 @@ mod tests {
             doc.floating.push(super::super::FloatingPicture {rel:1,region:super::super::overlay::Region {rect:placement.figure.rect,lines:Vec::new(),exact:Vec::new()},placement});
             let mut lookup=crate::fonts::Fonts::default();
             let mut faces=crate::export::Faces::default();
-            let mut out=super::super::Out {fonts:&fonts,lookup:&mut lookup,faces:&mut faces,doc_pr:0,scales:Default::default(),margin_left:50.0,textboxes:crate::export::docx::TextBoxes::new()};
+            let mut out=super::super::Out {fonts:&fonts,lookup:&mut lookup,faces:&mut faces,doc_pr:0,scales:Default::default(),margin_left:50.0,textboxes:crate::export::docx::TextBoxes::new(), size_k: 1.0};
             let mut xml=String::new();
             super::super::block_xml(&mut xml,&super::super::Block::Para(doc),&mut super::super::Prev {baseline:Some(74.0),bottom:Some(76.0)},400.0,false,&|_|None,&mut out);
             assert_eq!(xml.matches("<w:p>").count(),1);

@@ -775,7 +775,7 @@ impl Writer {
                 scales.insert(*font, (100.0 * ratio).round().min(100.0) as i64);
             }
         }
-        let mut out = Out { fonts, lookup, faces: &mut faces, doc_pr: 0, scales, margin_left:0.0, textboxes:docx::TextBoxes::new() };
+        let mut out = Out { fonts, lookup, faces: &mut faces, doc_pr: 0, scales, margin_left:0.0, textboxes:docx::TextBoxes::new(), size_k: 1.0 };
         let mut body = String::new();
         let mut last_sect = String::new();
         for &(from, to, margins) in &runs {
@@ -818,6 +818,7 @@ impl Writer {
                         }
                     }
                     let cols = if multi(&segs[si]) { word_columns(&segs[si].columns, text_w) } else { vec![(text_w, 0.0)] };
+                    out.size_k = if multi(&segs[si]) { type_scale(&segs[si].columns, text_w) } else { 1.0 };
                     let mut content = String::new();
                     let mut ends_in_table = false;
                     for seg in &segs[si..sj] {
@@ -854,6 +855,7 @@ impl Writer {
                         above = Some(seg.blocks.iter().map(|(_, b)| b.bottom()).fold(f32::NEG_INFINITY, f32::max));
                         carry = (!multi(seg)).then_some(prev);
                     }
+                    out.size_k = 1.0;
                     if ends_in_table {
                         // A section cannot end in a table: a paragraph a
                         // point high follows it.
@@ -995,7 +997,7 @@ fn paragraph_runs(x: &mut String, p: &DocPara, out: &mut Out) {
         for ch in span.text.chars() {
             if let Some(pic) = p.artwork.iter().find(|a| a.marker == ch) {
                 if !text.is_empty() {
-                    scaled_run_xml(x, &Span { text: std::mem::take(&mut text), ..span.clone() }, &out.faces.get(span.font, out.fonts, out.lookup), 0, *out.scales.get(&span.font).unwrap_or(&100));
+                    scaled_run_xml(x, &Span { text: std::mem::take(&mut text), size: span.size * out.size_k, ..span.clone() }, &out.faces.get(span.font, out.fonts, out.lookup), 0, *out.scales.get(&span.font).unwrap_or(&100));
                 }
                 out.doc_pr += 1;
                 let n = out.doc_pr;
@@ -1005,7 +1007,7 @@ fn paragraph_runs(x: &mut String, p: &DocPara, out: &mut Out) {
             } else { text.push(ch) }
         }
         if !text.is_empty() {
-            scaled_run_xml(x, &Span { text, ..span.clone() }, &out.faces.get(span.font, out.fonts, out.lookup), 0, *out.scales.get(&span.font).unwrap_or(&100));
+            scaled_run_xml(x, &Span { text, size: span.size * out.size_k, ..span.clone() }, &out.faces.get(span.font, out.fonts, out.lookup), 0, *out.scales.get(&span.font).unwrap_or(&100));
         }
     }
 }
@@ -1107,6 +1109,12 @@ struct Out<'a> {
     scales: HashMap<u16, i64>,
     margin_left: f32,
     textboxes: docx::TextBoxes,
+    /// The type's size in the section being written: below 1 where Word's
+    /// columns are narrower than the PDF's (its margins of 18 points at
+    /// least, a page set nearer the edge), so that the lines break where
+    /// they did. At its own size, a contents page's long titles pushed
+    /// their numbers onto lines of their own.
+    size_k: f32,
 }
 
 /// Where the block before ended, for the space before the next: its last
@@ -1421,6 +1429,15 @@ fn word_columns(columns: &[[f32; 2]], text_w: f32) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// The type's size in a section of the PDF's `columns` when Word's are
+/// narrowed into `text_w` (`Out::size_k`): what they were narrowed by,
+/// unless it is a hair; never larger.
+fn type_scale(columns: &[[f32; 2]], text_w: f32) -> f32 {
+    let Some((first, last)) = columns.first().zip(columns.last()) else { return 1.0 };
+    let k = text_w / (last[1] - first[0]).max(1.0);
+    if k < 0.98 { k } else { 1.0 }
+}
+
 /// A paragraph of `layout` with its indents counted from its column.
 fn doc_para(p: &layout::Para, cap: Option<&DropCap>) -> DocPara {
     let n = p.lines.len();
@@ -1608,6 +1625,18 @@ mod tests {
     use crate::export::{Graphic, GraphicKind};
 
     #[test]
+    fn type_is_narrowed_with_the_columns_it_is_in() {
+        // A contents page's columns 4.7 points from the edges of a 436
+        // point sheet, Word's text 400 wide between its 18-point margins.
+        let columns = [[4.7, 203.0], [235.4, 433.6]];
+        assert!((type_scale(&columns, 400.4) - 400.4 / 428.9).abs() < 1e-4);
+        // Columns that fit, or nearly, keep their type; it is never larger.
+        assert_eq!(type_scale(&columns, 425.0), 1.0);
+        assert_eq!(type_scale(&columns, 500.0), 1.0);
+        assert_eq!(type_scale(&[], 400.0), 1.0);
+    }
+
+    #[test]
     fn section_break_follows_the_body_instead_of_a_nested_textbox() {
         let mut body = String::from("<w:p><w:pPr/></w:p><w:p><w:pPr></w:pPr><w:r><w:drawing><w:txbxContent><w:p><w:pPr></w:pPr><w:r><w:t>Label</w:t></w:r></w:p></w:txbxContent></w:drawing></w:r></w:p>");
         close_section(&mut body,"<w:sectPr/>");
@@ -1749,7 +1778,7 @@ mod tests {
         let fonts = [FontInfo { name: "PetersburgC".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0, textboxes:docx::TextBoxes::new() };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0, textboxes:docx::TextBoxes::new(), size_k: 1.0 };
         let mut xml = String::new();
         let mut prev = Prev { baseline: Some(60.0), bottom: Some(62.0) };
         block_xml(&mut xml, &Block::Para(doc_para(p, Some(&caps[0]))), &mut prev, 340.0, false, &|_| None, &mut out);
@@ -1772,7 +1801,7 @@ mod tests {
         let fonts = [FontInfo { name: "Arial".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left: 0.0, textboxes: docx::TextBoxes::new() };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left: 0.0, textboxes: docx::TextBoxes::new(), size_k: 1.0 };
         let mut para = doc_para(p, None);
         para.rules[1] = Some(ParaRule { color: [0xFF, 0xDD, 0x2D], width: 1.0, space: 8.0 });
         // Word's paragraph ends a fifth of its line under the baseline.
@@ -1814,7 +1843,7 @@ mod tests {
         let fonts = [FontInfo { name: "Arial".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left: 0.0, textboxes: docx::TextBoxes::new() };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left: 0.0, textboxes: docx::TextBoxes::new(), size_k: 1.0 };
         let mut xml = String::new();
         block_xml(&mut xml, &Block::Para(doc_para(p, None)), &mut Prev { baseline: Some(60.0), bottom: Some(62.0) }, 340.0, true, &|_| None, &mut out);
         // The break first, alone; the paragraph with its space before in
@@ -1856,7 +1885,7 @@ mod tests {
         let fonts = [FontInfo { name: "Tahoma".into(), ..Default::default() }];
         let mut lookup = crate::fonts::Fonts::default();
         let mut faces = Faces::default();
-        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0, textboxes:docx::TextBoxes::new() };
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left:0.0, textboxes:docx::TextBoxes::new(), size_k: 1.0 };
         let mut xml = String::new();
         let mut prev = Prev { baseline: Some(94.0), bottom: Some(100.0) };
         assert!(para_before(&para, &prev) > 80.0);
