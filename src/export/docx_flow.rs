@@ -470,7 +470,7 @@ impl Writer {
                         let (png, region) = layers.take(page, content, placement.figure.rect, &mut render)?;
                         para.floating.push(FloatingPicture { rel: self.picture(&png)?, placement: placement.clone(), region });
                     }
-                    if para.tabs.iter().any(|t| t.leader) {
+                    if para.tabs.iter().any(|t| t.leader) || toc::leader(p).is_some() {
                         para.pitch = toc::pitch(p, &items);
                     }
                     for g in p.lines.iter().flat_map(|l| &l.glyphs).filter(|g| g.source < -1) {
@@ -1074,7 +1074,7 @@ fn flowing_items(content: &PageContent) -> (Vec<Item>, Vec<DropCap>) {
     analysed.graphics.retain(|g| {
         matches!(g.kind, super::GraphicKind::Image) || (g.rect[2] - g.rect[0]) * (g.rect[3] - g.rect[1]) < 0.5 * area
     });
-    let mut items = layout::analyse(&analysed, Options { invisible: true, figures: true });
+    let mut items = layout::analyse(&analysed, Options { invisible: true, figures: true, contents: true });
     let mut caps = Vec::new();
     let mut restored = false;
     for (_, cap) in candidates {
@@ -1088,7 +1088,7 @@ fn flowing_items(content: &PageContent) -> (Vec<Item>, Vec<DropCap>) {
         }
     }
     if restored {
-        items = layout::analyse(&analysed, Options { invisible: true, figures: true });
+        items = layout::analyse(&analysed, Options { invisible: true, figures: true, contents: true });
     }
     // Image-only pages (including full-page scans) still need their image.
     if items.is_empty() && !content.graphics.is_empty() {
@@ -1487,7 +1487,7 @@ fn doc_para(p: &layout::Para, cap: Option<&DropCap>) -> DocPara {
         para.left = (p.rect[0] - col[0]).max(0.0);
         para.first = 0.0;
         para.right = 0.0;
-        para.tabs.push(Tab { pos: p.rect[2] - col[0], right: true, leader: true });
+        para.tabs.push(Tab { pos: p.rect[2] - col[0], right: true, leader: toc::leader(p).unwrap_or(true) });
     }
     para
 }

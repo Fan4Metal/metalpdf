@@ -212,6 +212,7 @@ impl Writer {
             Options {
                 invisible: true,
                 figures: false,
+                contents: false,
             },
         )
         .into_iter()
@@ -248,6 +249,7 @@ impl Writer {
                 Options {
                     invisible,
                     figures: false,
+                    contents: false,
                 },
             ) {
                 let Item::Para(p) = item else { continue };

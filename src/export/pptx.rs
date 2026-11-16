@@ -124,7 +124,7 @@ impl Writer {
         let len = |d: f32| (f64::from(d.max(0.0)) * k).round().max(1.0) as i64;
         // Points as drawn on the slide (font sizes, line pitches).
         let pt = |v: f32| f64::from(v) * k / 12700.0;
-        let items = layout::analyse(content, Options { invisible: false, figures: false });
+        let items = layout::analyse(content, Options { invisible: false, figures: false, contents: false });
         let scale = super::PICTURE_DPI / 72.0;
         // The page's own pictures, read before they are taken out.
         let mut pictures: Vec<(usize, [f32; 4])> = Vec::new();

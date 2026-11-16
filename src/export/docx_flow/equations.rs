@@ -320,7 +320,7 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
     let excluded:Vec<_>=layout::labelled_figures(content).into_iter().map(|f|f.rect).collect();
     let seeds:Vec<_>=content.glyphs.iter().filter(|g|math(g)&&!excluded.iter().any(|&r|centre_inside(g,r))).map(|g|g.rect).collect();
     if seeds.is_empty() {return Prepared {blocks:Vec::new(),inline:fractions};}
-    let all_items=layout::analyse(content,layout::Options {invisible:false,figures:false});
+    let all_items=layout::analyse(content,layout::Options {invisible:false,figures:false,contents:false});
     // Prose with a variable or two in it stays a paragraph that rewraps
     // when edited; only the expressions set apart are fixed compositions.
     let mut inline = Vec::new();

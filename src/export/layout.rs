@@ -162,6 +162,9 @@ pub struct Options {
     pub invisible: bool,
     /// Find figures, and leave the text inside them to their pictures.
     pub figures: bool,
+    /// Join a contents page's numbers set in a column of their own, with
+    /// no leader, to their titles with a tab (`page_numbers`).
+    pub contents: bool,
 }
 
 pub fn union(a: Rect, b: Rect) -> Rect {
@@ -280,6 +283,7 @@ pub fn analyse(content: &PageContent, opts: Options) -> Vec<Item> {
         glyphs.retain(|g| !figures.iter().any(|f| inside(centre(g.rect), f.rect, 1.0)));
     }
     let lines = lines(glyphs);
+    let lines = if opts.contents { page_numbers(lines) } else { lines };
     let mut rects: Vec<Rect> = lines.iter().map(|l| l.rect).collect();
     rects.extend(figures.iter().map(|f| f.rect));
     if rects.is_empty() {
@@ -348,6 +352,114 @@ pub fn lines(glyphs: Vec<Glyph>) -> Vec<Line> {
 /// of its own under the text, a line more each.
 fn script(g: &Glyph, line: &Line) -> bool {
     g.size < 0.85 * line.size && (g.baseline - line.baseline).abs() > 0.15 * line.size
+}
+
+/// A contents page with no leaders: the page numbers a column of their
+/// own, flush right, each on its title's first or last line, more than an
+/// em after it. Each joins its title's line after a tab (`toc` makes it a
+/// right tab), the title before it. Left apart, the cut read the numbers
+/// as a column of their own, and a two-column contents page went to four
+/// Word pages, every title with its number lines away. Only a column of
+/// four or more that goes up the page, by steps not all alike (a pleading's
+/// line numbers go up by one or five each line).
+fn page_numbers(mut lines: Vec<Line>) -> Vec<Line> {
+    let value = |l: &Line| -> Option<u32> {
+        let s: String = l.glyphs.iter().map(|g| g.ch).filter(|c| !c.is_whitespace()).collect();
+        (!s.is_empty() && s.len() <= 4 && s.chars().all(|c| c.is_ascii_digit())).then(|| s.parse().ok()).flatten()
+    };
+    let numbers: Vec<usize> = (0..lines.len()).filter(|&i| value(&lines[i]).is_some()).collect();
+    let mut joins: Vec<(usize, usize)> = Vec::new();
+    let mut done = vec![false; lines.len()];
+    for &n in &numbers {
+        if done[n] {
+            continue;
+        }
+        // Flush right, or centred (a 7 three points short of an 11): the
+        // right edges within half an em of the column's widest.
+        let near = |m: usize, right: f32| (lines[m].rect[2] - right).abs() < 0.5 * lines[m].size;
+        let mut right = lines[n].rect[2];
+        for _ in 0..2 {
+            right = numbers.iter().copied().filter(|&m| !done[m] && near(m, right)).map(|m| lines[m].rect[2]).fold(right, f32::max);
+        }
+        let mut column: Vec<usize> = numbers.iter().copied().filter(|&m| !done[m] && near(m, right)).collect();
+        column.iter().for_each(|&m| done[m] = true);
+        column.sort_by(|&a, &b| lines[a].baseline.total_cmp(&lines[b].baseline));
+        let values: Vec<u32> = column.iter().map(|&m| value(&lines[m]).unwrap()).collect();
+        let steps: Vec<i64> = values.windows(2).map(|w| i64::from(w[1]) - i64::from(w[0])).collect();
+        // Going up, a misprint aside (a book's 43 after 46).
+        let down = steps.iter().filter(|&&d| d < 0).count();
+        if column.len() < 4 || 5 * down > steps.len() || steps.iter().all(|&d| d == steps[0]) {
+            continue;
+        }
+        // Its title: the nearest line before it on its baseline, with
+        // letters, no number of the column.
+        let pairs: Vec<(usize, usize)> = column.iter().filter_map(|&m| {
+            let num = &lines[m];
+            (0..lines.len())
+                .filter(|&t| t != m && !column.contains(&t) && value(&lines[t]).is_none())
+                .filter(|&t| {
+                    let l = &lines[t];
+                    let gap = num.rect[0] - l.rect[2];
+                    (l.baseline - num.baseline).abs() < 0.2 * l.size.max(num.size) && gap > 0.5 * num.size && gap < 20.0 * num.size && l.glyphs.iter().any(|g| g.ch.is_alphabetic())
+                })
+                .max_by(|&a, &b| lines[a].rect[2].total_cmp(&lines[b].rect[2]))
+                .map(|t| (t, m))
+        }).collect();
+        // Most of the numbers have one: else it is a table's column.
+        if 4 * pairs.len() >= 3 * column.len() {
+            joins.extend(pairs);
+            // A title long enough to come within an em of the column has
+            // its number after a space: a tab too.
+            for line in lines.iter_mut().filter(|l| l.glyphs.iter().any(|g| g.ch.is_alphabetic()) && (l.rect[2] - right).abs() < 0.5 * l.size) {
+                let digits = line.glyphs.iter().rev().take_while(|g| g.ch.is_ascii_digit()).count();
+                let start = line.glyphs.len() - digits;
+                if (1..=4).contains(&digits) && start > 0 && line.glyphs[start].space_before {
+                    let mut tab = line.glyphs[start].clone();
+                    tab.ch = '\t';
+                    tab.source = -1;
+                    tab.space_before = false;
+                    tab.rect[0] = line.glyphs[start - 1].rect[2];
+                    tab.rect[2] = line.glyphs[start].rect[0];
+                    tab.x = tab.rect[0];
+                    line.glyphs[start].space_before = false;
+                    line.glyphs.insert(start, tab);
+                }
+            }
+        }
+    }
+    if joins.is_empty() {
+        return lines;
+    }
+    let mut gone = vec![false; lines.len()];
+    let mut titled = vec![false; lines.len()];
+    for &(t, m) in &joins {
+        if std::mem::replace(&mut titled[t], true) {
+            continue;
+        }
+        let number = std::mem::take(&mut lines[m].glyphs);
+        gone[m] = true;
+        let mut tab = number[0].clone();
+        tab.ch = '\t';
+        tab.source = -1;
+        tab.space_before = false;
+        tab.rect = [lines[t].rect[2], number[0].rect[1], number[0].rect[0], number[0].rect[3]];
+        tab.x = tab.rect[0];
+        let line = &mut lines[t];
+        line.glyphs.push(tab);
+        line.glyphs.extend(number.into_iter().enumerate().map(|(i, mut g)| {
+            if i == 0 {
+                g.space_before = false;
+            }
+            g
+        }));
+        line.rect = line.glyphs.iter().fold(line.glyphs[0].rect, |r, g| union(r, g.rect));
+    }
+    let mut k = 0;
+    lines.retain(|_| {
+        k += 1;
+        !gone[k - 1]
+    });
+    lines
 }
 
 /// Pieces of lines joined along their baselines (step 1 above).
@@ -1580,7 +1692,7 @@ mod tests {
             .collect()
     }
 
-    const OPTS: Options = Options { invisible: false, figures: true };
+    const OPTS: Options = Options { invisible: false, figures: true, contents: false };
 
     #[test]
     fn a_raised_footnote_number_stays_with_its_smaller_body_text() {
@@ -1693,6 +1805,62 @@ mod tests {
         // Two lines of text an em apart stay two.
         let got = lines([text("one line of ordinary text", 50.0, 100.0), text("next", 90.0, 110.0)].concat());
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn a_contents_column_of_page_numbers_joins_its_titles() {
+        // Two columns of entries, the numbers flush right at 200 and 430,
+        // some titles over two lines, the number on the first.
+        let number = |n: u32, right: f32, y: f32| {
+            let s = n.to_string();
+            text(&s, right - 5.0 * s.len() as f32, y)
+        };
+        let mut glyphs = Vec::new();
+        let left = [("Chapter V. Direct", 106, true), ("current", 0, false), ("31. Current", 106, true), ("32. Force", 108, true), ("33. Ohm's law and", 111, true), ("resistance", 0, false), ("34. Joule's law", 114, true)];
+        for (k, (title, page, has)) in left.iter().enumerate() {
+            let y = 100.0 + 14.0 * k as f32;
+            glyphs.extend(text(title, 10.0, y));
+            if *has {
+                glyphs.extend(number(*page, 200.0, y));
+            }
+        }
+        let right = [("50. Magnets", 169), ("52. Diamagnetism", 176), ("53. Paramagnetism", 180), ("54. Ferromagnetism", 183), ("55. Induction", 190)];
+        for (k, (title, page)) in right.iter().enumerate() {
+            let y = 100.0 + 14.0 * k as f32;
+            glyphs.extend(text(title, 240.0, y));
+            glyphs.extend(number(*page, 430.0, y));
+        }
+        // A title reaching the column: its number a space after it.
+        glyphs.extend(text("46. Force in", 127.0, 198.0));
+        glyphs.extend(number(156, 200.0, 198.0));
+        let joined = page_numbers(lines(glyphs));
+        let texts: Vec<String> = joined.iter().map(Line::text).collect();
+        assert_eq!(joined.len(), 13, "{texts:?}");
+        assert!(texts.contains(&"46. Force in\t156".to_owned()), "{texts:?}");
+        assert!(texts.contains(&"Chapter V. Direct\t106".to_owned()), "{texts:?}");
+        assert!(texts.contains(&"current".to_owned()));
+        assert!(texts.contains(&"33. Ohm's law and\t111".to_owned()));
+        assert!(texts.contains(&"55. Induction\t190".to_owned()));
+        // Centred numbers (the 7 and 8 short of the 11s) and a misprint
+        // (43 after 46).
+        let mut glyphs = Vec::new();
+        for (k, (v, right)) in [(7, 197.0), (8, 197.0), (11, 200.0), (13, 200.0), (46, 200.0), (43, 200.0), (50, 200.0)].iter().enumerate() {
+            let y = 100.0 + 14.0 * k as f32;
+            glyphs.extend(text("A title of the entry", 10.0, y));
+            glyphs.extend(number(*v, *right, y));
+        }
+        assert_eq!(page_numbers(lines(glyphs)).len(), 7);
+        // Line numbers in a margin go up by one each line, and a column of
+        // values going down is no contents: left alone.
+        for values in [[1, 2, 3, 4, 5], [90, 70, 40, 20, 10]] {
+            let mut glyphs = Vec::new();
+            for (k, v) in values.iter().enumerate() {
+                let y = 100.0 + 14.0 * k as f32;
+                glyphs.extend(text("Some text of the line here", 10.0, y));
+                glyphs.extend(number(*v, 300.0, y));
+            }
+            assert_eq!(page_numbers(lines(glyphs)).len(), 10);
+        }
     }
 
     #[test]

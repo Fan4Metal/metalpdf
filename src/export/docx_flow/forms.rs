@@ -315,7 +315,7 @@ pub(super) fn write(x: &mut String, table: &Table, margin_left: f32, out: &mut s
             }
             let items = layout::analyse(
                 &PageContent { size: [table.rect[2] + 1.0, table.rect[3] + 1.0], glyphs: cell.glyphs.clone(), ..Default::default() },
-                layout::Options { invisible: true, figures: false },
+                layout::Options { invisible: true, figures: false, contents: false },
             );
             let mut bottom = cell.rect[1];
             if items.is_empty() {

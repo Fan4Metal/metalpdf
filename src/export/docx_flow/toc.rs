@@ -7,6 +7,9 @@ struct Entry {
     label_end: usize,
     page_start: usize,
     page_end: usize,
+    /// Dots before the number; none on a contents page whose numbers
+    /// stand in a column of their own (`layout::page_numbers`, a tab).
+    leader: bool,
 }
 
 fn leader_dots(c: char) -> usize {
@@ -45,7 +48,7 @@ fn value_entry(line: &layout::Line) -> Option<Entry> {
             i += 1;
         }
         if count >= 10 && i < end && end - i <= 40 && glyphs[..start].iter().any(|g| g.ch.is_alphabetic()) {
-            return Some(Entry { label_end: start, page_start: i, page_end: end });
+            return Some(Entry { label_end: start, page_start: i, page_end: end, leader: true });
         }
     }
     None
@@ -76,6 +79,7 @@ fn page_entry(line: &layout::Line) -> Option<Entry> {
     };
     let mut label_end = page_start;
     let mut count = 0;
+    let mut tab = false;
     while label_end > 0 {
         let ch = glyphs[label_end - 1].ch;
         let n = dots(ch);
@@ -83,11 +87,18 @@ fn page_entry(line: &layout::Line) -> Option<Entry> {
             break;
         }
         count += n;
+        tab |= ch == '\t';
         label_end -= 1;
+    }
+    // A tab parts the title from its number: the dots before it are the
+    // title's (`Kirchhoff's rules.`), no leader.
+    if tab {
+        count = 0;
+        label_end += glyphs[label_end..page_start].iter().position(|g| g.ch == '\t').unwrap_or(0);
     }
     // Ordinary prose ellipses, decimal numbers and list markers are not
     // contents leaders. A title must precede a genuinely long leader.
-    (count >= 6 && glyphs[..label_end].iter().any(|g| g.ch.is_alphabetic())).then_some(Entry { label_end, page_start, page_end })
+    ((count >= 6 || tab) && glyphs[..label_end].iter().any(|g| g.ch.is_alphabetic())).then_some(Entry { label_end, page_start, page_end, leader: count > 0 })
 }
 
 /// Split only at recognised leaders. Leave the remaining text's original
@@ -153,6 +164,12 @@ pub(super) fn pitch(p: &layout::Para, items: &[Item]) -> f32 {
     if p.lines.len() == 1 { near.min(1.2 * p.size) } else { near }
 }
 
+/// Whether a paragraph is a contents row, and if so whether its tab has a
+/// dot leader.
+pub(super) fn leader(p: &layout::Para) -> Option<bool> {
+    (p.lines.len() == 1).then(|| entry(&p.lines[0]).map(|e| e.leader)).flatten()
+}
+
 /// Preserve the title and page label's runs, inserting one native tab.
 pub(super) fn spans(p: &layout::Para) -> Option<Vec<Span>> {
     if p.lines.len() != 1 {
@@ -165,7 +182,7 @@ pub(super) fn spans(p: &layout::Para) -> Option<Vec<Span>> {
     let mut glyphs = line.glyphs[..e.label_end].to_vec();
     // A coloured heading can have black leaders. The tab's own run
     // controls the leader's colour, font and weight in Word.
-    let mut tab = line.glyphs[e.label_end..e.page_start].iter().find(|g| !g.ch.is_whitespace())?.clone();
+    let mut tab = line.glyphs[e.label_end..e.page_start].iter().find(|g| !g.ch.is_whitespace() || g.ch == '\t')?.clone();
     tab.ch = '\t';
     tab.space_before = false;
     glyphs.push(tab);
@@ -220,6 +237,24 @@ mod tests {
         for text in ["He paused... 12", "Version 1.2.3", "3. A normal list item", "Filled........text", "......12", "Title......1i", "Title......12-"] {
             assert!(entry(&line(text, 50.0, 100.0)).is_none(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_number_after_a_tab_is_an_entry_with_no_leader() {
+        let line = line("Preface\t12", 50.0, 100.0);
+        let rect = line.rect;
+        let p = layout::Para { lines: vec![line], column: [50.0, 400.0], align: layout::Align::Left, marker: None, size: 9.0, rect };
+        assert_eq!(leader(&p), Some(false));
+        let text: String = spans(&p).unwrap().iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "Preface\t12");
+        // A title's own stop stays its, and makes no leader.
+        let dotted = super::tests::line("Kirchhoff's rules.\t117", 50.0, 100.0);
+        let q = layout::Para { rect: dotted.rect, lines: vec![dotted], ..p.clone() };
+        assert_eq!(leader(&q), Some(false));
+        assert_eq!(spans(&q).unwrap().iter().map(|s| s.text.as_str()).collect::<String>(), "Kirchhoff's rules.\t117");
+        let line = super::tests::line("Preface.........12", 50.0, 100.0);
+        let p = layout::Para { rect: line.rect, lines: vec![line], ..p };
+        assert_eq!(leader(&p), Some(true));
     }
 
     #[test]
