@@ -1111,7 +1111,13 @@ fn paragraphs(group: &Group, lines: &[Line], figures: &[super::layout::Figure], 
             let ratio = line.size / prev.size;
             let col_w = (right - left).max(1.0);
             let soft = prev.glyphs.last().is_some_and(|g| g.ch == '\u{ad}' || g.ch == '-');
-            let short = prev.rect[2] < right - (3.5 * s).max(0.14 * col_w) && !soft;
+            // Short, unless the next line's first word would not have fitted
+            // after it: a ragged line before a long word ("…аналого-цифровых"
+            // over "преобразователей.") goes on.
+            let first_word = line.glyphs.iter().skip(1).position(|g| g.space_before).map_or(line.glyphs.len(), |p| p + 1);
+            let word = line.glyphs[first_word - 1].rect[2] - line.glyphs[0].rect[0];
+            let room = right - prev.rect[2] - 0.25 * s;
+            let short = prev.rect[2] < right - (3.5 * s).max(0.14 * col_w) && !soft && word < room;
             let mid = (column[0] + column[1]) / 2.0;
             let centred = |l: &Line| (centre(l.rect)[0] - mid).abs() < 1.5 * s && l.rect[0] > column[0] + 1.5 * s;
             let continues_list = current_marker.is_some() && current[0].glyphs.get(current_marker.unwrap()).is_some_and(|g| (line.rect[0] - g.rect[0]).abs() < 1.0 * s);
@@ -2061,6 +2067,24 @@ mod tests {
         g.extend(text("Another one starts after a gap", 50.0, 150.0));
         let items = analyse(&page(g), OPTS);
         assert_eq!(texts(&items), ["The first line of a paragraph goes on here and ends short.", "Another one starts after a gap"]);
+    }
+
+    #[test]
+    fn a_ragged_line_before_a_word_too_long_for_its_room_goes_on() {
+        // Set ragged right: the second line ends 52 points short, as the
+        // next line's first word, 70 points long, did not fit there.
+        let mut g = text("A paragraph set ragged at the right with lines of", 50.0, 100.0);
+        let right = g.last().unwrap().rect[2];
+        g.extend(text("several words that end where they can", 50.0, 112.0));
+        let short = g.last().unwrap().rect[2];
+        g.extend(text("preobrazovatel and the rest of the line again", 50.0, 124.0));
+        assert!(right - short > 40.0 && right - short < 70.0, "{right} {short}");
+        let items = analyse(&page(g.clone()), OPTS);
+        assert_eq!(items.len(), 1, "{:?}", texts(&items));
+        // A short word would have fitted: a paragraph ends there.
+        let mut g: Vec<Glyph> = g.into_iter().filter(|gl| gl.baseline < 120.0).collect();
+        g.extend(text("And the rest of the line again goes on", 50.0, 124.0));
+        assert_eq!(analyse(&page(g), OPTS).len(), 2);
     }
 
     #[test]
