@@ -942,9 +942,16 @@ pub fn cut(idx: &[usize], rects: &[Rect], column: [f32; 2], gutter: f32, out: &m
     // region's, not a column's, though the band does not cross it.
     let region_mid = (column[0] + column[1]) / 2.0;
     let centred = |r: Rect| ((r[0] + r[2]) / 2.0 - region_mid).abs() < gutter.max(0.02 * (column[1] - column[0])) && r[0] > column[0] + 2.0 * gutter;
+    // Nor goes far into it: a column's lines end at the band, a little
+    // longer at most. A register's table (a field's name, a wide gap, its
+    // description) and the section after it, its lines reaching well into
+    // the gap: the section went into the names' column, 47 points wide.
     let clear = |row: &[usize], band: [f32; 2]| {
         let mid = (band[0] + band[1]) / 2.0;
-        row.iter().all(|&m| (rects[m][2] <= mid || rects[m][0] >= mid) && !centred(rects[m]))
+        row.iter().all(|&m| {
+            let r = rects[m];
+            (r[2] <= mid && r[2] <= band[0] + 2.0 * gutter || r[0] >= mid && r[0] >= band[1] - 2.0 * gutter) && !centred(r)
+        })
     };
     let mut i = 0;
     while i < rows.len() {
@@ -1761,6 +1768,25 @@ mod tests {
         assert!(got[0].text().contains("[K-1"), "{}", got[0].text());
         assert!(got[1].text().starts_with("dTN"), "{}", got[1].text());
         assert!(got[2].text().contains("aB*") || got[2].text().contains("a*B"), "{}", got[2].text());
+    }
+
+    #[test]
+    fn text_reaching_far_into_a_band_is_not_a_column_s() {
+        // A register's row (an ID, a field's name, its description over two
+        // lines past a 200-point gap), then a heading and two lines of the
+        // next section, reaching 63 points into the gap.
+        let rects = [[87.0, 346.3, 91.1, 355.7], [105.1, 346.3, 132.2, 355.7], [332.9, 346.3, 395.3, 355.7], [332.9, 363.5, 430.9, 372.9], [85.0, 383.0, 166.0, 401.7], [85.0, 406.9, 177.2, 421.0], [85.0, 426.2, 195.2, 440.3]];
+        let mut groups = Vec::new();
+        cut(&(0..rects.len()).collect::<Vec<_>>(), &rects, [85.0, 538.6], 6.3, &mut groups);
+        let section = groups.iter().find(|g| g.members.contains(&4)).unwrap();
+        assert!(section.column[1] >= 195.2, "{groups:?}");
+        assert!(section.members.contains(&5) && section.members.contains(&6));
+        // A column's lines a little longer further down stay its.
+        let rects = [[50.0, 100.0, 280.0, 110.0], [320.0, 100.0, 550.0, 110.0], [50.0, 112.0, 280.0, 122.0], [320.0, 112.0, 550.0, 122.0], [50.0, 124.0, 285.0, 134.0]];
+        let mut groups = Vec::new();
+        cut(&(0..rects.len()).collect::<Vec<_>>(), &rects, [50.0, 550.0], 9.0, &mut groups);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert!(groups[0].members.contains(&4));
     }
 
     #[test]
