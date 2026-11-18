@@ -310,7 +310,7 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
     let mut counts=std::collections::HashMap::new();
     for g in content.glyphs.iter().filter(|g|g.ch.is_alphabetic()&&!g.invisible) {*counts.entry(g.font).or_insert(0usize)+=1;}
     let body=counts.into_iter().max_by_key(|&(f,n)|(n,std::cmp::Reverse(f))).map(|(f,_)|f);
-    let fractions=stacked_fractions(content);
+    let mut fractions=stacked_fractions(content);
     let math=|g:&Glyph| {
         if g.invisible {return false;}
         let font=fonts.get(g.font as usize);
@@ -412,13 +412,38 @@ pub(super) fn prepare(content:&mut PageContent,fonts:&[FontInfo])->Prepared {
             let size=row.size;
             let after:Vec<&Glyph>=row.glyphs.iter().filter(|g|!g.invisible&&!centre_inside(g,*r)).collect();
             let start=after.iter().map(|g|g.rect[0]).fold(f32::INFINITY,f32::min);
+            // Or one a line of prose leads to, the line's last (`содержится
+            // в множителе √(1+τ²(2πβ/Ψ)²)`): it stood over the line.
+            let before:Vec<&&Glyph>=after.iter().filter(|g|g.rect[2]<=r[0]+0.5*size).collect();
+            let end=before.iter().map(|g|g.rect[2]).fold(f32::NEG_INFINITY,f32::max);
+            let leads_in=before.len()==after.len() && before.iter().filter(|g|g.ch.is_alphabetic()).count()>=8 && end>=r[0]-2.0*size;
             r[3]-r[1]<=3.5*size && r[2]-r[0]<=12.0*size && row.baseline>r[1] && row.baseline<r[3]+0.2*size
-                && after.iter().filter(|g|g.ch.is_alphabetic()).count()>=8 && start>=r[2]-0.5*size && start<=r[2]+2.0*size
+                && (after.iter().filter(|g|g.ch.is_alphabetic()).count()>=8 && start>=r[2]-0.5*size && start<=r[2]+2.0*size || leads_in)
         });
         match lead {
             Some(row)=>{inline.push(super::artwork::Inline {rect:*r,baseline:row.baseline});false}
             None=>true,
         }
+    });
+    // A composition whose every character a picture in a line paints (a
+    // sum's limits over and under it, the sum with them a pile in the line)
+    // is none: it stood over the line as a paragraph of its own, took the
+    // fraction beside the sum into it, and the line broke round it.
+    // A character at a picture's edge, or a quarter of its size off it (the
+    // `)` of `f⁽ᵏ⁾` past the fraction's box, a limit over the sum), goes
+    // into it.
+    blocks.retain(|r| {
+        let within: Vec<(Rect, f32)> = content.glyphs.iter().filter(|g| !g.invisible && !g.ch.is_whitespace() && centre_inside(g, *r)).map(|g| (g.rect, g.size)).collect();
+        let at = |(g, size): (Rect, f32), i: &super::artwork::Inline| touches(g, i.rect, 0.25 * size);
+        if within.is_empty() || !within.iter().all(|&g| inline.iter().chain(&fractions).any(|i| at(g, i))) {
+            return true;
+        }
+        for &g in &within {
+            if let Some(i) = inline.iter_mut().chain(fractions.iter_mut()).find(|i| at(g, i)) {
+                i.rect = layout::union(i.rect, g.0);
+            }
+        }
+        false
     });
     // A fraction in a composition is painted with it.
     for f in fractions {
@@ -515,6 +540,42 @@ mod tests {
         let rows=layout::lines(p.glyphs);
         assert_eq!(rows.len(),2,"{:?}",rows.iter().map(|r|(r.text(),r.rect)).collect::<Vec<_>>());
         assert!(rows[0].text().contains(") and d (charge -"));
+    }
+
+    #[test]
+    fn an_expression_a_line_of_prose_leads_to_is_in_the_line() {
+        // "the dependence is contained in the factor √(1+τ²)", the root a
+        // composition of two levels at the line's end.
+        let mut glyphs=text("Ordinary prose of the line above goes on here.",50.0,80.0,0);
+        glyphs.extend(text("the dependence is held in the factor",50.0,100.0,0));
+        let mut root=text("√",240.0,100.0,1);root[0].rect=[240.0,86.0,248.0,104.0];
+        glyphs.extend(root);
+        glyphs.extend(text("1+αβ",249.0,98.0,1));
+        glyphs.extend(text("2",270.0,92.0,1));
+        glyphs.extend(text("Ordinary prose of the line below goes on here.",50.0,124.0,0));
+        let mut p=PageContent {size:[600.0,800.0],glyphs,..Default::default()};
+        let prepared=prepare(&mut p,&fonts());
+        assert!(prepared.blocks.is_empty(),"{:?}",prepared.blocks);
+        assert!(prepared.inline.iter().any(|i|i.baseline==100.0&&i.rect[0]<=240.0),"{:?}",prepared.inline.iter().map(|i|(i.rect,i.baseline)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_sum_s_limits_in_prose_go_with_its_picture() {
+        // "in a Taylor series f(x) = f(a) + ∑ (x−a), since every closed
+        // system is one", the ∑ of a legacy symbol font with ∞ over it and
+        // k=1 under it, prose going on after it.
+        let mut glyphs=text("in a Taylor series f(x)=f(a)+",50.0,100.0,0);
+        let mut sum=text("∑",197.0,100.0,1);sum[0].rect=[197.0,88.0,207.0,104.0];
+        glyphs.extend(sum);
+        let small=|s:&str,x:f32,y:f32|{let mut g=text(s,x,y,1);for g in &mut g {g.size=6.0;g.rect=[g.rect[0],y-4.5,g.rect[0]+3.0,y+1.0];}g};
+        glyphs.extend(small("∞",200.0,86.0));
+        glyphs.extend(small("k=1",197.0,110.0));
+        glyphs.extend(text("(x-a), since every closed system is one of them.",210.0,100.0,0));
+        glyphs.extend(text("And the paragraph goes on with its next line here.",50.0,114.0,0));
+        let mut p=PageContent {size:[600.0,800.0],glyphs,..Default::default()};
+        let prepared=prepare(&mut p,&fonts());
+        assert!(prepared.blocks.is_empty(),"{:?}",prepared.blocks);
+        assert!(prepared.inline.iter().any(|i|i.rect[0]<=197.0&&i.rect[2]>=207.0&&i.rect[1]<=86.0-4.5&&i.rect[3]>=110.0),"{:?}",prepared.inline.iter().map(|i|i.rect).collect::<Vec<_>>());
     }
 
     #[test]
