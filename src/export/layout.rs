@@ -532,7 +532,16 @@ fn join(mut pieces: Vec<Line>) -> Vec<Line> {
             } else {
                 None
             };
-            if let Some(baseline) = in_gap.or(after_text) {
+            // Such subscripts written after the line, each in a gap of it:
+            // one piece round what is between them (`δT_N, Δ_h, Δ_v`, the
+            // N and h one piece round the Δ).
+            let slack = 0.25 * s;
+            let woven = (same_script(&piece)
+                && piece.rect[0] >= line.rect[0]
+                && piece.rect[2] <= line.rect[2]
+                && piece.glyphs.iter().all(|a| line.glyphs.iter().all(|b| a.rect[2] <= b.rect[0] + slack || a.rect[0] >= b.rect[2] - slack)))
+            .then_some(line.baseline);
+            if let Some(baseline) = in_gap.or(after_text).or(woven) {
                 line.glyphs.extend(piece.glyphs);
                 line.settle();
                 if same {
@@ -1828,6 +1837,12 @@ mod tests {
         assert_eq!(got[0].baseline, 100.0);
         assert!(got[1].text().starts_with("tkadra = 30"), "{}", got[1].text());
         assert_eq!(got[1].baseline, 120.0);
+        // "dT_N, D_h, D_v, S and so on", the N and h one piece round the D.
+        let glyphs = [text("dT", 50.0, 300.0), text(", D", 66.0, 300.0), text(", D", 86.0, 300.0), text(", S and so on here", 106.0, 300.0), lower("N", 60.5, 300.0), lower("h", 79.0, 300.0), lower("v", 99.0, 300.0)].concat();
+        let got = lines(glyphs);
+        assert_eq!(got.len(), 1, "{:?}", got.iter().map(Line::text).collect::<Vec<_>>());
+        assert_eq!(got[0].text().replace(' ', ""), "dTN,Dh,Dv,Sandsoonhere");
+        assert_eq!(got[0].baseline, 300.0);
         // "= 30·10 and so on", the signs written apart from the numbers.
         let mut dot = text("·", 68.0, 200.0);
         dot[0].rect[2] = 71.0;
