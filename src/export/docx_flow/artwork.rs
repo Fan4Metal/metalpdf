@@ -254,6 +254,12 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
                 grown = layout::union(grown, g.rect);
             }
             if grown == *b {
+                // A foot's logo on its level, apart from its lines (Nordic's
+                // at the right of the document's number and page number):
+                // left in the flow, it went over to a Word page of its own.
+                if b[1] > 0.875 * h {
+                    *b = foot_art(*b, &content.graphics, size, [w, h]);
+                }
                 return true;
             }
             *b = grown;
@@ -791,6 +797,15 @@ mod tests {
         let p = prepare(&page(glyphs, vec![graphic([40.0, 745.0, 560.0, 790.0])]), &[], Vec::new(), &[foot], false);
         assert!(p.decorations.iter().any(|d| d[0] <= 40.0 && d[2] >= 560.0 && d[1] <= 745.0 && d[3] >= 790.0), "{:?}", p.decorations);
         assert!(p.content.graphics.is_empty());
+        // A foot of a document number and a page number with a logo on
+        // their level at the right, touching neither.
+        let mut glyphs = text("4413_417 v1.8", 85.0, 770.0);
+        glyphs.extend(text("500", 300.0, 770.0));
+        body(&mut glyphs);
+        let feet = [[85.0, 762.0, 150.0, 772.0], [300.0, 762.0, 315.0, 772.0]];
+        let p = prepare(&page(glyphs, vec![graphic([497.0, 750.0, 538.6, 785.0])]), &[], Vec::new(), &feet, false);
+        assert!(p.content.graphics.is_empty(), "{:?}", p.decorations);
+        assert!(p.decorations.iter().any(|d| d[2] >= 538.6 && d[1] <= 750.0));
         // A schematic's supply pin, the same on every page, in its top part.
         let mut glyphs = text("GND", 200.0, 60.0);
         body(&mut glyphs);

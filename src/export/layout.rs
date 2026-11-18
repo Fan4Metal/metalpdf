@@ -1259,7 +1259,14 @@ fn table_of(items: &[Item], columns: &[[f32; 2]], members: &[(usize, usize)], gr
         .filter(|g| matches!(g.kind, super::GraphicKind::Path { curved: false }) && (g.rect[2] - g.rect[0] > 24.0 || g.rect[3] - g.rect[1] > 24.0) && g.rect[0] >= rect[0] - 12.0 && g.rect[2] <= rect[2] + 12.0 && g.rect[1] >= rect[1] - 12.0 && g.rect[3] <= rect[3] + 12.0)
         .count()
         >= rows.len();
-    let one_line = members.iter().all(|&(_, k)| items[k].lines() == 1);
+    // Cells of a line, a fifth of them two at most: a description column's
+    // lines a row each, two of them taken for one paragraph (a register's
+    // "Disable cache. Invalidates all cache entries." over the next row's
+    // "Enable cache", the column's longest line passing for a full one).
+    // Three columns at least: two columns of a contents page's entries,
+    // some over two lines, were taken for a table and read across.
+    let two = members.iter().filter(|&&(_, k)| items[k].lines() == 2).count();
+    let one_line = members.iter().all(|&(_, k)| items[k].lines() <= 2) && (two == 0 || columns.len() >= 3 && two * 5 <= members.len());
     (ruled || one_line && rows.len() >= 3).then(|| Table { columns: columns.to_vec(), rows })
 }
 
@@ -2164,6 +2171,18 @@ mod tests {
         let content = page(g);
         let segs = segments(&analyse(&content, OPTS), &content.graphics);
         assert!(segs.iter().all(|s| s.table.is_none()), "{segs:?}");
+        // A register's fields, 1.8 em apart, the longest description and
+        // the next row's taken for one paragraph: still a table.
+        let mut g = text("A paragraph above the table that runs across the page", 40.0, 60.0);
+        for (k, cells) in [[("A", 50.0), ("RW CACHEEN", 70.0), ("Cache enable", 330.0)], [("Disabled", 190.0), ("0", 270.0), ("Disable cache. Invalidates all entries.", 330.0)], [("Enabled", 190.0), ("1", 270.0), ("Enable cache", 330.0)]].into_iter().enumerate() {
+            for (s, x) in cells {
+                g.extend(text(s, x, 100.0 + 18.0 * k as f32));
+            }
+        }
+        let content = page(g);
+        let segs = segments(&analyse(&content, OPTS), &content.graphics);
+        let table = segs.iter().find_map(|s| s.table.as_ref()).expect("a table");
+        assert_eq!(table.rows.len(), 3, "{segs:?}");
     }
 
     #[test]
