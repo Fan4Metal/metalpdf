@@ -1194,7 +1194,8 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
         let before=(table.rect[1]-prev.bottom.unwrap_or(table.rect[1])).max(0.0);
         if before>1.0 {let _=write!(x,r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/></w:pPr></w:p>"#,tw(before));}
         forms::write(x,table,out.margin_left,out);
-        *prev=Prev {baseline:None,bottom:Some(table.rect[3])};
+        let shift=pushed_down(prev.bottom.map_or(0.0,|b| table.rect[1]-b),10.0);
+        *prev=Prev {baseline:None,bottom:Some(table.rect[3]+shift)};
         return;
     }
     if let Block::Para(p) = block
@@ -1261,12 +1262,14 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             // picture) moves the next baseline down as much.
             let under = line_reach(p).1;
             let hang = under - (1.0 - BASELINE_IN_LINE) * word_line(p);
-            *prev = Prev { baseline: Some(p.last_baseline + hang + below), bottom: Some(p.last_baseline + under + below) };
+            let shift = pushed_down(para_gap(p, prev), p.size);
+            *prev = Prev { baseline: Some(p.last_baseline + hang + below + shift), bottom: Some(p.last_baseline + under + below + shift) };
         }
         Block::Picture { rel, width, height, align, left, top, bottom, region } => {
             let k = (col_w / width).min(1.0);
             let (cx, cy) = (emu(width * k), emu(height * k));
-            let before = paragraph_gap(prev.bottom.map_or(0.0, |b| top - b), 10.0);
+            let gap = prev.bottom.map_or(0.0, |b| top - b);
+            let before = paragraph_gap(gap, 10.0);
             out.doc_pr += 1;
             let n = out.doc_pr;
             let _ = write!(x, r#"<w:spacing w:before="{}" w:after="0"/>"#, tw(before.clamp(0.0, 400.0)));
@@ -1280,7 +1283,7 @@ fn block_xml(x: &mut String, block: &Block, prev: &mut Prev, col_w: f32, column_
             );
             overlay::graphic(x, *rel, n, [cx,cy], region, out);
             x.push_str("</wp:inline></w:drawing></w:r>");
-            *prev = Prev { baseline: None, bottom: Some(*bottom) };
+            *prev = Prev { baseline: None, bottom: Some(*bottom + pushed_down(gap, 10.0)) };
         }
     }
     x.push_str("</w:p>");
@@ -1337,7 +1340,22 @@ fn line_reach(p: &DocPara) -> (f32, f32) {
 }
 
 fn para_before(p: &DocPara, prev: &Prev) -> f32 {
-    let contents = p.tabs.iter().any(|t| t.leader);
+    let gap = para_gap(p, prev);
+    if p.tabs.iter().any(|t| t.leader) { gap.max(0.0) } else { paragraph_gap(gap, p.size) }
+}
+
+/// How much lower than in the PDF Word puts a block that starts above the
+/// bottom of the one before by more than `size` (a label at a figure's top
+/// read after it): what comes next is spaced from where it went. Spaced
+/// from where it was, a caption under the figure was the figure's height
+/// lower again.
+fn pushed_down(gap: f32, size: f32) -> f32 {
+    if gap < -size { -gap } else { 0.0 }
+}
+
+/// The gap before a paragraph, below zero when it starts above where the
+/// block before ended.
+fn para_gap(p: &DocPara, prev: &Prev) -> f32 {
     let height = word_line(p);
     let over = line_reach(p).0;
     let gap = match (prev.baseline, prev.bottom) {
@@ -1349,8 +1367,7 @@ fn para_before(p: &DocPara, prev: &Prev) -> f32 {
         (None, None) => 0.0,
     };
     // A rule above takes its room out of the gap.
-    let gap = gap - p.rules[0].map_or(0.0, |r| r.space + r.width);
-    if contents { gap.max(0.0) } else { paragraph_gap(gap, p.size) }
+    gap - p.rules[0].map_or(0.0, |r| r.space + r.width)
 }
 
 /// Preserve deliberate white space, including epigraphs and footnotes.
@@ -1976,6 +1993,33 @@ mod tests {
         let (first, rest) = xml.split_once("</w:p>").unwrap();
         assert!(first.contains(r#"<w:br w:type="column"/>"#) && !first.contains("<w:t"), "{first}");
         assert!(!rest.contains(r#"w:type="column""#) && rest.contains("<w:t"));
+    }
+
+    #[test]
+    fn a_label_read_after_its_figure_does_not_push_the_caption_down() {
+        // `IN` at a schematic's top, read after it: the caption under the
+        // schematic is spaced from where Word put `IN`, not from its place.
+        let para = |s: &str, x: f32, baseline: f32| {
+            let glyphs: Vec<Glyph> = s.chars().enumerate().filter(|(_, c)| *c != ' ').map(|(i, ch)| {
+                let at = x + 5.0 * i as f32;
+                Glyph { source: -1, ch, rect: [at, baseline - 8.0, at + 5.0, baseline + 2.0], x: at, baseline, size: 10.0, font: 0, color: [0; 3], space_before: i > 0 && s.as_bytes()[i - 1] == b' ', invisible: false }
+            }).collect();
+            let lines = layout::lines(glyphs);
+            doc_para(&layout::Para { rect: lines[0].rect, lines, column: [100.0, 500.0], align: Align::Left, marker: None, size: 10.0 }, None)
+        };
+        let fonts = [FontInfo { name: "Arial".into(), ..Default::default() }];
+        let mut lookup = crate::fonts::Fonts::default();
+        let mut faces = Faces::default();
+        let mut out = Out { fonts: &fonts, lookup: &mut lookup, faces: &mut faces, doc_pr: 0, scales: HashMap::new(), margin_left: 0.0, textboxes: docx::TextBoxes::new(), size_k: 1.0 };
+        let mut xml = String::new();
+        let mut prev = Prev { baseline: None, bottom: Some(356.0) };
+        block_xml(&mut xml, &Block::Para(para("IN", 170.0, 167.0)), &mut prev, 400.0, false, &|_| None, &mut out);
+        let caption = para("Figure 5-50: Sallen-Key highpass filter", 220.0, 378.0);
+        assert!(para_before(&caption, &prev) < 15.0, "{}", para_before(&caption, &prev));
+        // A paragraph a hair above where the one before ended is not moved.
+        let mut prev = Prev { baseline: Some(100.0), bottom: Some(103.0) };
+        block_xml(&mut xml, &Block::Para(para("Next line", 100.0, 109.0)), &mut prev, 400.0, false, &|_| None, &mut out);
+        assert!(prev.baseline.unwrap() < 112.0, "{:?}", prev.baseline);
     }
 
     #[test]
