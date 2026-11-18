@@ -85,16 +85,32 @@ fn furniture_without_rules(content: &mut PageContent, decorations: &mut Vec<[f32
         let in_place = if bottom { region[1] > 0.86 * h } else { region[3] < 0.14 * h };
         let rest: Vec<&layout::Line> = lines.iter().filter(|l| !band.iter().any(|b| std::ptr::eq(*b, *l))).collect();
         let gap = if bottom { region[1] - rest.iter().map(|l| l.rect[3]).fold(f32::MIN, f32::max) } else { rest.iter().map(|l| l.rect[1]).fold(f32::MAX, f32::min) - region[3] };
+        // Three rows at most, lines side by side one (a foot of two lines
+        // at the left, the page number over the book's title, and two at
+        // the right, the publisher over the date).
+        let mut baselines: Vec<f32> = band.iter().map(|l| l.baseline).collect();
+        baselines.sort_by(f32::total_cmp);
+        let rows = 1 + baselines.windows(2).filter(|p| p[1] - p[0] > 0.3 * size).count();
         if !in_place
             || rest.is_empty()
             || gap < 1.2 * size
-            || band.len() > 3
+            || rows > 3
             || band.iter().any(|l| l.size > 1.25 * size)
             || !band.iter().any(|l| page_number_like(l))
-            || decorations.iter().any(|d| touches(*d, region, 0.0))
+            // A part of it that recurs on other pages is a decoration
+            // already (`Altera Corporation` beside a page number that does
+            // not, its lines gone from the content): it goes into this one;
+            // another reaching in from further stops it.
+            || decorations.iter().any(|d| touches(*d, region, 1.0) && !(if bottom { d[1] > 0.86 * h } else { d[3] < 0.14 * h }))
+            // A foot taken already further out, apart from it: the lines
+            // are the text's last (a register's rows under its table's
+            // rules, above the real foot).
+            || decorations.iter().any(|d| !touches(*d, region, 1.0) && d[0] < region[2] && d[2] > region[0] && if bottom { d[1] >= region[3] } else { d[3] <= region[1] })
         {
             continue;
         }
+        let region = decorations.iter().filter(|d| touches(**d, region, 1.0)).fold(region, |r, d| layout::union(r, *d));
+        decorations.retain(|d| !touches(*d, region, 0.0));
         let mut region = [(region[0] - 1.0).max(0.0), (region[1] - 1.0).max(0.0), (region[2] + 1.0).min(w), (region[3] + 1.0).min(h)];
         if bottom {
             let with_art = foot_art(region, &content.graphics, size, [w, h]);
@@ -853,6 +869,46 @@ mod tests {
         assert_eq!(p.decorations.len(), 1);
         assert!(p.decorations[0][0] <= 20.0 && p.decorations[0][3] >= 754.0);
         assert_eq!(p.content.glyphs.iter().map(|g| g.ch).collect::<String>(), "An ordinary editable body paragraph");
+    }
+
+    #[test]
+    fn a_foot_of_two_rows_each_side_is_furniture_with_its_recurring_part() {
+        // "10–4" over the book's title at the left, the publisher over the
+        // date at the right; the publisher recurs on other pages.
+        let mut glyphs = Vec::new();
+        for k in 0..6 {
+            glyphs.extend(text("An ordinary body line that runs well across the page.", 50.0, 300.0 + 14.0 * k as f32));
+        }
+        glyphs.extend(text("10-4", 54.0, 760.0));
+        glyphs.extend(text("Device Handbook, Volume 1", 54.0, 770.0));
+        glyphs.extend(text("Altera Corporation", 380.0, 760.0));
+        glyphs.extend(text("January 2005", 400.0, 770.0));
+        for repeated in [vec![[380.0, 752.0, 467.5, 762.0]], Vec::new()] {
+            let p = prepare(&page(glyphs.clone(), Vec::new()), &[], Vec::new(), &repeated, false);
+            assert_eq!(p.decorations.len(), 1, "{:?}", p.decorations);
+            assert!(p.decorations[0][0] <= 54.0 && p.decorations[0][2] >= 460.0 && p.decorations[0][3] >= 772.0, "{:?}", p.decorations);
+            assert!(p.content.glyphs.iter().all(|g| g.rect[1] < 700.0));
+        }
+    }
+
+    #[test]
+    fn the_text_s_last_rows_over_a_foot_taken_already_stay_in_the_flow() {
+        // A register's last rows, a field's values, apart from the table
+        // and the foot under them, which recurs.
+        let mut glyphs = Vec::new();
+        for k in 0..6 {
+            glyphs.extend(text("An ordinary body line that runs well across the page.", 50.0, 300.0 + 14.0 * k as f32));
+        }
+        for (s, x) in [("Set", 90.0), ("1", 200.0), ("Enable", 260.0)] {
+            glyphs.extend(text(s, x, 720.0));
+        }
+        for (s, x) in [("Disabled", 90.0), ("0", 200.0), ("Read: Disabled", 260.0)] {
+            glyphs.extend(text(s, x, 732.0));
+        }
+        glyphs.extend(text("Product Specification v1.0", 50.0, 780.0));
+        let p = prepare(&page(glyphs, Vec::new()), &[], Vec::new(), &[[50.0, 772.0, 290.0, 782.0]], false);
+        assert!(p.decorations.iter().all(|d| d[1] > 760.0), "{:?}", p.decorations);
+        assert_eq!(p.content.glyphs.iter().filter(|g| g.baseline > 700.0).count(), "Set1EnableDisabled0Read: Disabled".len());
     }
 
     #[test]
