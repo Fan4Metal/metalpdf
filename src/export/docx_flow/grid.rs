@@ -266,7 +266,16 @@ fn table(content: &PageContent, els: &[El]) -> Option<Table> {
                 continue;
             }
             let crossed = lines.iter().filter(in_band).any(|l| super::forms::runs_across(l, xs[j]));
-            if parted && !crossed {
+            // Unruled, but with text each side and none over it: the head's
+            // columns going on down a body ruled across only (a register's
+            // values under PLAELM0, PLAELM1-7: one cell with the field's
+            // description, the values a column under another inside it).
+            let side = |lo: f32, hi: f32| lines.iter().filter(in_band).flat_map(|l| &l.glyphs).any(|g| {
+                let c = (g.rect[0] + g.rect[2]) / 2.0;
+                !g.ch.is_whitespace() && c > lo && c < hi
+            });
+            let columns = side(xs[start], xs[j]) && side(xs[j], xs[cols]);
+            if (parted || columns) && !crossed {
                 band.push((start, j));
                 start = j;
             }
@@ -408,6 +417,28 @@ mod tests {
         let mut flow = p.clone();
         remove(&mut flow, &tables);
         assert!(flow.glyphs.is_empty() && flow.graphics.is_empty() && flow.rules.is_empty());
+    }
+
+    #[test]
+    fn a_head_s_columns_go_on_down_a_body_ruled_across_only() {
+        // The head ruled between its columns, the body only across: a row
+        // with text in each column is a cell a column, one with a line over
+        // them all is one cell.
+        let mut p = PageContent { size: [600.0, 800.0], ..Default::default() };
+        for y in [100.0, 120.0, 150.0, 180.0] {
+            p.rules.push(hline(50.0, 450.0, y));
+        }
+        for x in [50.0, 150.0, 300.0, 450.0] {
+            p.rules.push(vline(x, 100.0, 120.0));
+        }
+        p.rules.extend([vline(50.0, 120.0, 180.0), vline(450.0, 120.0, 180.0)]);
+        for (s, x, y) in [("Bits", 55.0, 114.0), ("Field", 155.0, 114.0), ("Value", 305.0, 114.0), ("10-9", 55.0, 140.0), ("Mux 0", 155.0, 140.0), ("00-element", 305.0, 140.0), ("6", 55.0, 170.0)] {
+            p.glyphs.extend(text(s, x, y));
+        }
+        p.glyphs.extend(text("Set by the user to choose the output signal", 155.0, 172.0));
+        let t = detect(&p);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].rows[1].cells.iter().filter(|c| c.merge != Merge::Continue).count(), 3, "{:?}", t[0].rows[1].cells.iter().map(|c| c.glyphs.len()).collect::<Vec<_>>());
     }
 
     #[test]
