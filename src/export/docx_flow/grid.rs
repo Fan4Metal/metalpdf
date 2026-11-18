@@ -160,7 +160,53 @@ pub(super) fn detect(content: &PageContent) -> Vec<Table> {
     let all: Vec<Rect> = tables.iter().map(|t| t.rect).collect();
     tables.retain(|t| !all.iter().any(|&o| o != t.rect && o[0] <= t.rect[0] + 0.5 && o[1] <= t.rect[1] + 0.5 && o[2] >= t.rect[2] - 0.5 && o[3] >= t.rect[3] - 0.5));
     tables.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]));
+    for k in 0..tables.len() {
+        number_beside(content, &mut tables, k);
+    }
     tables
+}
+
+/// A number in brackets right of a table, level with it and alone there
+/// (a framed statement's `(I)`, an equation's `(12.3)`): a column of the
+/// table with no rules. Left in the flow, it went under the box, and the
+/// text after it was spaced from it, a line and a half lower.
+fn number_beside(content: &PageContent, tables: &mut [Table], k: usize) {
+    let t = tables[k].rect;
+    let others: Vec<Rect> = tables.iter().enumerate().filter(|&(o, _)| o != k).map(|(_, t)| t.rect).collect();
+    let beside: Vec<Glyph> = content
+        .glyphs
+        .iter()
+        .filter(|g| {
+            let c = centre(g);
+            !g.invisible && !g.ch.is_whitespace() && c[0] >= t[2] && c[1] >= t[1] && c[1] < t[3] && !others.iter().any(|&o| inside(c, o))
+        })
+        .cloned()
+        .collect();
+    let lines = layout::lines(beside);
+    let [line] = lines.as_slice() else { return };
+    let text: String = line.text().chars().filter(|c| !c.is_whitespace()).collect();
+    let size = line.size;
+    if !(text.starts_with('(') && text.ends_with(')') && (3..=8).contains(&text.chars().count())) || line.rect[0] - t[2] > 3.0 * size || line.rect[2] > content.size[0] {
+        return;
+    }
+    let table = &mut tables[k];
+    let right = line.rect[2] + 1.0;
+    let col = table.edges.len() - 1;
+    table.edges.push(right);
+    let (top, bottom) = (table.rect[1], table.rect[3]);
+    let n = table.rows.len();
+    for (i, row) in table.rows.iter_mut().enumerate() {
+        row.cells.push(Cell {
+            first: col,
+            end: col + 1,
+            rect: [t[2], top, right, bottom],
+            glyphs: if i == 0 { line.glyphs.clone() } else { Vec::new() },
+            fill: [255; 3],
+            borders: [None; 4],
+            merge: if n == 1 { Merge::None } else if i == 0 { Merge::Restart } else { Merge::Continue },
+        });
+    }
+    table.rect[2] = right;
 }
 
 fn table(content: &PageContent, els: &[El]) -> Option<Table> {
@@ -417,6 +463,28 @@ mod tests {
         let mut flow = p.clone();
         remove(&mut flow, &tables);
         assert!(flow.glyphs.is_empty() && flow.graphics.is_empty() && flow.rules.is_empty());
+    }
+
+    #[test]
+    fn a_number_beside_a_box_is_a_column_of_it() {
+        // A framed statement, `(I)` level with it at the right.
+        let mut p = PageContent { size: [600.0, 800.0], ..Default::default() };
+        p.rules.extend([hline(50.0, 450.0, 100.0), hline(50.0, 450.0, 160.0), vline(50.0, 100.0, 160.0), vline(450.0, 100.0, 160.0)]);
+        p.glyphs.extend(text("If x > xc, the threshold is not there", 55.0, 115.0));
+        p.glyphs.extend(text("and the rest of the statement.", 55.0, 145.0));
+        p.glyphs.extend(text("(I)", 470.0, 132.0));
+        // The text after it, under the box.
+        p.glyphs.extend(text("The text goes on under the box.", 50.0, 190.0));
+        let t = detect(&p);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].edges.len(), 3, "{:?}", t[0].edges);
+        let cell = &t[0].rows[0].cells[1];
+        assert_eq!(cell.glyphs.iter().map(|g| g.ch).collect::<String>(), "(I)");
+        assert!(cell.borders.iter().all(Option::is_none));
+        assert!(t[0].rect[2] >= 485.0);
+        // Text beside it too: a column of the page, not a number.
+        p.glyphs.extend(text("Beside", 470.0, 115.0));
+        assert_eq!(detect(&p)[0].edges.len(), 2);
     }
 
     #[test]
