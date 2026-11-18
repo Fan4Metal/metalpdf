@@ -1447,7 +1447,10 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
         while j < items.len() && side(columns[j]) {
             let c = columns[j];
             let cur = cols.len() - 1;
-            if same(c, cols[cur]) {
+            // Within the column's edges, a part of it: a data sheet's
+            // address, then its `Tel:` and the web address beside it, under
+            // the address in the right column, groups of their own.
+            if same(c, cols[cur]) || cur > 0 && c[0] >= cols[cur][0] - 1.0 && c[1] <= cols[cur][1] + 1.0 {
                 members.push((cur, j));
             } else if c[0] >= cols[cur][1] - 1.0 {
                 cols.push(c);
@@ -2177,6 +2180,28 @@ mod tests {
         assert_eq!(segs[0].columns.len(), 1);
         assert_eq!(segs[1].columns.len(), 2);
         assert_eq!(segs[1].items.iter().map(|m| m.0).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn rows_of_parts_under_a_column_s_text_are_in_its_column() {
+        // A data sheet's foot: a disclaimer at the left; at the right the
+        // address, then `Tel:` with the web address and `Fax:` with the
+        // copyright, at the column's edges.
+        let mut g = Vec::new();
+        for k in 0..6 {
+            g.extend(text(&format!("disclaimer line {k} that goes on and on"), 40.0, 100.0 + 12.0 * k as f32));
+        }
+        g.extend(text("One Technology Way,", 320.0, 112.0));
+        g.extend(text("P.O. Box 9106, Norwood, MA 02062-9106, U.S.A.", 320.0, 124.0));
+        g.extend(text("Tel: 781/329-4700", 320.0, 136.0));
+        g.extend(text("www.analog.com", 480.0, 136.0));
+        g.extend(text("Fax: 781/326-8703", 320.0, 148.0));
+        g.extend(text("(c) 2003 Analog Devices", 440.0, 148.0));
+        let items = analyse(&page(g), OPTS);
+        let segs = segments(&items, &[]);
+        assert_eq!(segs.len(), 1, "{segs:?}");
+        assert_eq!(segs[0].columns.len(), 2, "{segs:?}");
+        assert_eq!(segs[0].items.iter().filter(|m| m.0 == 1).count(), items.iter().filter(|it| it.rect()[0] >= 300.0).count(), "{segs:?}");
     }
 
     #[test]

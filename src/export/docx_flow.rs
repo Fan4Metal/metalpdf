@@ -157,6 +157,92 @@ struct TableOut {
     side_heads: bool,
 }
 
+/// One line of parts left to right between `left` and `right`: the parts
+/// after the first behind tabs, the last one right-aligned when it ends at
+/// the right; a picture (a number set a digit an image) in the line. Each
+/// part is (its block, its box, its column's left edge).
+fn line_of(mut line: DocPara, rest: Vec<(Block, [f32; 4], f32)>, left: f32, right: f32) -> DocPara {
+    let n = rest.len();
+    for (i, (b, r, origin)) in rest.into_iter().enumerate() {
+        // Not a part with stops of its own: it starts at its left, its own
+        // last stop takes it to the right.
+        let own_stops = matches!(&b, Block::Para(p) if p.tabs.iter().any(|t| t.pos > r[0] - origin));
+        let flush_right = i + 1 == n && (right - r[2]).abs() < line.size && !own_stops;
+        line.tabs.push(Tab { pos: if flush_right { r[2] - left } else { r[0] - left }, right: flush_right, leader: false });
+        if let Some(last) = line.spans.last() {
+            line.spans.push(Span { text: "\t".into(), ..last.clone() });
+        }
+        match b {
+            Block::Para(p) => {
+                for side in 0..2 {
+                    line.rules[side] = line.rules[side].or(p.rules[side]);
+                }
+                // Its own stops go with its tabs (a contents line's leader
+                // after a bullet: lost, the page number went to a line of
+                // its own).
+                line.tabs.extend(p.tabs.iter().map(|t| Tab { pos: t.pos + origin - left, ..*t }).filter(|t| t.pos > r[0] - left));
+                line.spans.extend(p.spans);
+                line.artwork.extend(p.artwork);
+                line.floating.extend(p.floating);
+                line.chars += p.chars;
+                line.bottom = line.bottom.max(p.bottom);
+            }
+            Block::Picture { rel, width, height, bottom, .. } => {
+                let marker = char::from_u32(0x10_0000 + line.artwork.len() as u32).unwrap_or('\u{10ffff}');
+                if let Some(last) = line.spans.last() {
+                    line.spans.push(Span { text: marker.to_string(), ..last.clone() });
+                }
+                line.artwork.push(InlinePicture { marker, rel, width, height, shift: line.last_baseline - bottom });
+                line.bottom = line.bottom.max(bottom);
+            }
+            Block::Grid(_) => {}
+        }
+    }
+    line.align = Align::Left;
+    line.right = 0.0;
+    line
+}
+
+/// A segment's blocks, each with its column; in columns, one-line parts on
+/// one level left to right in a column are a line of it (`Tel:` and the web
+/// address under a data sheet's address).
+fn column_blocks(s: &layout::Segment, items: &[Item], blocks: &mut [Option<Block>]) -> Vec<(usize, Block)> {
+    let one_line = |k: usize| matches!(&items[k], Item::Para(p) if p.lines.len() == 1);
+    let mut out: Vec<(usize, Block)> = Vec::new();
+    let mut n = 0;
+    while n < s.items.len() {
+        let (c, k) = s.items[n];
+        let mut m = n + 1;
+        if s.columns.len() >= 2
+            && let Item::Para(p) = &items[k]
+            && p.lines.len() == 1
+        {
+            while let Some(&(c2, k2)) = s.items.get(m)
+                && c2 == c
+                && one_line(k2)
+                && (items[k2].rect()[1] - p.rect[1]).abs() < 0.5 * p.size
+                && items[k2].rect()[0] >= items[s.items[m - 1].1].rect()[2] - 1.0
+            {
+                m += 1;
+            }
+        }
+        if m > n + 1
+            && s.items[n..m].iter().all(|&(_, k)| matches!(blocks[k], Some(Block::Para(_))))
+            && let Some(Block::Para(first)) = blocks[k].take()
+        {
+            let rest = s.items[n + 1..m].iter().filter_map(|&(_, k)| blocks[k].take().map(|b| (b, items[k].rect(), items[k].column()[0]))).collect();
+            out.push((c, Block::Para(line_of(first, rest, s.columns[c][0], s.columns[c][1]))));
+        } else {
+            m = n + 1;
+            if let Some(b) = blocks[k].take() {
+                out.push((c, b));
+            }
+        }
+        n = m;
+    }
+    out
+}
+
 /// A segment of two columns whose left one is short labels each at the top
 /// of a part of the right one (a manual's "Description", "Example" beside
 /// their text) as a table without borders, a row a label: as Word's
@@ -632,53 +718,15 @@ impl Writer {
                     let left = s.columns[0][0];
                     let right = s.columns[s.columns.len() - 1][1];
                     let mut parts = s.items.iter().filter_map(|&(_, k)| blocks[k].take().map(|b| (b, items[k].rect(), items[k].column()[0])));
-                    let Some((Block::Para(mut line), _, _)) = parts.next() else {
+                    let Some((Block::Para(line), _, _)) = parts.next() else {
                         return SegmentOut { columns: s.columns, blocks: Vec::new(), table: None };
                     };
-                    let rest: Vec<(Block, [f32; 4], f32)> = parts.collect();
-                    let n = rest.len();
-                    for (i, (b, r, origin)) in rest.into_iter().enumerate() {
-                        // Not a part with stops of its own: it starts at its
-                        // left, its own last stop takes it to the right.
-                        let own_stops = matches!(&b, Block::Para(p) if p.tabs.iter().any(|t| t.pos > r[0] - origin));
-                        let flush_right = i + 1 == n && (right - r[2]).abs() < line.size && !own_stops;
-                        line.tabs.push(Tab { pos: if flush_right { r[2] - left } else { r[0] - left }, right: flush_right, leader: false });
-                        if let Some(last) = line.spans.last() {
-                            line.spans.push(Span { text: "\t".into(), ..last.clone() });
-                        }
-                        match b {
-                            Block::Para(p) => {
-                                for side in 0..2 {
-                                    line.rules[side] = line.rules[side].or(p.rules[side]);
-                                }
-                                // Its own stops go with its tabs (a contents
-                                // line's leader after a bullet: lost, the
-                                // page number went to a line of its own).
-                                line.tabs.extend(p.tabs.iter().map(|t| Tab { pos: t.pos + origin - left, ..*t }).filter(|t| t.pos > r[0] - left));
-                                line.spans.extend(p.spans);
-                                line.artwork.extend(p.artwork);
-                                line.floating.extend(p.floating);
-                                line.chars += p.chars;
-                                line.bottom = line.bottom.max(p.bottom);
-                            }
-                            Block::Picture { rel, width, height, bottom, .. } => {
-                                let marker = char::from_u32(0x10_0000 + line.artwork.len() as u32).unwrap_or('\u{10ffff}');
-                                if let Some(last) = line.spans.last() {
-                                    line.spans.push(Span { text: marker.to_string(), ..last.clone() });
-                                }
-                                line.artwork.push(InlinePicture { marker, rel, width, height, shift: line.last_baseline - bottom });
-                                line.bottom = line.bottom.max(bottom);
-                            }
-                            Block::Grid(_) => {}
-                        }
-                    }
-                    line.align = Align::Left;
-                    line.right = 0.0;
+                    let line = line_of(line, parts.collect(), left, right);
                     SegmentOut { columns: vec![[left, right]], blocks: vec![(0, Block::Para(line))], table: None }
                 }
                 None => match side_heads(&s, &items, &mut blocks) {
                     Some(t) => SegmentOut { columns: vec![[s.columns[0][0], s.columns[1][1]]], blocks: Vec::new(), table: Some(t) },
-                    None => SegmentOut { blocks: s.items.iter().filter_map(|&(c, k)| blocks[k].take().map(|b| (c, b))).collect(), columns: s.columns, table: None },
+                    None => SegmentOut { blocks: column_blocks(&s, &items, &mut blocks), columns: s.columns, table: None },
                 },
             })
             .filter(|s| !s.blocks.is_empty() || s.table.is_some())
@@ -1664,6 +1712,41 @@ mod tests {
             _ => None,
         }).collect();
         assert!(texts.iter().any(|t| t == "Bit 7\t6\t5\t4"), "{texts:?}");
+    }
+
+    #[test]
+    fn parts_on_one_level_in_a_column_are_a_line_of_it() {
+        // A disclaimer at the left; the address at the right, then `Tel:`
+        // with the web address flush right at the column's edge.
+        let para = |s: &str, x: f32, baseline: f32, column: [f32; 2]| {
+            let glyphs: Vec<Glyph> = s.chars().enumerate().filter(|(_, c)| *c != ' ').map(|(i, ch)| {
+                let at = x + 5.0 * i as f32;
+                Glyph { source: -1, ch, rect: [at, baseline - 8.0, at + 5.0, baseline + 2.0], x: at, baseline, size: 10.0, font: 0, color: [0; 3], space_before: i > 0 && s.as_bytes()[i - 1] == b' ', invisible: false }
+            }).collect();
+            let lines = layout::lines(glyphs);
+            Item::Para(layout::Para { rect: lines[0].rect, lines, column, align: Align::Left, marker: None, size: 10.0 })
+        };
+        let (left, right) = ([50.0, 250.0], [300.0, 470.0]);
+        let items = vec![
+            para("A disclaimer's line", 50.0, 100.0, left),
+            para("One Technology Way,", 300.0, 100.0, right),
+            para("Tel: 781/329-4700", 300.0, 112.0, right),
+            para("www.analog.com", 400.0, 112.0, right),
+        ];
+        let mut blocks: Vec<Option<Block>> = items.iter().map(|it| match it {
+            Item::Para(p) => Some(Block::Para(doc_para(p, None))),
+            Item::Figure(_) => None,
+        }).collect();
+        let seg = layout::Segment { columns: vec![left, right], items: vec![(0, 0), (1, 1), (1, 2), (1, 3)], table: None, line: false, side: false };
+        let out = column_blocks(&seg, &items, &mut blocks);
+        let texts: Vec<(usize, String)> = out.iter().filter_map(|(c, b)| match b {
+            Block::Para(p) => Some((*c, p.spans.iter().map(|s| s.text.as_str()).collect())),
+            _ => None,
+        }).collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert_eq!(texts[2], (1, "Tel: 781/329-4700\twww.analog.com".to_string()), "{texts:?}");
+        let Block::Para(line) = &out[2].1 else { panic!() };
+        assert!(line.tabs.iter().any(|t| t.right && (t.pos - 170.0).abs() < 1.0), "{:?}", line.tabs.iter().map(|t| (t.pos, t.right)).collect::<Vec<_>>());
     }
 
     #[test]
