@@ -234,14 +234,17 @@ fn side_heads(s: &layout::Segment, items: &[Item], blocks: &mut [Option<Block>])
                     Block::Grid(_) => {}
                 }
                 // A one-line label beside its text (a note's "Note:"): the
-                // text's paragraph, the label hanging before a tab.
+                // text's paragraph, the label hanging before a tab. So are
+                // the parts of a row one after another (a register's bit
+                // numbers beside "Address:"): taken in pairs, each pair went
+                // a line lower than the one before.
                 if let (Some((pr, Block::Para(prev))), Block::Para(p)) = (body.last_mut(), &mut block)
                     && prev.lines == 1
-                    && prev.tabs.is_empty()
+                    && prev.tabs.iter().all(|t| !t.right && !t.leader)
                     && pr[2] < r[0]
                     && (pr[1] - r[1]).abs() < 0.5 * p.size
                 {
-                    let label_left = prev.left;
+                    let label_left = prev.left + prev.first;
                     let mut spans = std::mem::take(&mut prev.spans);
                     if let Some(last) = spans.last() {
                         spans.push(Span { text: "\t".into(), ..last.clone() });
@@ -250,7 +253,10 @@ fn side_heads(s: &layout::Segment, items: &[Item], blocks: &mut [Option<Block>])
                     p.spans = spans;
                     p.artwork.append(&mut prev.artwork);
                     p.first = label_left - p.left;
-                    p.tabs.insert(0, Tab { pos: p.left, right: false, leader: false });
+                    let own = std::mem::take(&mut p.tabs);
+                    p.tabs = std::mem::take(&mut prev.tabs);
+                    p.tabs.push(Tab { pos: p.left, right: false, leader: false });
+                    p.tabs.extend(own);
                     p.chars += prev.chars;
                     p.top = p.top.min(prev.top);
                     body.pop();
@@ -1623,6 +1629,42 @@ fn styles_xml(face: Option<&super::Face>, size: f32, lang: &str) -> String {
 mod tests {
     use super::*;
     use crate::export::{Graphic, GraphicKind};
+
+    #[test]
+    fn a_row_of_parts_beside_side_heads_is_one_line() {
+        // "Address: $1027" over "Bit 7  6  5  4", "Read:" beside a line of
+        // text: the bit numbers one paragraph with tabs, not pairs.
+        let para = |s: &str, x: f32, baseline: f32, column: [f32; 2]| {
+            let glyphs: Vec<Glyph> = s.chars().enumerate().filter(|(_, c)| *c != ' ').map(|(i, ch)| {
+                let at = x + 5.0 * i as f32;
+                Glyph { source: -1, ch, rect: [at, baseline - 8.0, at + 5.0, baseline + 2.0], x: at, baseline, size: 10.0, font: 0, color: [0; 3], space_before: i > 0 && s.as_bytes()[i - 1] == b' ', invisible: false }
+            }).collect();
+            let lines = layout::lines(glyphs);
+            Item::Para(layout::Para { rect: lines[0].rect, lines, column, align: Align::Left, marker: None, size: 10.0 })
+        };
+        let (left, right) = ([50.0, 100.0], [120.0, 300.0]);
+        let items = vec![
+            para("Address:", 50.0, 100.0, left),
+            para("Read:", 50.0, 140.0, left),
+            para("$1027", 120.0, 100.0, right),
+            para("Bit 7", 120.0, 115.0, right),
+            para("6", 170.0, 115.0, right),
+            para("5", 210.0, 115.0, right),
+            para("4", 250.0, 115.0, right),
+            para("The register reads back.", 120.0, 140.0, right),
+        ];
+        let mut blocks: Vec<Option<Block>> = items.iter().map(|it| match it {
+            Item::Para(p) => Some(Block::Para(doc_para(p, None))),
+            Item::Figure(_) => None,
+        }).collect();
+        let seg = layout::Segment { columns: vec![left, right], items: vec![(0, 0), (0, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7)], table: None, line: false, side: true };
+        let table = side_heads(&seg, &items, &mut blocks).expect("side heads");
+        let texts: Vec<String> = table.rows.iter().flat_map(|(_, cells)| cells.iter().flatten()).filter_map(|b| match b {
+            Block::Para(p) => Some(p.spans.iter().map(|s| s.text.as_str()).collect()),
+            _ => None,
+        }).collect();
+        assert!(texts.iter().any(|t| t == "Bit 7\t6\t5\t4"), "{texts:?}");
+    }
 
     #[test]
     fn type_is_narrowed_with_the_columns_it_is_in() {
