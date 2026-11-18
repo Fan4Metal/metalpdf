@@ -973,15 +973,33 @@ pub fn cut(idx: &[usize], rects: &[Rect], column: [f32; 2], gutter: f32, out: &m
         // what they share), or that nothing crosses the band in.
         let mut shared = first;
         let mut j = i + 1;
+        // The rows that have the band (not only clear of it): one alone is a
+        // row of parts spaced apart, not columns (a register's bit numbers,
+        // `Bit 7  6  5 … Bit 0`, each cut into a column of its own with the
+        // address over the first, and Word set them down in steps).
+        let mut having = 1;
         while j < rows.len() {
             let next = gaps(&rows[j], rects, gutter);
             let both = common(&shared, &next, gutter / 2.0);
             if !both.is_empty() {
                 shared = both;
+                having += 1;
             } else if !clear(&rows[j], widest(&shared).expect("a band")) {
                 break;
             }
             j += 1;
+        }
+        // A row of lines, that is: a picture with text beside it is one
+        // row of many lines, the band all the way down it.
+        let heights = rows[i].iter().map(|&m| rects[m][3] - rects[m][1]);
+        let (low, high) = heights.fold((f32::INFINITY, 0.0f32), |(lo, hi), h| (lo.min(h), hi.max(h)));
+        // Of short parts, numbers or a word each: a label, a value and a
+        // line of text beside them are a key's columns (a manual's
+        // options, `-v  --verbose  Prints every step taken`).
+        let short = rows[i].iter().all(|&m| rects[m][2] - rects[m][0] <= 4.0 * (rects[m][3] - rects[m][1]));
+        if having < 2 && rows[i].len() >= 3 && high <= 1.5 * low && short {
+            i += 1;
+            continue;
         }
         let band = widest(&shared).expect("a band");
         let mut start = i;
@@ -1352,35 +1370,41 @@ pub fn segments(items: &[Item], graphics: &[super::Graphic]) -> Vec<Segment> {
         let column = range.clone().map(|k| columns[k]).fold([f32::INFINITY, f32::NEG_INFINITY], |a, c| [a[0].min(c[0]), a[1].max(c[1])]);
         Segment { columns: vec![column], items: range.map(|k| (0, k)).collect(), table: None, line: false, side: false }
     };
+    // A row of three or more one-line parts on one level, left to right
+    // (a register's bit numbers), from `i`: one line, up to the end given.
+    // Not a table's head, whose parts' edges the rows under it share. In a
+    // group of its own or among the lines of a column's.
+    let line_row = |i: usize| -> Option<usize> {
+        let Item::Para(first) = &items[i] else { return None };
+        if first.lines.len() != 1 {
+            return None;
+        }
+        let top = first.rect[1];
+        let mut j = i + 1;
+        while let Some(Item::Para(p)) = items.get(j)
+            && p.lines.len() == 1
+            && (p.rect[1] - top).abs() < 0.5 * first.size
+            && p.rect[0] >= items[j - 1].rect()[2] - 1.0
+        {
+            j += 1;
+        }
+        let edges: Vec<f32> = (i + 1..j).map(|k| items[k].rect()[0]).collect();
+        // The rows under it within a few lines: the next register's bit
+        // numbers, a figure further down, share the edges too.
+        let head = items[j..].iter().take(2 * (j - i)).filter(|it| it.rect()[1] - top < 4.0 * first.size).any(|it| edges.iter().any(|e| (it.rect()[0] - e).abs() < 1.0));
+        (j - i >= 3 && !head).then_some(j)
+    };
     let mut out: Vec<Segment> = Vec::new();
     let mut i = 0;
     while i < items.len() {
-        // A row of three or more one-line parts on one level, left to
-        // right (a register's bit numbers): one line. Not a table's head,
-        // whose parts' edges the rows under it share.
-        if let Item::Para(first) = &items[i]
-            && first.lines.len() == 1
-        {
-            let top = first.rect[1];
-            let mut j = i + 1;
-            while let Some(Item::Para(p)) = items.get(j)
-                && p.lines.len() == 1
-                && (p.rect[1] - top).abs() < 0.5 * first.size
-                && p.rect[0] >= items[j - 1].rect()[2] - 1.0
-            {
-                j += 1;
-            }
-            let edges: Vec<f32> = (i + 1..j).map(|k| columns[k][0]).collect();
-            let head = items[j..].iter().take(2 * (j - i)).any(|it| edges.iter().any(|e| (it.column()[0] - e).abs() < 1.0));
-            if j - i >= 3 && !head {
-                out.push(Segment { columns: (i..j).map(|k| columns[k]).collect(), items: (i..j).enumerate().collect(), table: None, line: true, side: false });
-                i = j;
-                continue;
-            }
+        if let Some(j) = line_row(i) {
+            out.push(Segment { columns: (i..j).map(|k| columns[k]).collect(), items: (i..j).enumerate().collect(), table: None, line: true, side: false });
+            i = j;
+            continue;
         }
         if !side(columns[i]) {
             let mut j = i + 1;
-            while j < items.len() && !side(columns[j]) {
+            while j < items.len() && !side(columns[j]) && line_row(j).is_none() {
                 j += 1;
             }
             out.push(single(i..j));
@@ -1784,6 +1808,27 @@ mod tests {
         assert!(got[0].text().contains("[K-1"), "{}", got[0].text());
         assert!(got[1].text().starts_with("dTN"), "{}", got[1].text());
         assert!(got[2].text().contains("aB*") || got[2].text().contains("a*B"), "{}", got[2].text());
+    }
+
+    #[test]
+    fn a_row_of_parts_spaced_apart_is_not_columns() {
+        // A register's address over its bit numbers, `Bit 7  6  5 … Bit 0`,
+        // and a note under them: one group, not a column a bit.
+        let mut rects = vec![[220.1, 307.0, 240.6, 315.8], [223.0, 322.5, 237.8, 330.8]];
+        for k in 0..6 {
+            let x = 271.6 + 43.2 * k as f32;
+            rects.push([x, 322.5, x + 4.1, 330.8]);
+        }
+        rects.push([525.4, 322.5, 540.2, 330.8]);
+        rects.push([332.6, 365.8, 430.5, 375.9]);
+        let mut groups = Vec::new();
+        cut(&(0..rects.len()).collect::<Vec<_>>(), &rects, [220.0, 558.0], 8.0, &mut groups);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        // Two columns of such rows are still columns.
+        let rects = [[50.0, 100.0, 80.0, 110.0], [100.0, 100.0, 130.0, 110.0], [150.0, 100.0, 180.0, 110.0], [50.0, 112.0, 80.0, 122.0], [100.0, 112.0, 130.0, 122.0], [150.0, 112.0, 180.0, 122.0]];
+        let mut groups = Vec::new();
+        cut(&(0..rects.len()).collect::<Vec<_>>(), &rects, [50.0, 180.0], 8.0, &mut groups);
+        assert_eq!(groups.len(), 3, "{groups:?}");
     }
 
     #[test]
