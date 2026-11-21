@@ -62,11 +62,13 @@ fn furniture_without_rules(content: &mut PageContent, decorations: &mut Vec<[f32
     let [w, h] = content.size;
     // On the page: a page cropped smaller than its sheet has text outside.
     let lines: Vec<layout::Line> = layout::lines(content.glyphs.iter().filter(|g| !g.invisible && g.rect[1] >= 0.0 && g.rect[3] <= h && g.rect[0] >= 0.0 && g.rect[2] <= w).cloned().collect());
-    // A page that is mostly one figure (screenshots with text over them)
-    // keeps its text with the figure.
-    if lines.len() < 3 || layout::labelled_figures(content).iter().any(|f| (f.rect[2] - f.rect[0]) * (f.rect[3] - f.rect[1]) > 0.5 * w * h) {
+    if lines.len() < 3 {
         return;
     }
+    // A page that is mostly one figure (screenshots with text over them)
+    // keeps the text over the figure with it; a page number under it (a
+    // table of schematics over half the page) is furniture still.
+    let big: Vec<[f32; 4]> = layout::labelled_figures(content).iter().filter(|f| (f.rect[2] - f.rect[0]) * (f.rect[3] - f.rect[1]) > 0.5 * w * h).map(|f| f.rect).collect();
     for bottom in [true, false] {
         // The band: from the edge-most line inwards, the lines close on
         // one another (side by side, or a line under another).
@@ -92,6 +94,7 @@ fn furniture_without_rules(content: &mut PageContent, decorations: &mut Vec<[f32
         baselines.sort_by(f32::total_cmp);
         let rows = 1 + baselines.windows(2).filter(|p| p[1] - p[0] > 0.3 * size).count();
         if !in_place
+            || big.iter().any(|f| touches(*f, region, 0.0))
             || rest.is_empty()
             || gap < 1.2 * size
             || rows > 3
@@ -896,6 +899,23 @@ mod tests {
             assert!(p.decorations[0][0] <= 54.0 && p.decorations[0][2] >= 460.0 && p.decorations[0][3] >= 772.0, "{:?}", p.decorations);
             assert!(p.content.glyphs.iter().all(|g| g.rect[1] < 700.0));
         }
+    }
+
+    #[test]
+    fn a_page_number_under_a_figure_over_half_the_page_is_furniture() {
+        // A few lines over a picture of 500 x 500, the page number under it.
+        let mut glyphs = Vec::new();
+        for k in 0..4 {
+            glyphs.extend(text("An ordinary body line that runs well across the page.", 50.0, 100.0 + 14.0 * k as f32));
+        }
+        glyphs.extend(text("2", 50.0, 785.0));
+        let graphics = vec![Graphic { rect: [50.0, 180.0, 550.0, 680.0], kind: GraphicKind::Image, object: Some(0) }];
+        let p = prepare_page(&page(glyphs.clone(), graphics.clone()), &[]);
+        assert!(p.decorations.iter().any(|d| d[1] > 760.0), "{:?}", p.decorations);
+        // Text over the figure stays with it.
+        glyphs.extend(text("A label over the picture 3", 60.0, 670.0));
+        let p = prepare_page(&page(glyphs, graphics), &[]);
+        assert!(!p.decorations.iter().any(|d| d[1] < 690.0 && d[3] > 660.0), "{:?}", p.decorations);
     }
 
     #[test]
