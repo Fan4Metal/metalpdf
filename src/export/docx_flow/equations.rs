@@ -41,6 +41,15 @@ fn inline_pieces(p: &layout::Para, raw: &[Glyph], fonts: &[FontInfo]) -> Vec<sup
     // be a line of its own).
     // The page's own characters (the lines dropped the accents that make
     // no character with their letter), each with the line it is on.
+    let sizes: Vec<f32> = p
+        .lines
+        .iter()
+        .map(|l| {
+            let mut s: Vec<f32> = l.glyphs.iter().map(|g| g.size).collect();
+            s.sort_by(f32::total_cmp);
+            s.get(s.len() / 2).copied().unwrap_or(l.size)
+        })
+        .collect();
     let line_of = |g: &Glyph| {
         let c = [(g.rect[0] + g.rect[2]) / 2.0, (g.rect[1] + g.rect[3]) / 2.0];
         // The line it is in, else the nearest within a third of an em: a
@@ -54,7 +63,11 @@ fn inline_pieces(p: &layout::Para, raw: &[Glyph], fonts: &[FontInfo]) -> Vec<sup
         (0..p.lines.len())
             .filter(|&k| {
                 let l = &p.lines[k];
-                c[0] >= l.rect[0] - 0.5 && c[0] <= l.rect[2] + 0.5 && off(l) <= 0.3 * l.size
+                // Within a third of its letters' size: of its largest, a
+                // system's brace 150 points high, the lines of prose 45
+                // points over and under it were taken for its own, and the
+                // system's picture took them in.
+                c[0] >= l.rect[0] - 0.5 && c[0] <= l.rect[2] + 0.5 && off(l) <= 0.3 * sizes[k]
             })
             .min_by(|&a, &b| off(&p.lines[a]).total_cmp(&off(&p.lines[b])).then(mid(&p.lines[a]).total_cmp(&mid(&p.lines[b]))))
     };
@@ -114,7 +127,13 @@ fn inline_pieces(p: &layout::Para, raw: &[Glyph], fonts: &[FontInfo]) -> Vec<sup
             _ => merged.push((r, k)),
         }
     }
-    merged.into_iter().map(|(r, k)| super::artwork::Inline { rect: [r[0] - 0.3, r[1] - 0.3, r[2] + 0.3, r[3] + 0.3], baseline: p.lines[k].baseline }).collect()
+    // A line a system's braces make taller than two lines and a half: one
+    // picture of its own, as pieces its signs and braces between them were
+    // text at the braces' size.
+    let tall: Vec<usize> = (0..p.lines.len()).filter(|&k| p.lines[k].rect[3] - p.lines[k].rect[1] > 2.5 * p.size && merged.iter().any(|m| m.1 == k)).collect();
+    let mut out: Vec<(Rect, usize)> = merged.into_iter().filter(|m| !tall.contains(&m.1)).collect();
+    out.extend(tall.iter().map(|&k| (p.lines[k].rect, k)));
+    out.into_iter().map(|(r, k)| super::artwork::Inline { rect: [r[0] - 0.3, r[1] - 0.3, r[2] + 0.3, r[3] + 0.3], baseline: p.lines[k].baseline }).collect()
 }
 
 fn name(font:&FontInfo)->String {font.name.rsplit('+').next().unwrap_or(&font.name).to_ascii_lowercase()}
@@ -478,6 +497,25 @@ mod tests {
         assert!(!prepared.blocks.is_empty());
         assert!(prepared.blocks.iter().all(|r|r[0]>=300.0),"{:?}",prepared.blocks);
         assert_eq!(p.glyphs.iter().filter(|g|g.rect[0]<300.0).count(),14*41);
+    }
+
+    #[test]
+    fn a_system_s_tall_brace_does_not_take_the_prose_over_it_into_its_picture() {
+        // A line made 170 points high by a brace 150 points in size, with
+        // two words of the system one over another; prose 40 points over it.
+        let mut brace=text("{",57.0,586.0,1);
+        brace[0].size=150.0;brace[0].rect=[57.0,452.0,62.0,622.0];
+        let mut glyphs=brace;
+        glyphs.extend(text("ab",100.0,510.0,0));
+        glyphs.extend(text("cd",100.0,530.0,0));
+        let line=layout::Line {rect:[57.0,452.0,110.0,622.0],baseline:586.0,size:150.0,glyphs:glyphs.clone()};
+        let p=layout::Para {rect:line.rect,lines:vec![line],column:[50.0,500.0],align:layout::Align::Left,marker:None,size:10.0};
+        let mut raw=glyphs;
+        raw.extend(text("Prose over the system",60.0,418.0,0));
+        let pieces=inline_pieces(&p,&raw,&fonts());
+        // The line, taller than two and a half lines: one picture of it.
+        assert_eq!(pieces.len(),1,"{:?}",pieces.iter().map(|a|a.rect).collect::<Vec<_>>());
+        assert!(pieces[0].rect[1]>440.0 && pieces[0].rect[0]<=57.0 && pieces[0].rect[3]>=622.0,"{:?}",pieces[0].rect);
     }
 
     #[test]

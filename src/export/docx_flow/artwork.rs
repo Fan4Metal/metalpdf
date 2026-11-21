@@ -721,12 +721,19 @@ pub(super) fn prepare(original: &PageContent, fonts: &[crate::export::FontInfo],
             .map_or(r[1] + 0.3 * size, |l| l.baseline);
         inline.push(Inline { rect: [bounds[0] - 0.5, bounds[1] - 0.5, bounds[2] + 0.5, bounds[3] + 0.5], baseline });
     }
-    // Overlapping fraction pieces are one inline object.
+    // Overlapping fraction pieces are one inline object; not pieces of two
+    // lines whose boxes meet by a point (a limit at a line's end over a
+    // system's braces in the next: one picture over both lines of prose).
+    let one = |a: &Inline, b: &Inline| {
+        let shared = a.rect[3].min(b.rect[3]) - a.rect[1].max(b.rect[1]);
+        let lower = (a.rect[3] - a.rect[1]).min(b.rect[3] - b.rect[1]);
+        touches(a.rect, b.rect, 0.2) && ((a.baseline - b.baseline).abs() < 1.0 || shared > 0.25 * lower)
+    };
     let mut i = 0;
     while i < inline.len() {
         let mut j = i + 1;
         while j < inline.len() {
-            if touches(inline[i].rect, inline[j].rect, 0.2) {
+            if one(&inline[i], &inline[j]) {
                 inline[i].rect = layout::union(inline[i].rect, inline[j].rect);
                 inline.remove(j);
             } else {
