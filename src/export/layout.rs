@@ -609,6 +609,14 @@ fn join(mut pieces: Vec<Line>) -> Vec<Line> {
             if gap > (if artwork_marker { 2.5 } else if contents { 4.0 } else { 1.0 }) * s || !dots && apart_in_size(line.size, piece.size, gap) && (line.baseline - piece.baseline).abs() < 0.12 * s {
                 continue;
             }
+            // A bullet drawn as a picture starts its item, it does not go on
+            // from the text before it further than an em: the next column's
+            // list bullet joined the line of the column before, and the two
+            // columns were read across.
+            let starts_with_bullet = right.glyphs.iter().min_by(|a, b| a.rect[0].total_cmp(&b.rect[0])).is_some_and(|g| g.source < -1 && g.rect[2] - g.rect[0] <= 0.7 * s && g.rect[3] - g.rect[1] <= 0.7 * s);
+            if starts_with_bullet && gap > 1.0 * s {
+                continue;
+            }
             let mut glyphs = piece.glyphs;
             if gap > 0.22 * s {
                 if goes_after {
@@ -2067,6 +2075,20 @@ mod tests {
         g.extend(text("Another one starts after a gap", 50.0, 150.0));
         let items = analyse(&page(g), OPTS);
         assert_eq!(texts(&items), ["The first line of a paragraph goes on here and ends short.", "Another one starts after a gap"]);
+    }
+
+    #[test]
+    fn a_bullet_picture_starts_its_column_s_line_not_the_one_before() {
+        // A line of the left column ending at 224, the right column's
+        // bullet (a picture) at 239 and its item's text at 253.
+        let mut g = text("Obobshchennaya forma opisaniya komponen", 30.0, 148.0);
+        let end = g.last().unwrap().rect[2];
+        let at = end + 15.0;
+        g.push(Glyph { source: -2, ch: '\u{f0000}', rect: [at, 144.0, at + 4.0, 148.0], x: at, baseline: 148.0, size: 10.0, font: 0, color: [0; 3], space_before: false, invisible: false });
+        g.extend(text("Imya komponenta", at + 14.0, 148.5));
+        let found = lines(g);
+        assert_eq!(found.len(), 2, "{:?}", found.iter().map(|l| (l.rect, l.text())).collect::<Vec<_>>());
+        assert!(found.iter().any(|l| l.rect[0] == at && l.glyphs.len() > 1));
     }
 
     #[test]
