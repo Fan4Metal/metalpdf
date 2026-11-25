@@ -275,14 +275,17 @@ pub fn show(ui: &mut Ui, info: &ToolbarInfo, field: &mut PageField, resolve: imp
         let export = ui.add_enabled_ui(enabled, |ui| super::icon_button(ui, Icon::Export, false, export_tip)).inner;
         egui::Popup::menu(&export).show(|ui| {
             ui.set_min_width(280.0);
-            if ui.button(tr!("Word — preserve layout (.docx)…", "Word — сохранение верстки (.docx)…"))
-                .on_hover_text(tr!("Keeps the positions of text and artwork. Text is edited line by line.", "Сохраняет положение текста и графики. Текст редактируется построчно.")).clicked() {
-                actions.push(ToolbarAction::Export(Format::Docx));
-                ui.close();
-            }
             if ui.button(tr!("Word — ordinary paragraphs (.docx)…", "Word — обычные абзацы (.docx)…"))
                 .on_hover_text(tr!("Editable paragraphs, columns and tables. Lines and pages may wrap differently from the PDF.", "Редактируемые абзацы, колонки и таблицы. Переносы строк и страниц могут отличаться от PDF.")).clicked() {
                 actions.push(ToolbarAction::Export(Format::DocxFlow));
+                ui.close();
+            }
+            if ui.button(tr!("Word — preserve layout (.docx)…", "Word — сохранение верстки (.docx)…"))
+                .on_hover_text(tr!(
+                    "Keeps the positions of text and artwork. Text is edited line by line.\n\nEach line keeps its width from the PDF (Word's Fit Text, underlined in turquoise). In Word, Ctrl+Space removes it from the selected text, and with it resets the font, its size and colour to those of the document's main text.",
+                    "Сохраняет положение текста и графики. Текст редактируется построчно.\n\nКаждая строка сохраняет ширину из PDF («Вписать текст» в Word, бирюзовое подчёркивание). Ctrl+Пробел в Word снимает её с выделенного текста, а вместе с ней сбрасывает шрифт, его размер и цвет к основному тексту документа."
+                )).clicked() {
+                actions.push(ToolbarAction::Export(Format::Docx));
                 ui.close();
             }
             if ui.button(tr!("PowerPoint presentation (.pptx)…", "Презентация PowerPoint (.pptx)…")).clicked() {
