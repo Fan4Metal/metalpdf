@@ -124,8 +124,14 @@ fn git(args: &[&str]) -> Option<String> {
 /// starts and says what is missing.
 fn copy_pdfium(out_dir: &std::path::Path) {
     let source = std::path::Path::new("vendor/pdfium/pdfium.dll");
-    // OUT_DIR is target\<profile>\build\<package>-<hash>\out.
-    let Some(target) = out_dir.ancestors().nth(3) else { return };
+    // OUT_DIR is target\<profile>\build\<package>-<hash>\out, and from Cargo
+    // 1.100's build-dir layout target\<profile>\build\<package>\<hash>\out:
+    // the exe's folder is the one above the nearest `build`. Counting three
+    // levels up put the DLL into target\release\build with Cargo 1.100.
+    let Some(target) = out_dir.ancestors().find(|p| p.file_name().is_some_and(|n| n == "build")).and_then(|p| p.parent()) else {
+        println!("cargo:warning=cannot tell the exe's folder from OUT_DIR {}", out_dir.display());
+        return;
+    };
     let Ok(meta) = source.metadata() else {
         // A missing path would rerun the script at every build (drawing
         // the icon again); the folder tells when the DLL arrives.
