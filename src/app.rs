@@ -2149,8 +2149,7 @@ impl App {
                     let active = self.windows[cur].active;
                     let mut rects = Vec::with_capacity(tab_count);
                     let mut drag_start = None;
-                    for i in 0..tab_count {
-                        let tab = &self.windows[cur].tabs[i];
+                    for (i, tab) in self.windows[cur].tabs.iter().enumerate() {
                         // The tooltip: the document's title, if it has one, over its path.
                         let path_text = match tab.doc.title.as_deref() {
                             Some(t) if !t.trim().is_empty() => format!("{}\n{}", t.trim(), tab.path.display()),

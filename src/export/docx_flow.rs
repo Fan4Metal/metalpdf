@@ -833,8 +833,7 @@ impl Writer {
         let mut body = String::new();
         let mut last_sect = String::new();
         for &(from, to, margins) in &runs {
-            for pi in from..to {
-                let pg = &self.pages[pi];
+            for pg in &self.pages[from..to] {
                 let size = pg.size;
                 let mut margins = pg.extent.map_or(margins, |e| [e[0].clamp(18.0, 0.3 * size[0]), e[1].clamp(18.0, 0.3 * size[1]), (size[0]-e[2]).clamp(18.0, 0.3*size[0]), BOTTOM_MARGIN]);
                 let grid_carrier = !pg.decorations.is_empty() && pg.segments.first().is_some_and(|s| s.table.is_some() || s.blocks.first().is_some_and(|(_, b)| matches!(b, Block::Grid(_))));
